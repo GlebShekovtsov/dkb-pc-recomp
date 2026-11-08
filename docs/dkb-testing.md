@@ -11,12 +11,16 @@ executable, not the generated code, not the shader cache.
   rising about 6 MB per minute, peak 15.3 GiB; sessions over an hour are untested), so close other large programs first.
 - A GPU with Vulkan 1.3 and a current driver.
 - About 15 GB free for the build (the packed RomFS is about 9 GB), besides the space your dump takes.
-- *Donkey Kong Bananza* base version 1.0.0, dumped from your own Switch 2: the ExeFS (`main`, `sdk`, `main.npdm`) and
-  the RomFS as a folder. Update 458752 is also supported (the installer picks the target by the `main` hash and, for it only, keeps the generated C and objects in `temp/gen` and `temp/build` so a second install does not relift or recompile; the base install removes them). This project does not explain how to dump the game.
-  If your dump is a single `.nup` file (the container Eglantine and Eden load), `tools/extract_nup.py` writes both
-  folders from its base package: `python tools\extract_nup.py <game>.nup --list` shows the packages, and
-  `python tools\extract_nup.py <game>.nup --out build\extracted\dkb100-dump` writes `exefs` and `romfs` there, checking
-  every file's SHA-256. Pass those two folders to the commands in the README.
+- *Donkey Kong Bananza* base version 1.0.0 or update 3.2.0 (title version 458752), dumped from your own Switch 2: the
+  ExeFS (`main`, `sdk`, `main.npdm`) and the RomFS as a folder, or a `.nup` file. The installer picks the target by the
+  `main` hash and, for 3.2.0 only, keeps the generated C and objects in `temp/gen` and `temp/build` so a second install
+  does not relift or recompile; the base install removes them. This project does not explain how to dump the game.
+  A `.nup` file (the container Eglantine and Eden load) goes straight to the installer (`--nup`, [installer.md](installer.md)).
+  For a build by hand, `tools/extract_nup.py` writes the folders: `python tools\extract_nup.py <game>.nup --list` shows
+  the packages, and `python tools\extract_nup.py <game>.nup --select latest --out build\extracted\dkb-dump` writes
+  `exefs` and `romfs` there as Eglantine runs them (the newest update's ExeFS, the base RomFS with the update's laid
+  over it; `--select base` for 1.0.0), checking every file's SHA-256. Pass those two folders to the commands in the
+  README, with `dkb458752` and `recomp\patches-dkb458752.txt` in place of `dkb100` for 3.2.0.
 
 On Apple Silicon macOS the same steps work ([building.md](building.md), "macOS"): the commands use
 `.venv/bin/python`, the executable is `build/dkb100/dkb`, and the renderer is MoltenVK. The game boots to the mode

@@ -1,6 +1,6 @@
 First release of DKB Recomp: a static recompilation of *Donkey Kong Bananza* (Switch 2) to a native Windows exe with a Vulkan renderer. It is experimental (0.x): it plays the tutorial, its cutscene and the first stage on recent NVIDIA cards, and it is not finished.
 
-**The packages hold no game data, and no release ever will.** You build the game on your own PC from your own dump of the **base 1.0.0** game. The 458752 update and the DLC are not supported.
+**The packages hold no game data, and no release ever will.** You build the game on your own PC from your own dump of **1.0.0 or the 3.2.0 update**, given as a `.nup` file or as ExeFS and RomFS folders. Other updates and the DLC are not supported.
 
 ## Download
 

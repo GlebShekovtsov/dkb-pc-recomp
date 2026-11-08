@@ -1,4 +1,5 @@
-"""Command line: python -m installer --exefs DIR --romfs DIR --dest DIR [--package DIR] (Bananza base 1.0.0)
+"""Command line: python -m installer --nup FILE --dest DIR [--package DIR] (Bananza 1.0.0 or 3.2.0)
+              or python -m installer --exefs DIR --romfs DIR --dest DIR [--package DIR]
 
 Legacy TotK: --base FILE --update FILE --keys FILE --lang CODE --dest DIR [--root DIR]
                                      [--temp DIR] [--verify]
@@ -55,8 +56,12 @@ def main(argv=None):
     ap.add_argument('--temp', type=Path, help='temp folder (default: temp/ of the release on Windows, .setup-temp in '
                                               'the install folder on Linux, build/install-temp in a repository)')
     ap.add_argument('--verify', action='store_true', help='hash every kept file, also those this release made')
-    ap.add_argument('--game', choices=('bananza', 'totk'), help='game profile (folder inputs select Bananza)')
-    ap.add_argument('--exefs', type=Path, help='Bananza base 1.0.0 ExeFS folder')
+    ap.add_argument('--game', choices=('bananza', 'totk'), help='game profile (.nup and folder inputs select Bananza)')
+    ap.add_argument('--nup', type=Path, help='Bananza .nup container (base 1.0.0, with or without update 3.2.0)')
+    ap.add_argument('--nup-package', choices=('latest', 'base'),
+                    help='what to install from the .nup: latest (default: the newest update, as Eglantine runs it) '
+                         'or base (1.0.0 even when the container also holds an update)')
+    ap.add_argument('--exefs', type=Path, help='Bananza 1.0.0 or 3.2.0 ExeFS folder')
     ap.add_argument('--romfs', type=Path, help='Bananza loose RomFS folder or packed romfs.bin/index.json folder')
     ap.add_argument('--package', type=Path, help='tool package with llvm/, runtime/deps/ and bin/')
     ap.add_argument('--toolchain', type=Path, help='LLVM toolchain directory')
@@ -68,10 +73,10 @@ def main(argv=None):
     ap.add_argument('--jobs', type=int, default=6, help='Bananza worker limit (default 6)')
     args = ap.parse_args(argv)
 
-    if (args.game == 'bananza' or args.exefs or args.romfs or
+    if (args.game == 'bananza' or args.nup or args.nup_package or args.exefs or args.romfs or
             (args.game is None and (args.dest / 'dkb-install.json').is_file())):
         if args.game == 'totk':
-            ap.error('--exefs/--romfs require --game bananza')
+            ap.error('--nup/--exefs/--romfs require --game bananza')
         from .bananza import main as bananza_main
         return bananza_main(args)
 

@@ -64,7 +64,7 @@ class App:
         self.run_args = run_args or {}   # extra CLI options for tests: temp, verify
         self.log_entries = []            # events and raw lines of the run, rendered by render_log
         self.bound = []                  # (widget, option, id, params) retranslated on a language switch
-        self.vars = {n: tk.StringVar() for n in ('base', 'update', 'keys', 'exefs', 'romfs', 'package', 'dest')}
+        self.vars = {n: tk.StringVar() for n in ('base', 'update', 'keys', 'nup', 'exefs', 'romfs', 'package', 'dest')}
         self.vars['lang'] = tk.StringVar()
         self.lang_code = default_game_language(ui_lang)
         self.screen = None
@@ -202,8 +202,8 @@ class App:
         rows = (('base', 'ui.base', 'ui.pick_game'), ('update', 'ui.update', 'ui.pick_update'),
                 ('keys', 'ui.keys', 'ui.pick_keys'))
         if self.game == 'bananza':
-            rows = (('exefs', 'dkb.ui.exefs', 'dkb.ui.pick_exefs'), ('romfs', 'dkb.ui.romfs', 'dkb.ui.pick_romfs'),
-                    ('package', 'dkb.ui.package', 'dkb.ui.pick_package'))
+            rows = (('nup', 'dkb.ui.nup', 'dkb.ui.pick_nup'), ('exefs', 'dkb.ui.exefs', 'dkb.ui.pick_exefs'),
+                    ('romfs', 'dkb.ui.romfs', 'dkb.ui.pick_romfs'), ('package', 'dkb.ui.package', 'dkb.ui.pick_package'))
         self.form_rows = {}
         for i, (name, label_id, pick_id) in enumerate(rows):
             lab = self.label(grid, label_id)
@@ -284,7 +284,8 @@ class App:
     def form(self):
         return Form(base=self.vars['base'].get(), update=self.vars['update'].get(), keys=self.vars['keys'].get(),
                     lang=self.selected_lang(), dest=self.vars['dest'].get(), game=self.game,
-                    exefs=self.vars['exefs'].get(), romfs=self.vars['romfs'].get(), package=self.vars['package'].get())
+                    exefs=self.vars['exefs'].get(), romfs=self.vars['romfs'].get(), package=self.vars['package'].get(),
+                    nup=self.vars['nup'].get())
 
     def refresh_form(self):
         form = self.form()
@@ -299,6 +300,12 @@ class App:
         self.fit()
 
     def pick_file(self, name, pick_id):
+        if self.game == 'bananza' and name == 'nup':
+            types = [(self.cat('dkb.ui.type_nup'), '*.nup'), (self.cat('ui.type_all'), '*.*')]
+            path = filedialog.askopenfilename(title=self.cat(pick_id), filetypes=types)
+            if path:
+                self.vars[name].set(os.path.normpath(path))
+            return
         if self.game == 'bananza':
             path = filedialog.askdirectory(title=self.cat(pick_id), mustexist=True)
             if path:

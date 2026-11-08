@@ -42,8 +42,8 @@ static const char *network_symbols[] = {
 void rt_log(const char *fmt, ...) { (void)fmt; }
 void rt_fatal(const char *fmt, ...) { (void)fmt; abort(); }
 const int rt_game_version;
-const char rt_game_target[] = "dkb458752";   // the update has no validated release name
-const char rt_game_display[] = "1.0.0+458752";
+const char rt_game_target[] = "dkb458752";   // update 3.2.0: GetDisplayVersion still reports "unknown" for it
+const char rt_game_display[] = "3.2.0";
 const char *cfg_value(const char *key) { (void)key; abort(); }
 const char *cfg_get(const char *key) { (void)key; abort(); }
 const char *plat_user_locale(void) { abort(); }
