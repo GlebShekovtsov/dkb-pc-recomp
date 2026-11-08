@@ -782,11 +782,18 @@ def main(options):
         ensure_plain(dest / STATE)
         previous = statefile.load(dest, STATE)
         options = copy.copy(options)
-        if previous and previous.get('game') in TARGETS and previous.get('destination') == str(dest):
+        found = layouts.find(options.root)
+        # A resume reuses the tool paths the last run recorded, for a checkout run with its own --toolchain or --deps.
+        # A release carries its tools, and the folder of the release that made the install may be gone or older (a new
+        # release unpacked elsewhere): its own tools win there, and so does an explicit --package. A recorded path
+        # that no longer exists is never reused.
+        if (previous and previous.get('game') in TARGETS and previous.get('destination') == str(dest) and found.dev and
+                options.package is None):
             for name, value in previous.get('build_tools', {}).items():
-                if name in ('toolchain', 'deps', 'ninja', 'dll_dir', 'dotnet') and getattr(options, name) is None and value:
+                if (name in ('toolchain', 'deps', 'ninja', 'dll_dir', 'dotnet') and getattr(options, name) is None and
+                        value and Path(value).exists()):
                     setattr(options, name, Path(value))
-        layout = tool_layout(layouts.find(options.root), options)
+        layout = tool_layout(found, options)
         raw_base = (options.temp or layout.temp or dest.parent / '.dkb-setup').absolute()
         ensure_plain(raw_base)
         base = raw_base.resolve()
