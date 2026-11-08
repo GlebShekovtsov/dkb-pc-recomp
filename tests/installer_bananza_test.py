@@ -652,6 +652,38 @@ assert '--full-build' in a and pathlib.Path(a[a.index('--expected')+1]).name=='e
                          ['dkb.need_nup'])
         self.assertEqual(Form(game='bananza', dest=str(self.dest)).problems(), ['dkb.need_exefs', 'dkb.need_romfs'])
 
+    def stale_tools(self):
+        """The receipt of a finished install, with tool paths of a release folder that was deleted since."""
+        self.assertEqual(self.run_install()[0], 0)
+        state = b.statefile.load(self.dest, b.STATE)
+        gone = Path(self.work.name) / 'deleted release'
+        state['build_tools'] = {'toolchain': str(gone / 'llvm'), 'deps': str(gone / 'runtime/deps'),
+                                'ninja': str(gone / 'bin' / ('ninja' + b.EXE)), 'dll_dir': str(gone / 'bin'),
+                                'dotnet': str(gone / 'dotnet')}
+        b.statefile.save(self.dest, state, b.STATE)
+        self.calls.clear()
+        self.options.exefs = self.options.romfs = None
+
+    def test_tool_paths_of_a_deleted_release_are_not_reused(self):
+        self.stale_tools()
+        self.options.package = None
+        code, events = self.run_install()
+        self.assertEqual(code, 0, events)
+        self.assertEqual(b.statefile.load(self.dest, b.STATE)['build_tools']['ninja'], str(self.layout.ninja.resolve()))
+
+    def test_a_release_uses_its_own_tools_over_recorded_ones(self):
+        self.stale_tools()
+        other = Path(self.work.name) / 'older release'
+        shutil.copytree(self.root / 'bin', other / 'bin')
+        state = b.statefile.load(self.dest, b.STATE)
+        state['build_tools']['ninja'] = str(other / 'bin' / ('ninja' + b.EXE))
+        b.statefile.save(self.dest, state, b.STATE)
+        self.options.package = None
+        self.layout = b.replace(self.layout, dev=False)
+        code, events = self.run_install()
+        self.assertEqual(code, 0, events)
+        self.assertEqual(b.statefile.load(self.dest, b.STATE)['build_tools']['ninja'], str(self.layout.ninja.resolve()))
+
     def test_renamed_translator_is_installed_under_runtime_name(self):
         renamed = self.root/'bin/custom-translator.exe'
         shutil.copyfile(self.options.translator, renamed)
