@@ -291,15 +291,6 @@ static int ensure_init(void) {
         P.dyn_wmask = e3.extendedDynamicState3ColorWriteMask && PROC(set_wmask, "vkCmdSetColorWriteMaskEXT");
         P.dyn_a2c = e3.extendedDynamicState3AlphaToCoverageEnable && PROC(set_a2c, "vkCmdSetAlphaToCoverageEnableEXT");
     }
-    // TOTK_VK_DYN_CLAMP=0 bakes depth clamp into each pipeline instead of setting it as dynamic state: RADV's dynamic
-    // depth clamp made TotK's vertices explode, and yuzu turns it off there (docs/maxwell.md 1.6). For comparisons.
-    {
-        const char *dc = cfg_get("TOTK_VK_DYN_CLAMP");
-        if (P.dyn_clamp && dc && !strcmp(dc, "0")) {
-            P.dyn_clamp = 0;
-            rt_log("vk_pipeline: dynamic depth clamp off (TOTK_VK_DYN_CLAMP=0)");
-        }
-    }
     // TOTK_VK_DYN_A2C=0/1 forces dynamic alpha to coverage off or on. Default off on AMD's Windows driver branch for
     // RDNA 2 and older (vk_caps.amd_sc), which applies alpha to coverage while the dynamic state says off: on an RX 590
     // (24.9.1) TotK, which never turns it on, drew Link and the NPCs with depth but no colour (black silhouettes) and
@@ -1231,10 +1222,11 @@ static uint32_t *spirv_fmz(const uint32_t *w, uint64_t n, int vertex_only, uint6
 }
 
 // Fragment stages whose screen-position varyings are rebuilt from gl_FragCoord (spirv_screen_uv.c): Bananza's map
-// mask, which AMD's near-plane clipping turns into long wedges (Eglantine too). Named by NVN 2 stage origin and by the
-// FNV-1a 64 of the translated SPIR-V (the "fs" hash of a TOTK_DUMP passes.txt): the origin is known only for stages
-// lowered in this run (gfx_shader.c note_origin), and the pipelines the boot prewarm builds from the shader cache have
-// none. TOTK_FIX_SCREEN_UV=0 leaves them as the game wrote them.
+// mask, which AMD's near-plane clipping turns into long wedges (Eglantine too). Named by NVN 2 stage origin, which
+// gfx_shader.c keeps per input id in shader-cache/nvn2-origins.bin, so the pipelines the boot prewarm builds from the
+// cache know it once the stage was lowered in any run (--translate-shaders or play). Until then the FNV-1a 64 of the
+// translated SPIR-V (the "fs" hash of a TOTK_DUMP passes.txt) names it on the hosts where it was measured.
+// TOTK_FIX_SCREEN_UV=0 leaves them as the game wrote them.
 static int screen_uv_stage(const GfxShader *src) {
     static const uint64_t origins[] = {0x81f30a4006e64d83ull};
     static const uint64_t spirv_hashes[] = {0x544677ae4ec509beull};   // RX 9070 XT, translator d1b11706005e89ab

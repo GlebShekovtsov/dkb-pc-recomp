@@ -108,7 +108,7 @@ struct GfxShader {
     unsigned geometry_position;                         // v2: Position input/output, malformed interface bit 4
     Nvn2C0Layout c0;                                       // NVN 2 compute parameter-block layout, when has_c0
     int has_c0;
-    uint64_t origin;                                       // NVN 2 stage origin, set by note_origin (DKB_DUMP_SPV naming only)
+    uint64_t origin;                                       // NVN 2 stage origin: note_origin, or nvn2-origins.bin by iid
     uint64_t spirv_fnv;                                    // FNV-1a 64 of spirv; 0 until gfx_shader_spirv_fnv fills it
 };
 
@@ -1780,12 +1780,93 @@ static const GfxShader *get_one(const Req *r, int stage, const uint8_t *control,
 
 // DKB_DUMP_SPV only: remember which NVN 2 stage a shader was got for (the lowered code pointer is only known here).
 // Idempotent aligned 64-bit store; a shader shared by two stages keeps the last one.
-static void note_origin(const GfxShader *s, const uint8_t *code) {
-    static int on = -1;
-    if (on < 0) on = cfg_get("TOTK_DUMP_SPV") != NULL;
-    if (on && s) ((GfxShader *)s)->origin = nvn2_origin(code);
+// NVN 2 stage origins by input id, kept in <shader cache>/nvn2-origins.bin (40-byte records: the input id, then the
+// origin, little-endian). An origin is known only where the stage's code was lowered in this process (nvn2_origin),
+// and the boot prewarm builds pipelines from the shader cache without lowering anything: the table carries each
+// origin, met while the game or --translate-shaders lowered the stage, over to later runs. Fixes keyed by origin
+// (vk_pipeline.c screen_uv_stage) need it there. An input id does not depend on the translator, so a new translator
+// keeps the table. A torn last record (a crash while appending) is ignored.
+#define ORIGIN_SLOTS (1u << 16)
+typedef struct { uint8_t iid[32]; uint64_t origin; } OriginRec;
+static OriginRec *origin_tab;            // open addressing on the first 4 bytes of the id; origin 0 marks a free slot
+static uint32_t origin_used;
+static PlatMutex origin_lock = PLAT_MUTEX_INIT;
+static PlatOnce origin_once = PLAT_ONCE_INIT;
+
+static OriginRec *origin_slot(const uint8_t iid[32]) {
+    uint32_t h;
+    memcpy(&h, iid, 4);
+    for (uint32_t i = 0; i < ORIGIN_SLOTS; i++) {
+        OriginRec *r = &origin_tab[(h + i) & (ORIGIN_SLOTS - 1)];
+        if (!r->origin || !memcmp(r->iid, iid, 32)) return r;
+    }
+    return NULL;
 }
-uint64_t gfx_shader_origin(const GfxShader *s) { return s->origin; }
+
+static void origin_put(const uint8_t iid[32], uint64_t origin) {   // under origin_lock
+    OriginRec *r = origin_tab && origin_used < ORIGIN_SLOTS * 3 / 4 ? origin_slot(iid) : NULL;
+    if (!r) return;
+    if (!r->origin) origin_used++;
+    memcpy(r->iid, iid, 32), r->origin = origin;
+}
+
+static void origin_load(void *param) {
+    (void)param;
+    paths();
+    origin_tab = calloc(ORIGIN_SLOTS, sizeof *origin_tab);
+    if (!origin_tab || !cache_dir[0]) return;
+    char path[PATH_CAP + 32];
+    snprintf(path, sizeof path, "%s/nvn2-origins.bin", cache_dir);
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    OriginRec r;
+    uint8_t buf[40];
+    while (fread(buf, 1, sizeof buf, f) == sizeof buf) {
+        memcpy(r.iid, buf, 32), memcpy(&r.origin, buf + 32, 8);
+        if (r.origin) origin_put(r.iid, r.origin);
+    }
+    fclose(f);
+}
+
+static void note_origin(const GfxShader *s, const uint8_t *code) {
+    if (!s || __atomic_load_n(&s->origin, __ATOMIC_RELAXED)) return;
+    uint64_t o = nvn2_origin(code);
+    if (!o) return;
+    __atomic_store_n(&((GfxShader *)s)->origin, o, __ATOMIC_RELAXED);
+    plat_once(&origin_once, origin_load, NULL);
+    plat_mutex_lock(&origin_lock);
+    OriginRec *r = origin_tab ? origin_slot(s->iid) : NULL;
+    if (r && r->origin != o && cache_dir[0]) {
+        static FILE *append;   // kept open: --translate-shaders notes thousands of stages from several threads
+        static int tried;
+        origin_put(s->iid, o);
+        if (!tried) {
+            tried = 1;
+            char path[PATH_CAP + 32];
+            snprintf(path, sizeof path, "%s/nvn2-origins.bin", cache_dir);
+            append = fopen(path, "ab");
+        }
+        if (append) {
+            uint8_t buf[40];
+            memcpy(buf, s->iid, 32), memcpy(buf + 32, &o, 8);
+            fwrite(buf, 1, sizeof buf, append);
+            fflush(append);
+        }
+    }
+    plat_mutex_unlock(&origin_lock);
+}
+
+uint64_t gfx_shader_origin(const GfxShader *s) {
+    uint64_t o = __atomic_load_n(&s->origin, __ATOMIC_RELAXED);
+    if (o) return o;
+    plat_once(&origin_once, origin_load, NULL);
+    plat_mutex_lock(&origin_lock);
+    OriginRec *r = origin_tab ? origin_slot(s->iid) : NULL;
+    o = r ? r->origin : 0;
+    plat_mutex_unlock(&origin_lock);
+    if (o) __atomic_store_n(&((GfxShader *)s)->origin, o, __ATOMIC_RELAXED);
+    return o;
+}
 
 const GfxShader *gfx_shader_get(int stage, const uint8_t *control, const uint8_t *code, uint64_t code_size,
                                 const uint8_t *c1, const GfxShaderAnswers *a) {

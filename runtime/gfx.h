@@ -113,7 +113,8 @@ typedef struct {
     uint8_t separate;           // TEX: texture and sampler handles are separate
 } GfxShaderRes;
 typedef struct { uint8_t type, comps, packed, scalar_bits; } GfxShaderIo;   // scalar_bits: actual numeric SPIR-V width, 0 unknown
-uint64_t gfx_shader_origin(const GfxShader *s);             // NVN 2 stage origin (nvn2_origin of its code) noted at get time, or 0
+uint64_t gfx_shader_origin(const GfxShader *s);             // NVN 2 stage origin: noted when its code was lowered, in this run or
+                                                            // an earlier one (shader-cache/nvn2-origins.bin), or 0
 int gfx_shader_stage(const GfxShader *s);                  // GFX_STAGE_VS, GFX_STAGE_GS, GFX_STAGE_FS or GFX_STAGE_CS
 typedef struct {
     uint32_t version, input, input_vertices, output, invocations, max_output_vertices, passthrough;
