@@ -1230,17 +1230,23 @@ static uint32_t *spirv_fmz(const uint32_t *w, uint64_t n, int vertex_only, uint6
     return o;
 }
 
-// Fragment stages whose screen-position varyings are rebuilt from gl_FragCoord (spirv_screen_uv.c), by NVN 2 stage
-// origin: Bananza's map mask, which AMD's near-plane clipping turns into long wedges (Eglantine too).
-// TOTK_FIX_SCREEN_UV=0 leaves them as the game wrote them.
+// Fragment stages whose screen-position varyings are rebuilt from gl_FragCoord (spirv_screen_uv.c): Bananza's map
+// mask, which AMD's near-plane clipping turns into long wedges (Eglantine too). Named by NVN 2 stage origin and by the
+// FNV-1a 64 of the translated SPIR-V (the "fs" hash of a TOTK_DUMP passes.txt): the origin is known only for stages
+// lowered in this run (gfx_shader.c note_origin), and the pipelines the boot prewarm builds from the shader cache have
+// none. TOTK_FIX_SCREEN_UV=0 leaves them as the game wrote them.
 static int screen_uv_stage(const GfxShader *src) {
     static const uint64_t origins[] = {0x81f30a4006e64d83ull};
+    static const uint64_t spirv_hashes[] = {0x544677ae4ec509beull};   // RX 9070 XT, translator d1b11706005e89ab
     static int on = -1;
     if (on < 0) on = cfg_bool("TOTK_FIX_SCREEN_UV");
     if (!on || !src || gfx_shader_stage(src) != GFX_STAGE_FS) return 0;
     uint64_t o = gfx_shader_origin(src);
     for (size_t i = 0; i < sizeof origins / sizeof *origins; i++)
         if (o == origins[i]) return 1;
+    uint64_t h = gfx_shader_spirv_fnv(src);
+    for (size_t i = 0; i < sizeof spirv_hashes / sizeof *spirv_hashes; i++)
+        if (h == spirv_hashes[i]) return 1;
     return 0;
 }
 
@@ -1253,7 +1259,8 @@ static VkShaderModule make_module_linked(const GfxShader *src, const uint32_t *w
         uint64_t suv_n = 0;
         suv = spirv_screen_uv(w, words, &suv_n);
         if (suv) w = suv, words = suv_n;
-        rt_log("vk: fs %016llx: screen position %s", (unsigned long long)gfx_shader_origin(src),
+        rt_log("vk: fs %016llx (origin %016llx): screen position %s", (unsigned long long)gfx_shader_spirv_fnv(src),
+               (unsigned long long)gfx_shader_origin(src),
                suv ? "rebuilt from gl_FragCoord" : "left as written (unexpected layout)");
     }
     static int fmz_mode = -1;   // 0 off, 1 vertex stage only, 2 every stage
