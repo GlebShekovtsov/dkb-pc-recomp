@@ -163,6 +163,7 @@ static void handle(const SDL_Event *e) {
     menu_sdl_event(e);
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN:
+        if (e->key.scancode == SDL_SCANCODE_F9 && !e->key.repeat) vk_dump_request();   // TOTK_DUMP=key
         if (e->key.scancode == SDL_SCANCODE_F11 && !e->key.repeat) {
             set_fullscreen(!is_fullscreen());
             cfg_set("TOTK_FULLSCREEN", is_fullscreen() ? "1" : "0");   // the menu shows it; the next start keeps it
