@@ -916,9 +916,21 @@ out:
 
 static void make_dirs(char *path) { plat_file_mkdir_p(path); }
 
+// TOTK_DUMP=key: no frame is dumped until F9 is pressed in the game window; then the frame after next is (one dump per
+// run). A frame number is hard to hit on a screen the player opens by hand, such as Bananza's map.
+static int dump_on_key;
+
+void vk_dump_request(void) {
+    if (!dump_on_key || finished) return;
+    uint64_t want = frame_now() + 2, none = UINT64_MAX;
+    if (__atomic_compare_exchange_n(&dump_frame, &none, want, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        rt_log("vk_dump: F9: frame %llu goes to %s", (unsigned long long)want, dir);
+}
+
 void vk_dump_init(void) {
     const char *e = cfg_get("TOTK_DUMP");
-    if (!e || !*e || !(dump_frame = strtoull(e, NULL, 10))) return;
+    if (e && !strcmp(e, "key")) dump_on_key = 1, dump_frame = UINT64_MAX;
+    else if (!e || !*e || !(dump_frame = strtoull(e, NULL, 10))) return;
     const char *lf = cfg_get("TOTK_DUMP_LOG");
     if (lf && *lf) log_from = strtoull(lf, NULL, 10);
     const char *sr = cfg_get("TOTK_DUMP_SKIP_RUNS");
@@ -954,7 +966,8 @@ void vk_dump_init(void) {
         if (bd_size && !(bufs_f = fopen(path, "w"))) bd_size = 0;
     }
     vk_dump_armed = 1;
-    rt_log("vk_dump: frame %llu goes to %s", (unsigned long long)dump_frame, dir);
+    if (dump_on_key) rt_log("vk_dump: press F9 in the game window to dump the frame after next to %s", dir);
+    else rt_log("vk_dump: frame %llu goes to %s", (unsigned long long)dump_frame, dir);
 }
 
 void vk_dump_present(uint64_t frame) {
