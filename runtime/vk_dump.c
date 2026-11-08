@@ -568,6 +568,16 @@ static uint64_t handle_of(const VkExec *ex, int st, int slot, int img) {
 // attribute as raw words and as floats. A mesh drawn with long sheets across the screen shows here whether its
 // positions arrive as data the transform can turn into those sheets.
 static void describe_vertex(Str *b, const VkExec *ex, const VkPipeState *s, const VkPipeInfo *info) {
+    // The fixed-function state the entry was drawn with, in NVN's numbering (nvn.h): which faces are culled, the depth
+    // test and clamp, and target 0's blend and channel mask. A mask built by drawing a volume the camera sits in
+    // depends on all of them.
+    sp(b, "    state: cull %u front %u fill %u | depth test %u write %u func %u clamp %u | stencil %u | blend en %#x "
+          "t0 src %u/%u dst %u/%u eq %u/%u mask %#x | prim %u restart %u\n",
+       (unsigned)s->poly.cull, (unsigned)s->poly.front, (unsigned)s->poly.mode, (unsigned)s->ds.dt, (unsigned)s->ds.dw,
+       (unsigned)s->ds.df, (unsigned)s->depth_clamp, (unsigned)s->ds.st, (unsigned)s->color.blend_en,
+       (unsigned)s->blend[0].src_rgb, (unsigned)s->blend[0].src_a, (unsigned)s->blend[0].dst_rgb,
+       (unsigned)s->blend[0].dst_a, (unsigned)s->blend[0].eq_rgb, (unsigned)s->blend[0].eq_a, s->chmask.mask & 15,
+       (unsigned)s->prim, (unsigned)s->prim_restart);
     for (int i = 0; i < 16; i++) {
         if (!(info->vs_inputs >> i & 1)) continue;
         va_st a;
@@ -720,6 +730,14 @@ void vk_dump_draw(VkExec *ex, const VkPipeState *s, VkPipeline p, const VkPipeIn
     if (!active()) goto out;
     pass_draws++;
     uint64_t th = bindings_hash(ex, info);
+    // Cull, depth and blend are dynamic state on most hosts, so draws with one pipeline can still differ in them: they
+    // get entries of their own.
+    uint64_t fixed[4] = {0};
+    memcpy(&fixed[0], &s->poly, sizeof s->poly);
+    memcpy(&fixed[1], &s->ds, sizeof s->ds);
+    memcpy(&fixed[2], &s->blend[0], sizeof s->blend[0]);
+    fixed[3] = (uint64_t)s->depth_clamp << 32 | s->color.blend_en << 8 | (s->chmask.mask & 15);
+    for (int k = 0; k < 4; k++) th = (th ^ fixed[k]) * 0x100000001b3ull;
     for (int i = 0; i < nents; i++)
         if (ents[i].p == p && ents[i].th == th) {
             ents[i].draws++;
