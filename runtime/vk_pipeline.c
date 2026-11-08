@@ -51,6 +51,7 @@
 #include "host.h"
 #include "nvn_hmap.h"
 #include "platform/platform.h"
+#include "spirv_nan_guard.h"
 #include "spirv_screen_uv.h"
 #include "tex.h"
 
@@ -1242,6 +1243,37 @@ static int screen_uv_stage(const GfxShader *src) {
     return 0;
 }
 
+// DKB_NAN_GUARD (spirv_nan_guard.c): fragment stages store 0 instead of NaN to their float colour outputs (default,
+// or "zero"), a colour named by the stage instead ("mark"), or what they computed ("0"). One NaN texel in the scene
+// colour is spread by the bloom into a glowing band crossed by black lines, and the console shows none. In "mark"
+// mode the colour comes from the stage's SPIR-V hash (the "fs" hash of a TOTK_DUMP passes.txt): each of r, g, b is
+// 0, 1, 4 or 16 from two bits of the hash, so a frame dump's _tm image tells the stage apart from the others drawn in
+// the pass, and the log lists each stage with its colour.
+static uint32_t *nan_guard(const GfxShader *src, const uint32_t *w, uint64_t words, uint64_t *out_n) {
+    static int mode = -1;   // 0 off, 1 zero, 2 mark
+    if (mode < 0) {
+        const char *e = cfg_get("TOTK_NAN_GUARD");
+        mode = !e || !strcmp(e, "1") || !strcmp(e, "zero") ? 1 : !strcmp(e, "0") || !*e ? 0 : !strcmp(e, "mark") ? 2 : 1;
+        if (e && *e && strcmp(e, "0") && strcmp(e, "1") && strcmp(e, "zero") && strcmp(e, "mark"))
+            rt_log("vk: DKB_NAN_GUARD=%s ignored, using zero (use 0, zero or mark)", e);
+        rt_log("vk: NaN guard on fragment outputs: %s", mode == 2 ? "mark" : mode ? "zero" : "off");
+    }
+    if (!mode || !src || gfx_shader_stage(src) != GFX_STAGE_FS) return NULL;
+    static const float level[4] = {0.0f, 1.0f, 4.0f, 16.0f};
+    uint64_t h = mode == 2 ? gfx_shader_spirv_fnv(src) : 0;
+    float marker[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    if (mode == 2) {
+        marker[0] = level[h & 3], marker[1] = level[h >> 2 & 3], marker[2] = level[h >> 4 & 3], marker[3] = 1.0f;
+        if (!(h & 0x3f)) marker[0] = 16.0f;   // never black: black is what the zero mode writes
+    }
+    unsigned stores = 0;
+    uint32_t *o = spirv_nan_guard(w, words, marker, out_n, &stores);
+    if (o && mode == 2)
+        rt_log("vk: fs %016llx: NaN marked as %g %g %g (%u stores)", (unsigned long long)h, marker[0], marker[1],
+               marker[2], stores);
+    return o;
+}
+
 static VkShaderModule make_module_linked(const GfxShader *src, const uint32_t *w, uint64_t words, int geometry_chain) {
     uint64_t fixed_n = 0;
     uint32_t *fixed = geometry_chain ? spirv_fixup_linked(w, words, &fixed_n, 1) : spirv_fixup(w, words, &fixed_n);
@@ -1291,6 +1323,8 @@ static VkShaderModule make_module_linked(const GfxShader *src, const uint32_t *w
             rt_log("vk: FMZ rewrite %016llx mul=%u fma=%u", (unsigned long long)h, nm, nf);
         }
     }
+    uint32_t *nan = nan_guard(src, w, words, &words);
+    if (nan) w = nan;
     spv_dump(w, words, src);
     uint64_t ov_n = 0;
     uint32_t *ov = spv_override(w, words, &ov_n);
@@ -1299,6 +1333,7 @@ static VkShaderModule make_module_linked(const GfxShader *src, const uint32_t *w
     VkShaderModule m = VK_NULL_HANDLE;
     VkResult r = vkCreateShaderModule(P.device, &ci, NULL, &m);
     free(ov);
+    free(nan);
     free(fmz);
     free(suv);
     free(fixed);
