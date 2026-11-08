@@ -284,6 +284,11 @@ static void job_done(void *arg) {
     Job *j = arg;
     VmaAllocator vma = vk_ctx()->vma;
     vmaInvalidateAllocation(vma, j->alloc, 0, VK_WHOLE_SIZE);
+    if (strstr(j->name, "_blocks")) {   // the BC blocks as the GPU holds them, for decoding offline (the PNG is scaled)
+        char path[600];
+        snprintf(path, sizeof path, "%s/%s.bin", dir, j->name);
+        plat_file_write_atomic(path, j->map, (size_t)j->bytes);
+    }
     write_images(j);
     vmaDestroyBuffer(vma, j->buf, j->alloc);
     plat_add64(&inflight, -(int64_t)j->bytes);
@@ -500,7 +505,7 @@ static uint64_t shader_hash(const GfxShader *s) {
 typedef struct { VkPipeline p; uint64_t th; int draws; char *text; } Ent;
 static Ent ents[MAX_ENTS];
 static int nents, ents_over, pass_draws;
-typedef struct { VkImage image; VkFormat format; uint32_t w, h, d; int id, is2d; } Lut;
+typedef struct { VkImage image; VkFormat format; uint32_t w, h, d, levels; int id, is2d; } Lut;
 static Lut luts[MAX_LUTS];          // queued for the next pass end or dispatch
 static int nluts;
 static VkImage luts_done[MAX_LUTS];
@@ -512,8 +517,8 @@ static void queue_lut(const VkTexImage *t, int id) {
         if (luts_done[i] == t->image) return;
     if (nluts_done == MAX_LUTS) return;
     luts_done[nluts_done++] = t->image;
-    luts[nluts++] = (Lut){t->image, t->format, t->width, t->height, t->type == VK_IMAGE_TYPE_3D ? t->depth : 1, id,
-                          t->type != VK_IMAGE_TYPE_3D};
+    luts[nluts++] = (Lut){t->image, t->format, t->width, t->height, t->type == VK_IMAGE_TYPE_3D ? t->depth : 1,
+                          t->levels ? t->levels : 1, id, t->type != VK_IMAGE_TYPE_3D};
 }
 
 // The uncompressed format of a BC format's block size, UNDEFINED for other formats: a BC texture is dumped as its raw
@@ -532,6 +537,16 @@ static void flush_luts(VkExec *ex, int n) {
         const Lut *l = &luts[i];
         char name[160];
         VkFormat bf = block_format(l->format);
+        // A BC texture asked for by TOTK_DUMP_TEX: every mip level's blocks (raw .bin and PNG), since a level the
+        // upload laid out wrong shows only where the GPU samples that level.
+        for (uint32_t lv = 1; bf && l->is2d && lv < l->levels; lv++) {
+            uint32_t w = l->w >> lv ? l->w >> lv : 1, h = l->h >> lv ? l->h >> lv : 1;
+            snprintf(name, sizeof name, "pass_%04d_tex%d_%ux%ux1_%d_%s_mip%u_blocks", n, l->id, w, h, (int)l->format,
+                     fmt_name(l->format, fn), lv);
+            const char *why = copy_region(ex, l->image, bf, VK_IMAGE_ASPECT_COLOR_BIT, lv, 0, 0, (VkExtent3D){w, h, 1},
+                                          (w + 3) / 4, (h + 3) / 4, 1, name);
+            fprintf(passes_f, "  2D tex %d level %u -> %s.png%s%s\n", l->id, lv, name, why ? " skipped: " : "", why ? why : "");
+        }
         snprintf(name, sizeof name, "pass_%04d_%s%d_%ux%ux%u_%d_%s%s", n, l->is2d ? "tex" : "lut", l->id, l->w, l->h, l->d,
                  (int)l->format, fmt_name(l->format, fn), bf ? "_blocks" : "");
         const char *why = bf ? copy_region(ex, l->image, bf, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 0,
