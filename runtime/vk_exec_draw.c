@@ -52,7 +52,7 @@ static void c0_lay_set(VkExec *ex, const GfxShader *cs) {
     c0_push = ex->push[1];
 }
 
-enum { W_PROGRAM, W_SHADER, W_PIPELINE, W_NO_VS, W_INDEX, W_UB, W_BIND, W_SSBO_ALIGN, W_SSBO_SLOT, W_RESTART, W_INDIRECT, W_FAULT_SKIP, W_FAULT_SKIP2, W_SKIP_VS, W_SKIP_FS, W_RESET, W_GEOMETRY, W_COUNT };
+enum { W_PROGRAM, W_SHADER, W_PIPELINE, W_NO_VS, W_INDEX, W_UB, W_BIND, W_SSBO_ALIGN, W_SSBO_SLOT, W_RESTART, W_INDIRECT, W_FAULT_SKIP, W_FAULT_SKIP2, W_SKIP_VS, W_SKIP_FS, W_RESET, W_GEOMETRY, W_LIST_RESTART, W_COUNT };
 
 static void warn_once(int key, const char *fmt, ...) {
     static volatile int32_t seen[W_COUNT];
@@ -2743,17 +2743,33 @@ static void op_draw(VkExec *ex, const p_draw *d) {
     note_work(ex, 0, (uint64_t)n * inst);
 }
 
-// Primitive restart of an indexed draw. NVN restarts strips wherever an index equals the SetPrimitiveRestart value;
-// Vulkan restarts only at the all-ones value of the bound index type, and only strips and fans without
-// primitiveTopologyListRestart. Byte indices are widened to 16 bits, so their restart value becomes 0xffff
-// (op_draw_idx). Without restart the 0xffff entries of TOTK's terrain and cliff strips fetch vertex 65535 + base and
-// the triangles around them drop out.
+// Primitive restart of an indexed draw. NVN restarts wherever an index equals the SetPrimitiveRestart value, on lists
+// as well as strips (docs/maxwell.md 5.2): in a list the restart drops the unfinished primitive and the next one starts
+// after it. Vulkan restarts only at the all-ones value of the bound index type, and on lists only with
+// primitiveTopologyListRestart, which Eglantine enables too (renderer_vulkan/vk_rasterizer.cpp,
+// IsPrimitiveRestartSupported). Byte indices are widened to 16 bits, so their restart value becomes 0xffff
+// (op_draw_idx). Without restart the all-ones entries are fetched as vertices: 65535 + base, or about 4 billion with
+// 32-bit indices, out of the vertex buffer. In TotK's terrain and cliff strips the triangles around them dropped out;
+// in a list every later triangle also loses its alignment, and the out-of-range vertices give long sheets across the
+// screen (Bananza's map). TOTK_LIST_RESTART=0 keeps lists without restart, as before.
+static int list_restart(void) {
+    static int on = -1;
+    if (on < 0) on = vk_ctx()->has_list_restart && cfg_bool("TOTK_LIST_RESTART");
+    return on;
+}
+
 static int restart_for(const VkExec *ex, int prim, int itype) {
     if (!ex->prim_restart.enable) return 0;
     switch (vk_pipeline_topology(prim)) {
     case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP: case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP: case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN:
     case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY: case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY: break;
-    default: return 0;   // lists: a restart index only drops the unfinished primitive
+    case VK_PRIMITIVE_TOPOLOGY_POINT_LIST: case VK_PRIMITIVE_TOPOLOGY_LINE_LIST: case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:
+    case VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY: case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY:
+        if (list_restart()) break;
+        warn_once(W_LIST_RESTART, "primitive restart on a list draw is not replayed (no primitiveTopologyListRestart, or "
+                  "TOTK_LIST_RESTART=0): its restart indices are fetched as vertices");
+        return 0;
+    default: return 0;   // patch lists: no restart
     }
     static const uint32_t all_ones[3] = {0xffu, 0xffffu, 0xffffffffu};
     if (ex->prim_restart.index == all_ones[itype]) return 1;
