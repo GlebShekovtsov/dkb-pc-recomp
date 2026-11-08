@@ -5,7 +5,8 @@ Goal: *Donkey Kong Bananza* (Switch 2, base 1.0.0) playable on Windows as a stat
 own cartridge and the build runs on their machine.
 
 Known input: the base ExeFS has `main` (md5 f68752f5…, the binary GRAnimated/DKBananza's BinSync uses) and `sdk`, no
-`subsdk0`. Update 458752 has another layout and is not supported yet. The RomFS is about 19 GB.
+`subsdk0`. Update 3.2.0 (title version 458752) is a second target with its own ExeFS hashes and patch table
+(`dkb458752`). The RomFS is about 19 GB.
 
 Each phase ends in a milestone someone else can check. The order follows the critical path.
 
@@ -109,7 +110,7 @@ Issues: [#2] [#3] [#4] [#5] [#7] [#8] [#9]; the whole list is the
 - NVN 2 calls the host accepts and does not record yet (`runtime/nvn_api_nvn2.c`, `NVN2_NOT_RECORDED`): mesh shaders,
   variable-rate shading, DLSS, ray tracing, device command buffers. Each one is logged on its first call. None of
   them has mattered so far.
-- Game update 458752.
+- Play-testing of update 3.2.0 (`dkb458752`) as far as the base has been played.
 - Linux, which TotK Recomp's toolchain supports.
 
 ## Alongside

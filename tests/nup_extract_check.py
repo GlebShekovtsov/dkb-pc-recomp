@@ -8,6 +8,7 @@ Run: python tests/nup_extract_check.py
 import contextlib
 import hashlib
 import io
+import json
 import shutil
 import struct
 import subprocess
@@ -191,6 +192,83 @@ class ExtractNupTest(unittest.TestCase):
         self.assertEqual((out_dir / 'romfs' / 'sub' / 'deep' / 'c.bin').read_bytes(), b'c' * 33)
         self.assertEqual((out_dir / 'exefs' / 'main').read_bytes(), MAIN[::-1])
         self.assertEqual((out_dir / 'exefs' / 'main.npdm').read_bytes(), NPDM)
+
+    def test_select_latest_takes_the_update_exefs_whole_and_merges_romfs(self):
+        update = {'exefs': {'main': MAIN[::-1], 'sdk': b'update sdk'},
+                  'romfs': {'a.bin': b'updated', 'sub': {'deep': {'d.bin': b'dee'}}, 'new.bin': b'new'}}
+        path = self.write(build([(0, 0x0100AAAA, 0, BASE_TREES), (1, 0x0100AAAA, 65536, update),
+                                 (1, 0x0100AAAA, 131072, update | {'exefs': {'main': b'newest'}})]))
+        out_dir = self.dir / 'out'
+        code, _, err = run(path, '--out', out_dir, '--select', 'latest', '--quiet')
+        self.assertEqual(code, 0, err)
+        # As Eglantine's loader: the ExeFS of the newest update alone, no base file left in it.
+        self.assertEqual(sorted(p.name for p in (out_dir / 'exefs').iterdir()), ['main'])
+        self.assertEqual((out_dir / 'exefs' / 'main').read_bytes(), b'newest')
+        self.assertEqual((out_dir / 'romfs' / 'a.bin').read_bytes(), b'updated')
+        self.assertEqual((out_dir / 'romfs' / 'sub' / 'b.bin').read_bytes(), b'beta')
+        self.assertEqual((out_dir / 'romfs' / 'sub' / 'deep' / 'c.bin').read_bytes(), b'c' * 33)
+        self.assertEqual((out_dir / 'romfs' / 'sub' / 'deep' / 'd.bin').read_bytes(), b'dee')
+        with contextlib.closing(nup.Nup(path)) as parsed:
+            plan = nup.install_plan(parsed, 'latest')
+            self.assertEqual((plan['exefs'].index, [p.index for p in plan['romfs']], plan['update'].index), (2, [0, 2], 2))
+            plan = nup.install_plan(parsed, 'base')
+            self.assertEqual((plan['exefs'].index, [p.index for p in plan['romfs']], plan['update']), (0, [0], None))
+
+    def test_select_latest_without_update_exefs_keeps_the_base_program(self):
+        path = self.write(build([(0, 0x0100AAAA, 0, BASE_TREES), (1, 0x0100AAAA, 65536, {'romfs': {'a.bin': b'u'}})]))
+        with contextlib.closing(nup.Nup(path)) as parsed:
+            plan = nup.install_plan(parsed, 'latest')
+            self.assertEqual((plan['exefs'].index, [p.index for p in plan['romfs']]), (0, [0, 1]))
+
+    def test_standalone_update(self):
+        path = self.write(build([(1, 0x0100AAAA, 65536, UPDATE_TREES)]))
+        with contextlib.closing(nup.Nup(path)) as parsed:
+            plan = nup.install_plan(parsed, 'latest')
+            self.assertEqual((plan['exefs'].index, [p.index for p in plan['romfs']]), (0, [0]))
+            with self.assertRaisesRegex(nup.NupError, 'no base package'):
+                nup.install_plan(parsed, 'base')
+
+    def test_file_and_folder_clash_is_refused(self):
+        path = self.write(build([(0, 0x0100AAAA, 0, BASE_TREES), (1, 0x0100AAAA, 65536, {'romfs': {'sub': b'file'}})]))
+        code, _, err = run(path, '--out', self.dir / 'out', '--select', 'latest', '--quiet')
+        self.assertEqual(code, 1)
+        self.assertIn('file in one package and a folder in another', err)
+
+    def test_pack_matches_dkb_pack_romfs_of_the_loose_tree(self):
+        trees = dict(BASE_TREES, romfs=dict(BASE_TREES['romfs'], **{'.listing': b'dump tool list', 'Z.bin': b'zz',
+                                                                     'é.bin': b'accent'}))
+        path = self.write(build([(0, 0x0100AAAA, 0, trees), (1, 0x0100AAAA, 65536, UPDATE_TREES)], use_zstd=True))
+        loose, packed, reference = self.dir / 'loose', self.dir / 'packed', self.dir / 'reference'
+        code, _, err = run(path, '--out', loose, '--select', 'latest', '--quiet')
+        self.assertEqual(code, 0, err)
+        code, out, err = run(path, '--out', packed, '--select', 'latest', '--pack', '--quiet')
+        self.assertEqual(code, 0, err)
+        subprocess.run([sys.executable, str(ROOT / 'tools' / 'dkb_pack_romfs.py'), '--dir', str(loose / 'romfs'),
+                        '--out', str(reference)], check=True, capture_output=True)
+        self.assertEqual((packed / 'romfs' / 'romfs.bin').read_bytes(), (reference / 'romfs.bin').read_bytes())
+        ours = json.loads((packed / 'romfs' / 'index.json').read_text(encoding='utf-8'))
+        theirs = json.loads((reference / 'index.json').read_text(encoding='utf-8'))
+        self.assertEqual({k: v for k, v in ours.items() if k != 'source'}, {k: v for k, v in theirs.items() if k != 'source'})
+        self.assertNotIn('.listing', [e['path'] for e in ours['files']])
+        self.assertFalse((packed / 'romfs' / 'romfs.bin.part').exists())
+        self.assertEqual(sorted(p.name for p in (packed / 'exefs').iterdir()), ['main'])
+
+    def test_pack_of_a_corrupt_file_leaves_no_image(self):
+        data = bytearray(build([(0, 0x0100AAAA, 0, {'exefs': {'main': MAIN}, 'romfs': {'x.bin': b'x' * 64}})]))
+        data[-5] ^= 0xFF   # inside the last extent (x.bin, 64 bytes: no padding after it)
+        path = self.write(bytes(data))
+        code, _, err = run(path, '--out', self.dir / 'out', '--select', 'base', '--only', 'romfs', '--pack', '--quiet')
+        self.assertEqual(code, 1)
+        self.assertIn('SHA-256', err)
+        self.assertEqual(list((self.dir / 'out' / 'romfs').iterdir()), [])
+
+    def test_pack_needs_select_and_check_zstd_needs_no_file(self):
+        path = self.write(build([(0, 0x0100AAAA, 0, BASE_TREES)]))
+        with self.assertRaises(SystemExit):
+            with contextlib.redirect_stderr(io.StringIO()):
+                nup.main([str(path), '--out', str(self.dir / 'out'), '--pack'])
+        code, out, _ = run('--check-zstd')
+        self.assertEqual(code, 0 if nup.Zstd().kind else 1)
 
     def test_package_by_index_and_only(self):
         path = self.write(build([(0, 0x0100AAAA, 0, BASE_TREES), (1, 0x0100AAAA, 65536, UPDATE_TREES)]))

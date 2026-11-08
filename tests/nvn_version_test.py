@@ -25,15 +25,15 @@ class TargetGlue(unittest.TestCase):
         self.assertIn('const char rt_game_display[] = "1.2.1";', self.glue('v121'))
         self.assertIn('const char rt_game_display[] = "1.4.3";', self.glue('v143'))
         self.assertIn('const char rt_game_display[] = "1.0.0";', self.glue('dkb100', {'display_version': '1.0.0'}))
-        self.assertIn('const char rt_game_display[] = "1.0.0+458752";',
-                      self.glue('dkb458752', {'display_version': '1.0.0', 'title_version': 458752}))
+        self.assertIn('const char rt_game_display[] = "3.2.0";',
+                      self.glue('dkb458752', {'display_version': '3.2.0', 'title_version': 458752}))
         # No metadata: the target name, never a decimal 0.0.0 that reads like a release.
         self.assertIn('const char rt_game_display[] = "dkb100";', self.glue('dkb100'))
 
     def test_shipped_update_metadata_names_the_update(self):
         expected = json.loads((ROOT / 'tools/data/expected-dkb458752.json').read_text(encoding='utf-8'))
-        self.assertIn('const char rt_game_display[] = "1.0.0+458752";',
-                      self.glue('dkb458752', expected))
+        self.assertEqual((expected['display_version'], expected['title_version']), ('3.2.0', 458752))
+        self.assertIn('const char rt_game_display[] = "3.2.0";', self.glue('dkb458752', expected))
 
 
 def main():

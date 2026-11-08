@@ -1,7 +1,7 @@
 {
-  "_comment": "Donkey Kong Bananza update title version 458752 ExeFS. Hashes only; no game data. The update's own release version is unverified, so display_version is the base release it applies to and the settings menu appends title_version to it.",
+  "_comment": "Donkey Kong Bananza 3.2.0 ExeFS (update title version 458752). Hashes only; no game data. Update title versions count releases in steps of 0x10000: 458752 is the seventh update, and 3.2.0 is the seventh release after 1.0.0 (1.1.0, 2.0.0, 2.0.1, 2.0.2, 3.0.0, 3.1.0, 3.2.0, released 2026-02-24 and the newest one).",
   "title_id": "040074A01BF12000",
-  "display_version": "1.0.0",
+  "display_version": "3.2.0",
   "title_version": 458752,
   "exefs_sha256": {
     "main": "6e8a88c70a17a1f6a005ec53d621d3c8d53dddc3a8c51f21a0caa5f4c329784e",

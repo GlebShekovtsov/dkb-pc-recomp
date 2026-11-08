@@ -19,6 +19,14 @@ from installer.events import Reporter
 from installer.guilogic import Catalog, Form
 from installer.layout import Layout
 
+sys.path.insert(0, str(ROOT / 'tests'))
+from nup_extract_check import build as build_nup  # noqa: E402  synthetic NUP containers
+
+
+def tree(folder):
+    """A folder as the {name: bytes | tree} that build_nup takes."""
+    return {p.name: tree(p) if p.is_dir() else p.read_bytes() for p in sorted(folder.iterdir())}
+
 
 class InstallerTest(unittest.TestCase):
     def setUp(self):
@@ -44,6 +52,7 @@ class InstallerTest(unittest.TestCase):
         (self.root / 'tools/build_xlate.py').write_text("def identity(): return 'synthetic-translator-id'\n")
         shutil.copyfile(ROOT / 'tools/dkb_pack_romfs.py', self.root / 'tools/dkb_pack_romfs.py')
         shutil.copyfile(ROOT / 'tools/dkb_shader_census.py', self.root / 'tools/dkb_shader_census.py')
+        shutil.copyfile(ROOT / 'tools/extract_nup.py', self.root / 'tools/extract_nup.py')
         (self.root / 'tools/romfs_index.py').write_text('# synthetic fixture')
         (self.root / 'recomp/gen.py').write_text('''
 import json, pathlib, sys
@@ -510,6 +519,138 @@ assert '--full-build' in a and pathlib.Path(a[a.index('--expected')+1]).name=='e
         self.assertEqual(self.run_install()[0], 1)
         self.assertFalse(self.dest.exists())
         self.assertFalse(self.temp.exists())
+
+    TITLE = 0x040074A01BF12000
+
+    def write_nup(self, update=None, name='game.nup'):
+        """A container of the fixture's base folders and, optionally, an update package {'exefs': ..., 'romfs': ...}."""
+        packages = [(0, self.TITLE, 0, {'exefs': tree(self.exefs), 'romfs': tree(self.romfs)})]
+        if update is not None:
+            packages.append((1, self.TITLE | 0x800, 458752, update))
+        path = Path(self.work.name) / name
+        path.write_bytes(build_nup(packages))
+        self.options.exefs = self.options.romfs = None
+        self.options.nup = path
+        return path
+
+    def loose_pack(self, folder):
+        out = Path(self.work.name) / 'reference pack'
+        shutil.rmtree(out, ignore_errors=True)
+        subprocess.run([sys.executable, str(ROOT/'tools/dkb_pack_romfs.py'), '--dir', str(folder), '--out', str(out)],
+                       check=True, capture_output=True)
+        return out
+
+    def test_nup_base_installs_the_same_data_as_its_folders(self):
+        path = self.write_nup()
+        code, events = self.run_install()
+        self.assertEqual(code, 0, events)
+        state = b.statefile.load(self.dest, b.STATE)
+        self.assertEqual((state['game'], state['sources']), ('dkb100', {'nup': str(path.resolve()), 'nup_package': 'latest'}))
+        reference = self.loose_pack(self.romfs)
+        self.assertEqual(b.sha256(self.dest/'romfs/romfs.bin'), b.sha256(reference/'romfs.bin'))
+        self.assertEqual(json.loads((self.dest/'romfs/index.json').read_text())['files'],
+                         json.loads((reference/'index.json').read_text())['files'])
+        for name in ('main', 'sdk', 'rtld', 'main.npdm'):
+            self.assertEqual((self.dest/'exefs'/name).read_bytes(), (self.exefs/name).read_bytes())
+        extract = next(c for step, c in self.calls if step == 'dkb_data')
+        self.assertIn('--pack', extract)
+        self.assertEqual(extract[extract.index('--select') + 1], 'latest')
+        # Resume with the destination alone reuses the recorded container.
+        self.calls.clear()
+        self.options.nup = None
+        self.assertEqual(self.run_install()[0], 0)
+        self.assertEqual(self.calls, [])
+
+    def test_nup_with_update_builds_the_update_with_merged_romfs(self):
+        base_romfs = tree(self.romfs)
+        base_exefs = tree(self.exefs)
+        self.update_fixture()   # the fixture's ExeFS folder now holds the update's files and hashes
+        update = {'exefs': tree(self.exefs), 'romfs': {'other.bin': b'patched by the update', 'added.bin': b'new'}}
+        for name, data in base_exefs.items():
+            (self.exefs / name).write_bytes(data)
+        self.write_nup(update)
+        code, events = self.run_install()
+        self.assertEqual(code, 0, events)
+        self.assertEqual(b.statefile.load(self.dest, b.STATE)['game'], 'dkb458752')
+        self.assertEqual((self.dest/'exefs/main').read_bytes(), update['exefs']['main'])
+        merged = Path(self.work.name) / 'merged romfs'
+        (merged / 'folder').mkdir(parents=True)
+        (merged / 'folder' / 'café.bin').write_bytes(base_romfs['folder']['café.bin'])
+        (merged / 'other.bin').write_bytes(b'patched by the update')
+        (merged / 'added.bin').write_bytes(b'new')
+        self.assertEqual(b.sha256(self.dest/'romfs/romfs.bin'), b.sha256(self.loose_pack(merged)/'romfs.bin'))
+
+    def test_nup_unsupported_update_is_refused_and_base_can_be_chosen(self):
+        update = {'exefs': {'main': b'a future update', 'main.npdm': b'npdm'}, 'romfs': {'other.bin': b'changed'}}
+        self.write_nup(update)
+        code, events = self.run_install()
+        self.assertEqual(code, 1)
+        error = next(e for e in events if e['type'] == 'error')
+        self.assertEqual((error['id'], error['params']['title_version']), ('dkb.nup_version', 458752))
+        self.assertFalse(self.dest.exists())
+        self.assertFalse(self.temp.exists())
+        self.options.nup_package = 'base'
+        code, events = self.run_install()
+        self.assertEqual(code, 0, events)
+        self.assertEqual(b.sha256(self.dest/'romfs/romfs.bin'), b.sha256(self.loose_pack(self.romfs)/'romfs.bin'))
+
+    def test_nup_with_mismatched_exefs_writes_nothing(self):
+        (self.exefs / 'sdk').write_bytes(b'another build')
+        self.write_nup()
+        code, events = self.run_install()
+        self.assertEqual(code, 1)
+        self.assertEqual(next(e['id'] for e in events if e['type'] == 'error'), 'dkb.exefs_invalid')
+        self.assertFalse(self.dest.exists())
+        self.assertFalse(self.temp.exists())
+
+    def test_nup_and_folders_together_and_bad_container_are_refused(self):
+        path = self.write_nup()
+        self.options.exefs = self.exefs
+        code, events = self.run_install()
+        self.assertEqual(next(e['id'] for e in events if e['type'] == 'error'), 'dkb.nup_and_folders')
+        self.options.exefs = None
+        path.write_bytes(b'PFS0' + bytes(0x200))
+        code, events = self.run_install()
+        self.assertEqual(next(e['id'] for e in events if e['type'] == 'error'), 'dkb.nup_invalid')
+        self.options.nup = path.with_name('missing.nup')
+        code, events = self.run_install()
+        self.assertEqual(next(e['id'] for e in events if e['type'] == 'error'), 'dkb.need_nup')
+        self.assertFalse(self.dest.exists())
+
+    def test_nup_inside_destination_is_refused(self):
+        self.dest.mkdir()
+        self.write_nup()
+        moved = self.dest / 'game.nup'
+        shutil.move(self.options.nup, moved)
+        self.options.nup = moved
+        code, events = self.run_install()
+        self.assertEqual(code, 1)
+        self.assertIn(next(e['id'] for e in events if e['type'] == 'error'), ('dkb.path_overlap', 'dkb.dest_unrelated'))
+
+    def test_corrupt_nup_file_stops_before_installing_data(self):
+        path = self.write_nup()
+        data = bytearray(path.read_bytes())
+        data[-20] ^= 0xFF   # inside a RomFS extent: the table of contents still checks out
+        path.write_bytes(bytes(data))
+        code, events = self.run_install()
+        self.assertEqual(code, 1)
+        error = next(e for e in events if e['type'] == 'error')
+        self.assertEqual((error['id'], error.get('step')), ('dkb.tool_failed', 'dkb_data'))
+        self.assertFalse((self.dest/'romfs/romfs.bin').exists())
+        self.assertFalse((self.dest/'exefs').exists())
+
+    def test_form_takes_a_nup_instead_of_folders(self):
+        path = self.write_nup()
+        form = Form(game='bananza', dest=str(self.dest), nup=str(path))
+        self.assertEqual(form.problems(), [])
+        command = form.command('python')
+        self.assertEqual(command[command.index('--nup') + 1], str(path))
+        self.assertNotIn('--exefs', command)
+        self.assertEqual(Form(game='bananza', dest=str(self.dest), nup=str(path), exefs=str(self.exefs)).problems(),
+                         ['dkb.nup_and_folders'])
+        self.assertEqual(Form(game='bananza', dest=str(self.dest), nup=str(path) + '.missing').problems(),
+                         ['dkb.need_nup'])
+        self.assertEqual(Form(game='bananza', dest=str(self.dest)).problems(), ['dkb.need_exefs', 'dkb.need_romfs'])
 
     def test_renamed_translator_is_installed_under_runtime_name(self):
         renamed = self.root/'bin/custom-translator.exe'

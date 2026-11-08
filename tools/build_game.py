@@ -176,18 +176,13 @@ DISPLAY_VERSIONS = {'v0': '1.0.0', 'v111': '1.1.1', 'v112': '1.1.2', 'v121': '1.
 def display_version(version, expected):
     """The game version the settings menu and --version name, from the identity the build was validated against.
 
-    TotK versions carry their display name in DISPLAY_VERSIONS. Donkey Kong Bananza's do not exist there, and the
-    update's own release version is unverified (tools/data/expected-dkb458752.json states only its title version), so
-    it reads as the base release plus the title version. With no metadata at all the target name is the only true
-    thing left to say: never 0.0.0, which is what the TotK numeric version decays to for this game."""
+    TotK versions carry their display name in DISPLAY_VERSIONS. Donkey Kong Bananza's come from the display_version
+    of tools/data/expected-<target>.json (1.0.0, and 3.2.0 for title version 458752). With no metadata at all the
+    target name is the only true thing left to say: never 0.0.0, which is what the TotK numeric version decays to for
+    this game."""
     if version in DISPLAY_VERSIONS:
         return DISPLAY_VERSIONS[version]
-    expected = expected or {}
-    base = expected.get('display_version')
-    if not base:
-        return version
-    title_version = expected.get('title_version')
-    return f'{base}+{title_version}' if title_version else base
+    return (expected or {}).get('display_version') or version
 
 GiB = 1 << 30
 # Peak commit of one compile, 1.2.1 at -O1 (2026-10-20): 120-180 MiB per ~3 MiB chunk, 568 MiB for main_table.c
@@ -315,7 +310,7 @@ def runtime_object(out, src):
 def module_glue(layout, linked, hashes, paths, version, expected=None):
     """C for build/<version>/modules.c: the layout table, the linked modules' function tables (dispatch.h), the
     expected ExeFS hashes, the game version and its display name, and the default game paths (host.h). expected is the
-    validated tools/data/expected-<version>.json, whose display_version and title_version name the build."""
+    validated tools/data/expected-<version>.json, whose display_version names the build."""
     out = [f'// Module glue written by tools/build_game.py; do not edit. {GENERATED_MARKER}',
            '#include "dispatch.h"', '#include "host.h"', '#include "layout.h"', '']
     for name, base, size in layout:
