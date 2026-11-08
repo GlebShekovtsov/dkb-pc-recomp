@@ -33,6 +33,7 @@ TARGETS = (GAME, 'dkb458752')   # 1.0.0 and 3.2.0 (title version 458752); tools/
 NUP_SELECT = ('latest', 'base')
 EXE = '.exe' if os.name == 'nt' else ''
 CHUNK = 8 << 20
+COMMIT_WARN_GIB = 24   # the game commits about 14 GB; README asks for 16 GB of RAM plus a large page file
 
 
 def sha256(path):
@@ -265,7 +266,8 @@ def preflight(layout, options, dest, temp, rep):
     if old is not None and (old.get('game') not in TARGETS or old.get('destination') != str(dest)):
         raise InstallError('dkb.dest_unrelated', path=str(dest))
     nup_arg = getattr(options, 'nup', None)
-    if nup_arg and (options.exefs or options.romfs):
+    # A package choice only means something for a .nup, so it counts as asking for one next to folders too.
+    if (nup_arg or getattr(options, 'nup_package', None)) and (options.exefs or options.romfs):
         raise InstallError('dkb.nup_and_folders')
     recorded = old['sources'] if old else {}
     if not nup_arg and not options.exefs and not options.romfs and recorded.get('nup'):
@@ -497,6 +499,9 @@ class Check(Step):
             raise InstallError('check.vulkan_missing')
         if not any(tuple(d['api'][:2]) >= (1, 3) for d in host['devices']):
             raise InstallError('check.vulkan_no_device')
+        commit = host.get('commit_limit_gib')   # Windows only; the game commits about 14 GB, so leave room for the system
+        if commit is not None and commit < COMMIT_WARN_GIB:
+            ctx.reporter.warning('warn.low_commit_limit', commit=f'{commit:.0f}', need=COMMIT_WARN_GIB)
 
 
 class Data(Step):

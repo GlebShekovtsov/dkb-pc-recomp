@@ -275,15 +275,58 @@ class CandidateTest(unittest.TestCase):
 
     def test_unsupported_widths_fail_before_scalarization(self):
         jobs = []
+        # The 16-bit store is admitted by design (see test_halfword_store_u16_* below). Everything else of a width
+        # other than B32/B64/B128 (8-bit loads and stores, 16-bit loads, unaligned 128-bit) still fails closed.
         for key, store, size in (('load8', False, 0), ('store8', True, 0),
-                                 ('load16', False, 2), ('store16', True, 2), ('unaligned128', False, 7)):
+                                 ('load16', False, 2), ('unaligned128', False, 7)):
             ops = original.instructions(True)
             for i, op in enumerate(ops):
                 if op >> 51 == (0xEED8000000000000 if store else 0xEED0000000000000) >> 51:
                     ops[i] = (op & ~(7 << 48)) | (size << 48)
             jobs.append(packet(key, encoded(ops), storage_candidates_version=1))
         replies = self.translate(jobs, valid=False)
-        self.assertTrue(all('naturally aligned B32/B64/B128 global' in x for x in replies))
+        self.assertTrue(all('naturally aligned B32/B64/B128' in x for x in replies), replies)
+
+    def test_halfword_store_u16_is_admitted_with_a_guarded_compare_exchange(self):
+        ops = original.instructions(True)
+        for i, op in enumerate(ops):
+            if op >> 51 == 0xEED8000000000000 >> 51:
+                ops[i] = (op & ~(7 << 48)) | (2 << 48)   # size field 2: LsSize2.U16
+        jobs = [packet('store16-ok', encoded(ops), storage_candidates_version=1)]
+        self.translate(jobs)   # reply 'ok <key>' and spirv-val --target-env vulkan1.3 passes
+        disasm = args.spirv_val.with_name(args.spirv_val.name.replace('spirv-val', 'spirv-dis'))
+        self.assertTrue(disasm.is_file(), f'spirv-dis is missing next to spirv-val: {disasm}')
+        dis = subprocess.run([str(disasm), str(args.out / (jobs[0]['key'] + '.spv'))],
+                             capture_output=True, text=True, timeout=30)
+        self.assertEqual(dis.returncode, 0, dis.stderr)
+        self.assertIn('OpAtomicCompareExchange', dis.stdout, 'a guarded halfword store must use a compare-exchange')
+
+    def _compare_exchange_sites(self, key):
+        disasm = args.spirv_val.with_name(args.spirv_val.name.replace('spirv-val', 'spirv-dis'))
+        dis = subprocess.run([str(disasm), str(args.out / (key + '.spv'))], capture_output=True, text=True, timeout=30)
+        self.assertEqual(dis.returncode, 0, dis.stderr)
+        return dis.stdout.count('OpAtomicCompareExchange')
+
+    def test_packed_half_red_translates_as_a_guarded_compare_exchange(self):
+        # RED.E.ADD.F16x2.FTZ.RN [R0], R6: RedSize (bits 20-22) = 4 (F16x2FtzRn), RedOp (23-25) = 0 (Add), data R6 (0-7).
+        ops = original.instructions(True)
+        load = ops.index(original.global_memory(False, 2, 0))
+        red = 0xEBF8000000000000 | original.PT | 6 | (4 << 20)
+        ops[load:load + 1] = [original.movi(6, 0x3c00), red]
+        job = packet('packed_half_red', encoded(ops), storage_candidates_version=1)
+        self.translate([job])   # reply 'ok <key>' and spirv-val --target-env vulkan1.3 passes
+        res = self.reflection('packed_half_red')
+        self.assertTrue(all(x['flags'] == 0x81 for x in res['sbufs']))
+        self.assertGreaterEqual(self._compare_exchange_sites('packed_half_red'), 1)
+
+    def test_crossing_word_halfword_store_has_both_compare_exchange_paths(self):
+        # The 16-bit store is guarded: a single-word compare-exchange and a two-word one for halfwords starting at byte 3.
+        ops = original.instructions(True)
+        for i, op in enumerate(ops):
+            if op >> 51 == 0xEED8000000000000 >> 51:
+                ops[i] = (op & ~(7 << 48)) | (2 << 48)   # size field 2: LsSize2.U16
+        self.translate([packet('crossing_store16', encoded(ops), storage_candidates_version=1)])
+        self.assertGreaterEqual(self._compare_exchange_sites('crossing_store16'), 3)
 
     def test_original_wide_register_values_and_canaries(self):
         for bits in (64, 128):

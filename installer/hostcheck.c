@@ -45,6 +45,11 @@ static int x86_64_v3(void) {
 
 int main(void) {
     printf("{\"x86_64_v3\": %s, ", x86_64_v3() ? "true" : "false");
+#ifdef _WIN32
+    // The commit limit (RAM plus page file): what all processes together can commit before allocations fail.
+    MEMORYSTATUSEX mem = {.dwLength = sizeof mem};
+    if (GlobalMemoryStatusEx(&mem)) printf("\"commit_limit_gib\": %.1f, ", (double)mem.ullTotalPageFile / (1ull << 30));
+#endif
     void *lib = open_lib();
     PFN_vkGetInstanceProcAddr gipa = lib ? (PFN_vkGetInstanceProcAddr)lib_sym(lib, "vkGetInstanceProcAddr") : NULL;
     if (!gipa) {

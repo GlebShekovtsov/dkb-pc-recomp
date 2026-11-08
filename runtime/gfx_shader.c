@@ -109,6 +109,7 @@ struct GfxShader {
     Nvn2C0Layout c0;                                       // NVN 2 compute parameter-block layout, when has_c0
     int has_c0;
     uint64_t origin;                                       // NVN 2 stage origin, set by note_origin (DKB_DUMP_SPV naming only)
+    uint64_t spirv_fnv;                                    // FNV-1a 64 of spirv; 0 until gfx_shader_spirv_fnv fills it
 };
 
 static PlatMutex cache_lock = PLAT_MUTEX_INIT;                  // memory cache
@@ -2379,6 +2380,19 @@ void gfx_shader_prewarm(const uint8_t (*iids)[32], size_t n, const GfxShader **o
 const uint32_t *gfx_shader_spirv(const GfxShader *s, uint64_t *words) {
     if (words) *words = s->words;
     return s->spirv;
+}
+
+// The SPIR-V never changes after the shader is made, so the hash is taken on the first call and kept with the shader.
+// Threads that race on the first call compute the same value; 0 marks "not taken yet" (a real hash of 0 is just taken
+// again each time).
+uint64_t gfx_shader_spirv_fnv(const GfxShader *s) {
+    uint64_t h = __atomic_load_n(&s->spirv_fnv, __ATOMIC_RELAXED);
+    if (h) return h;
+    h = 0xcbf29ce484222325ull;
+    const uint8_t *b = (const uint8_t *)s->spirv;
+    for (uint64_t i = 0; b && i < s->words * 4; i++) h = (h ^ b[i]) * 0x100000001b3ull;
+    __atomic_store_n(&((GfxShader *)s)->spirv_fnv, h, __ATOMIC_RELAXED);
+    return h;
 }
 
 int gfx_shader_stage(const GfxShader *s) { return s->stage; }

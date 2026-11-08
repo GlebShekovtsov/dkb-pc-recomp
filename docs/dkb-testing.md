@@ -86,6 +86,7 @@ Useful settings, as environment variables (`set NAME=value` in the same Command 
 | `TOTK_EXPERIMENTAL_GEOMETRY=1` | Replays draws with an ordinary geometry stage through it (#52). Off by default; other geometry draws are rejected once in the log. |
 | `TOTK_NATIVE_GS=0` (or `DKB_NATIVE_GS=0`) | Turns off the replay of the game's native passthrough geometry stages on the portable path. That replay draws the destructible terrain (#45) and is on by default; with it off the terrain is black. The varyings are inferred, not read from the hardware skip mask. |
 | `TOTK_REC_BATCH=N` (or `DKB_REC_BATCH=N`) | Publishes the Vulkan recorder ring's head every N packets (1..64) instead of after each one (#93), so the recorder thread's spin reads a cache line the producer rewrites less often. 0 (default) publishes after every packet. Waits and handoffs publish the rest. With large N the last packets are recorded inside the final drain while the submitting thread waits, so watch `drain_ms` in `TOTK_TRACE=perf`; start with 8. |
+| `TOTK_TEX_HASH=0` (or `DKB_TEX_HASH=0`) | Uploads a texture again on every check its storage pages cannot answer, as before (#116). Without a write watch (macOS), the default hashes the storage bytes before each upload and skips the next upload while the hash is unchanged. With `TOTK_TRACE=perf` the `texture re-uploads` line counts the uploads kept. The hash runs on any platform for a check the write watch cannot answer (on Windows when `GetWriteWatch` fails for a range, on Linux without the write-tracking descriptor); where the watch answers, nothing changes. |
 | `TOTK_POOL_FINI_WAIT=idle\|fence` (or `DKB_POOL_FINI_WAIT`) | What releasing a used memory pool waits for before the game gets the storage back. `idle` (default) idles the whole graphics queue; `fence` waits only for the newest finished submission on the timeline and does nothing when it is already done; it covers the work the game has synchronized on, not the parts already submitted for the submission still being recorded. A level change frees many pools one after another, and a `TOTK_PROFILE_SLOW` dump of a 1.6 s frame showed five guest threads in turn in the idle wait. With either value the log gets a `used pool ... released` line for each release that waited over 10 ms (the first 64). |
 | `TOTK_HOST_PROPS_CACHE=0` (or `DKB_HOST_PROPS_CACHE=0`) | Asks `vkGetMemoryHostPointerPropertiesEXT` for every imported memory pool instead of keeping the first answer for the others (the default). The first answer is assumed to hold for every guest pool (all are plain committed read/write memory); if `vkAllocateMemory` fails with the kept answer, the query is made for that pool and the import is tried once more. On NVIDIA the query took long for the big pools of a level change, with several guest threads in it in turn (1.8 s in a `TOTK_PROFILE_SLOW` dump). A query that takes over 10 ms is logged with the pool size (the first 16); a `vkAllocateMemory` import that takes over 10 ms is logged too (the first 32). |
 | `TOTK_POOL_LAZY=0` (or `DKB_POOL_LAZY=0`) | Imports every pool at once, as before. By default `nvnMemoryPoolInitialize` only records an imported (CPU-visible) memory pool, and the import of its guest pages into Vulkan waits for the first time the GPU resolves an address in it. On NVIDIA each import cost about 20 ms of driver time whatever the pool size, one at a time, and the guest threads waited in them (hundreds per level change); the `mem: of the N imported pools` census line shows how many pools the GPU ever used (26 of 408 at frame 600 in one run). The price moves to the replay thread: the thread that first resolves a pool for the GPU (replay, texture creation or a snapshot) imports it. It is the default now (it cut a scripted 72 s route from 3219 imports and 27 s in them to 901 and 1.2 s, and four stalls of 360 to 950 ms to one of 993 ms). Shadow storage always imports at once. The census line also counts the pools imported on first use. |
@@ -102,6 +103,28 @@ The settings keep TotK Recomp's `TOTK_` names, so its fixes apply without a rena
 
 Command-line options: `--seconds S` stops the run after S seconds of game time, and `--shot frame.png` with it saves
 that frame. A shot is for your own debugging; do not post it if it shows game content.
+
+## Add-on content (untested in game)
+
+Nothing in the game has been run with add-on content (DLC) yet: the reader (`runtime/aoc_romfs.c`) is checked on a
+synthetic pack (`tests/aoc_romfs_test.py`) and by `--probe-aoc` on a real one, and that is all. Update 3.2.0 is the
+same: the installer builds it and it boots, and nobody has played it. If you try either, say so in the report.
+
+The reader looks for `aoc-<index>/` folders next to `dkb.exe` (`<index>` is 0 to 31), each holding `romfs.bin` and
+`aoc-index.bin`. The installer does not write them. By hand, from the add-on content's extracted RomFS folder, with
+`<dlc>` its root and `<n>` its index:
+
+```
+.venv\Scripts\python tools\dkb_pack_romfs.py --dir <dlc> --out build/aoc-pack
+.venv\Scripts\python tools\romfs_index.py --romfs build/aoc-pack --out build/aoc-pack/index
+mkdir "<exe folder>\aoc-<n>"
+copy build\aoc-pack\romfs.bin "<exe folder>\aoc-<n>\romfs.bin"
+copy build\aoc-pack\index\romfs-index.bin "<exe folder>\aoc-<n>\aoc-index.bin"
+```
+
+`dkb_pack_romfs.py` writes `romfs.bin` and `index.json`; `romfs_index.py` turns those into the TOTKRFS1 file
+`romfs-index.bin`, which the reader wants under the name `aoc-index.bin`. Then `dkb.exe --probe-aoc` mounts the first
+pack and reads up to 64 files back whole; with `DKB_AOC_SOURCE=<dlc>` it also compares them with the folder.
 
 ## Experimental ultrawide mode
 

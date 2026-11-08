@@ -181,8 +181,12 @@ class Nup:
             elif typ == META_DISPLAY_VERSION:
                 pkg.display_version = payload.decode('utf-8', 'replace')
 
-    def walk(self, dir_index, prefix=()):
-        """Yield (relative path parts, file index) for every file under a directory node."""
+    def walk(self, dir_index, prefix=(), path=()):
+        """Yield (relative path parts, file index) for every file under a directory node. `path` holds the directories
+        being visited, so a container whose directories point back at an ancestor is refused instead of recursing."""
+        if dir_index in path:
+            raise NupError('NUP directory cycle')
+        path += (dir_index,)
         _, first, n = self.dirs[dir_index]
         for slot in range(first, first + n):
             child = self.children[slot]
@@ -190,7 +194,7 @@ class Nup:
                 name = self.files[child - len(self.dirs)][0]
                 yield prefix + (safe_name(name),), child - len(self.dirs)
             else:
-                yield from self.walk(child, prefix + (safe_name(self.dirs[child][0]),))
+                yield from self.walk(child, prefix + (safe_name(self.dirs[child][0]),), path)
 
     def package_files(self, pkg, which):
         dir_index = pkg.exefs_dir if which == 'exefs' else pkg.romfs_dir

@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "aoc_romfs.h"
 #include "fs.h"
 #include "host.h"
 #include "platform/platform.h"
@@ -605,7 +606,7 @@ static uint32_t mount_add(const char *name, int kind, const char *root) {
     if (!name || !*name || strlen(name) >= 32 || strchr(name, ':') || strchr(name, '/')) return FS_R_INVALID_ARGUMENT;
     char as_path[40];
     snprintf(as_path, sizeof as_path, "%s:", name);
-    if (romfs_owns(as_path)) return FS_R_ALREADY_EXISTS;   // the RomFS mount's name
+    if (romfs_owns(as_path) || aoc_owns(as_path)) return FS_R_ALREADY_EXISTS;   // the RomFS and add-on content mounts
     plat_mutex_lock(&lock);
     int slot = -1;
     for (int i = 0; i < NMOUNTS; i++) {
@@ -629,6 +630,7 @@ static int is_mounted(const char *name) {
     char path[40];
     snprintf(path, sizeof path, "%s:", name);
     if (romfs_owns(path)) return 1;
+    if (aoc_owns(path)) return 1;
     int found = 0;
     plat_mutex_lock_shared(&lock);
     for (int i = 0; i < NMOUNTS; i++)
@@ -816,8 +818,9 @@ static void unmount(const char *name) {
     plat_mutex_unlock(&tx_lock);
     size_t n = name ? strlen(name) : 0;
     char probe[40];
-    if (!n || n >= 32 || (snprintf(probe, sizeof probe, "%s:", name), !romfs_owns(probe)))
+    if (!n || n >= 32 || (snprintf(probe, sizeof probe, "%s:", name), !romfs_owns(probe) && !aoc_owns(probe)))
         rt_fatal("fs: unmount of unknown mount %s", name ? name : "(null)");
+    if (aoc_owns(probe)) aoc_unmount(name);   // the generic Unmount also ends an add-on content mount
 }
 
 static uint32_t commit(const char *name) {
@@ -858,6 +861,7 @@ static int64_t host_read_at(PlatFile *f, void *buf, uint32_t n, uint64_t off) {
 
 static uint32_t open_file(uint64_t *out, const char *path, int mode) {
     if (romfs_owns(path)) return romfs_open(out, path, mode);
+    if (aoc_owns(path)) return aoc_open(out, path, mode);
     fs_trace(mode & FS_OPEN_WRITE ? "write" : "read", path);
     if (!out || !(mode & (FS_OPEN_READ | FS_OPEN_WRITE)) || (mode & ~7)) return FS_R_INVALID_ARGUMENT;
     char p[PATH_CAP];
@@ -888,6 +892,7 @@ static uint32_t open_file(uint64_t *out, const char *path, int mode) {
 
 static uint32_t read_file(uint64_t *out, uint64_t h, int64_t offset, void *buffer, uint64_t size) {
     if (romfs_handle(h)) return romfs_read(out, h, offset, buffer, size);
+    if (aoc_handle(h)) return aoc_read(out, h, offset, buffer, size);
     PlatFile *f;
     int mode;
     if (!out || offset < 0 || (!buffer && size) || !file_of(h, &f, &mode)) return FS_R_INVALID_ARGUMENT;
@@ -932,6 +937,7 @@ static uint32_t write_file(uint64_t h, int64_t offset, const void *buffer, uint6
 
 static uint32_t file_size(int64_t *out, uint64_t h) {
     if (romfs_handle(h)) return romfs_size(out, h);
+    if (aoc_handle(h)) return aoc_size(out, h);
     PlatFile *f;
     PlatFileId id;
     if (!out || !file_of(h, &f, NULL) || !plat_file_id(f, &id)) return FS_R_INVALID_ARGUMENT;
@@ -960,6 +966,10 @@ static uint32_t flush_file(uint64_t h) {
 static void close_file(uint64_t h) {
     if (romfs_handle(h)) {
         romfs_close(h);
+        return;
+    }
+    if (aoc_handle(h)) {
+        aoc_close(h);
         return;
     }
     if (!file_of(h, NULL, NULL)) rt_fatal("fs: close of invalid file handle %#llx", (unsigned long long)h);
@@ -1009,6 +1019,7 @@ static uint32_t rename_file(const char *from, const char *to) {
 
 static uint32_t entry_type(int *out, const char *path) {
     if (romfs_owns(path)) return romfs_entry_type(out, path);
+    if (aoc_owns(path)) return aoc_entry_type(out, path);
     char p[PATH_CAP];
     uint32_t r = host_path(path, p, sizeof p);
     if (r) return r;
@@ -1040,6 +1051,7 @@ static uint32_t delete_recursive(const char *path) {
 
 static uint32_t open_directory(uint64_t *out, const char *path, int mode) {
     if (romfs_owns(path)) rt_fatal("fs: OpenDirectory on the RomFS (%s) is not implemented", path);
+    if (aoc_owns(path)) rt_fatal("fs: OpenDirectory on add-on content (%s) is not implemented", path);
     char p[PATH_CAP];
     uint32_t r = host_path(path, p, sizeof p);
     if (r) return r;
@@ -1197,6 +1209,22 @@ HOST_OVERRIDE(S_MOUNT_SAVE_RO, ov_mount_save_ro);
 HOST_OVERRIDE(S_SAVE_EXISTS, ov_save_exists);
 HOST_OVERRIDE("_ZN2nn2fs14EnsureSaveDataERKNS_7account3UidE", ov_ensure_save);
 HOST_OVERRIDE(S_MOUNT_TEMP, ov_mount_temp);
+// nn::Result MountAddOnContent(const char *mount, int addon_index): the packed add-on content next to the
+// executable, read-only, one at a time
+static void ov_mount_aoc(Cpu *c) { ret_x(c, aoc_mount(arg_p(c, 0), (uint32_t)(int32_t)arg_x(c, 1))); }
+// nn::Result UnmountAddOnContent(const char *mount)
+static void ov_unmount_aoc(Cpu *c) { ret_x(c, aoc_unmount(arg_p(c, 0))); }
+// nn::Result QueryMountAddOnContentCacheSize(u64 *out, s32 addon_index): no cache, the host reads the image. Both
+// the name and this argument list are what the run reported (sdk+0x3e8124, called from main+0x195c0dc); the earlier
+// guess that took a mount name was wrong, and it left the guest SDK asking fsp-srv for a service the host has none of.
+static void ov_query_aoc_cache(Cpu *c) {
+    uint64_t *out = arg_p(c, 0);
+    if (out) *out = 0;
+    ret_x(c, out ? 0 : FS_R_INVALID);
+}
+HOST_OVERRIDE("_ZN2nn2fs17MountAddOnContentEPKciPvm", ov_mount_aoc);
+HOST_OVERRIDE("_ZN2nn2fs19UnmountAddOnContentEPKc", ov_unmount_aoc);
+HOST_OVERRIDE("_ZN2nn2fs31QueryMountAddOnContentCacheSizeEPmi", ov_query_aoc_cache);
 HOST_OVERRIDE(S_UNMOUNT, ov_unmount);
 HOST_OVERRIDE(S_COMMIT, ov_commit);
 HOST_OVERRIDE(S_CREATE_CACHE, ov_create_cache);

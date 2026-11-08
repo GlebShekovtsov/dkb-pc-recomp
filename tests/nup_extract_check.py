@@ -409,6 +409,18 @@ class ExtractNupTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn('not a NUP', err)
 
+    def test_directory_cycle_is_refused(self):
+        container = nup.Nup(self.write(build([(0, 0x0100AAAA, 0, {'exefs': {'sub': {'a': b'x'}}})])))
+        try:
+            exefs = container.packages[0].exefs_dir
+            sub = container.children[container.dirs[exefs][1]]
+            # Point the only entry of "sub" back at its parent: exefs -> sub -> exefs -> ...
+            container.children[container.dirs[sub][1]] = exefs
+            with self.assertRaisesRegex(nup.NupError, 'cycle'):
+                container.package_files(container.packages[0], 'exefs')
+        finally:
+            container.close()
+
     def test_unsafe_names_are_refused(self):
         for bad in ('..', 'a/b', 'a\\b', 'c:x'):
             path = self.write(build([(0, 0x0100AAAA, 0, {'exefs': {bad: b'x'}})]), name='bad.nup')

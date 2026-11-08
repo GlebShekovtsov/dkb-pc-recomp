@@ -116,6 +116,22 @@ assert '--full-build' in a and pathlib.Path(a[a.index('--expected')+1]).name=='e
             code = b.main(self.options)
         return code, [json.loads(line) for line in output.getvalue().splitlines()]
 
+    def host_warnings(self, **extra):
+        host = dict(x86_64_v3=True, loader=True, devices=[{'name': 'gpu', 'api': [1, 3, 0]}], **extra)
+        out = io.StringIO()
+        ctx = SimpleNamespace(temp=self.temp, layout=self.layout, reporter=Reporter(out=out))
+        with patch.object(b, 'run_tool'), patch.object(b.subprocess, 'run',
+                                                       return_value=SimpleNamespace(stdout=json.dumps(host), returncode=0)):
+            b.Check().host(ctx)   # a warning must not raise
+        return [json.loads(line)['id'] for line in out.getvalue().splitlines() if json.loads(line)['type'] == 'warning']
+
+    def test_low_commit_limit_warns_and_continues(self):
+        self.assertEqual(self.host_warnings(commit_limit_gib=17.9), ['warn.low_commit_limit'])
+
+    def test_enough_or_unknown_commit_limit_does_not_warn(self):
+        self.assertEqual(self.host_warnings(commit_limit_gib=30.0), [])
+        self.assertEqual(self.host_warnings(), [])
+
     def test_invalid_base_writes_nothing(self):
         (self.exefs / 'main').write_bytes(b'unsupported update')
         code, events = self.run_install()
@@ -609,6 +625,11 @@ assert '--full-build' in a and pathlib.Path(a[a.index('--expected')+1]).name=='e
         code, events = self.run_install()
         self.assertEqual(next(e['id'] for e in events if e['type'] == 'error'), 'dkb.nup_and_folders')
         self.options.exefs = None
+        # A package choice with folders and no .nup is refused too, not ignored.
+        self.options.nup, self.options.nup_package, self.options.exefs = None, 'base', self.exefs
+        code, events = self.run_install()
+        self.assertEqual(next(e['id'] for e in events if e['type'] == 'error'), 'dkb.nup_and_folders')
+        self.options.nup, self.options.nup_package, self.options.exefs = path, None, None
         path.write_bytes(b'PFS0' + bytes(0x200))
         code, events = self.run_install()
         self.assertEqual(next(e['id'] for e in events if e['type'] == 'error'), 'dkb.nup_invalid')

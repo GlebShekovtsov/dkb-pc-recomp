@@ -85,6 +85,7 @@
  "warn.npdm_differs": "main.npdm differs from the reference {version} dump; only the code modules are used.",
  "warn.dkb_libraries_failed": "The shaders are translated, but building the graphics driver's pipeline libraries crashed (exit code {code}), a driver problem seen on NVIDIA 621.01. The game continues without them and may stutter, and it may hit the same driver problem when it first needs a shader. Details: {log}",
  "warn.xbox_prompts_failed": "The Xbox button prompts could not be prepared (exit code {code}); the game keeps the Switch prompts. Details: {log}",
+ "warn.low_commit_limit": "Windows can commit only {commit} GB of memory (RAM plus page file), and the game needs about 14 GB on top of what the system and other programs use; below {need} GB it may freeze or crash. To fix this, enlarge the page file: Settings, System, About, Advanced system settings, Advanced tab, Performance Settings, Advanced tab, Virtual memory, Change, then pick a custom size or let Windows manage it, and restart.",
  "warn.kernel_old": "Linux {version} lacks the write tracking the game relies on (6.7 or later); the game may run very slowly. Updating the system fixes this.",
 
  "ui.title": "TotK Setup",
