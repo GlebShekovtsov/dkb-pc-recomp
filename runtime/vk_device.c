@@ -249,6 +249,7 @@ typedef struct {
     VkPhysicalDeviceDynamicRenderingLocalReadFeaturesKHR lr;
     VkPhysicalDeviceAddressBindingReportFeaturesEXT abr;
     VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR pei;
+    VkPhysicalDevicePrimitiveTopologyListRestartFeaturesEXT lrs;
 } FeatureChain;
 
 static int create_device(void) {
@@ -287,6 +288,9 @@ static int create_device(void) {
     // Ryujinx's SPIR-V declares fragment shader interlock whenever the host reports it (vk_pipeline.c spirv_fixup).
     OPTIONAL_EXT(has_fragment_shader_interlock, VK_EXT_FRAGMENT_SHADER_INTERLOCK_EXTENSION_NAME, fsi,
                  VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_INTERLOCK_FEATURES_EXT);
+    // Maxwell applies primitive restart to list draws too (docs/maxwell.md 5.2); core Vulkan only to strips and fans.
+    OPTIONAL_EXT(has_list_restart, VK_EXT_PRIMITIVE_TOPOLOGY_LIST_RESTART_EXTENSION_NAME, lrs,
+                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVE_TOPOLOGY_LIST_RESTART_FEATURES_EXT);
     // Feedback loops (vk.h VkCtx.feedback): the layout, and barriers inside dynamic rendering
     int has_fbl = 0, has_lr = 0;
     if (has_ext(ep, ne, VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME) &&
@@ -357,6 +361,9 @@ static int create_device(void) {
     if (!h->geometryShader)   // vk_pipeline.c skips the pipelines that need it (P.f_geometry)
         rt_log("vk: %s has no geometry stage (portability subset): draws that need one are skipped", g_vk.props.deviceName);
     if (!c->fault.deviceFault) g_vk.has_device_fault = 0;   // vkGetDeviceFaultInfoEXT needs the feature, not just the extension
+    if (g_vk.has_list_restart && !c->lrs.primitiveTopologyListRestart) g_vk.has_list_restart = 0;
+    rt_log("vk: primitive restart on list draws: %s", g_vk.has_list_restart ? "yes (primitiveTopologyListRestart)"
+           : "no: a list draw's restart index is fetched as a vertex");
     if (g_vk.has_address_binding_report && !c->abr.reportAddressBinding) g_vk.has_address_binding_report = 0;
     if (g_vk.has_pipeline_exec_info && !c->pei.pipelineExecutableInfo) g_vk.has_pipeline_exec_info = 0;
     g_vk.has_buffer_device_address = c->f12.bufferDeviceAddress;

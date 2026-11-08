@@ -34,6 +34,7 @@ typedef struct VkCtx {
     int has_custom_border_color, has_eds, has_eds2, has_eds3, has_vertex_input_dynamic_state,
         has_conditional_rendering, has_transform_feedback, has_provoking_vertex, has_device_fault, has_memory_budget,
         has_robustness2, has_buffer_device_address, has_fragment_shader_interlock, has_buffer_marker,
+        has_list_restart,                   // primitiveTopologyListRestart: restart applies to list draws too (vk_exec_draw.c)
         has_nv_checkpoints,                 // VK_NV_device_diagnostic_checkpoints enabled (DKB_GPU_CHECKPOINTS=1)
         has_address_binding_report,         // VK_EXT_device_address_binding_report enabled (with the checkpoints, vk_crumbs.c)
         has_pipeline_exec_info,             // VK_KHR_pipeline_executable_properties enabled (with the checkpoints, vk_crumbs.c)

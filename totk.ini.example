@@ -75,6 +75,9 @@
 # fix_vs_fault = 1
 # New GPU memory pools start zero-filled, as Switch memory does.
 # fix_zero = 1
+# Primitive restart on triangle-list draws, as the Switch does (needs primitiveTopologyListRestart). Without it the
+# restart indices are fetched as vertices and draw long stretched triangles (Bananza's map).
+# list_restart = 1
 # Optimisations, 0 turns each off: skip bindings that did not change, remember shader lookups, reuse the previous
 # draw's pipeline when its state repeats, remember texture descriptors between draws, update descriptors in bulk,
 # skip push constants that did not change.
