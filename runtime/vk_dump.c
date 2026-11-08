@@ -563,6 +563,44 @@ static uint64_t handle_of(const VkExec *ex, int st, int slot, int img) {
     return slot >= 0 && slot < 128 ? ex->tex[st][slot] : 0;
 }
 
+// The vertex inputs of the entry's first draw: each attribute the vertex shader reads (NVN format, the Vulkan format
+// it is read as, offset, stream), its stream (stride, divisor, the bound buffer range) and the first 4 vertices of the
+// attribute as raw words and as floats. A mesh drawn with long sheets across the screen shows here whether its
+// positions arrive as data the transform can turn into those sheets.
+static void describe_vertex(Str *b, const VkExec *ex, const VkPipeState *s, const VkPipeInfo *info) {
+    for (int i = 0; i < 16; i++) {
+        if (!(info->vs_inputs >> i & 1)) continue;
+        va_st a;
+        memcpy(&a, &s->vattr[i], sizeof a);
+        if (!a.fmt) {
+            sp(b, "    vertex a%d: no attribute (zero buffer)\n", i);
+            continue;
+        }
+        int type = 0;
+        VkFormat vf = vk_vertex_format((int)a.fmt, &type);
+        const vs_st *st = &s->vstream[a.stream & 15];
+        const NVNbufferRange *r = &ex->vbuf[a.stream & 15];
+        sp(b, "    vertex a%d: nvn fmt %#x -> vk %d type %d offset %#x stream %u stride %u divisor %u buf %#llx+%#llx", i,
+           (unsigned)a.fmt, (int)vf, type, (unsigned)a.offset, (unsigned)a.stream, st->stride, st->divisor,
+           (unsigned long long)r->address, (unsigned long long)r->size);
+        VkMemSpan ms;
+        if (r->address && vk_mem_resolve(r->address, 1, &ms) && !ms.alloc) {
+            uint64_t avail = r->size && r->size < ms.avail ? r->size : ms.avail;
+            for (uint32_t v = 0; v < 4; v++) {
+                uint64_t off = (uint64_t)a.offset + (uint64_t)v * st->stride;
+                if (off + 16 > avail) break;
+                const uint32_t *w = (const uint32_t *)(uintptr_t)(r->address + off);
+                float f[4];
+                memcpy(f, w, sizeof f);
+                sp(b, "\n      v%u: %08x %08x %08x %08x | %g %g %g %g", v, w[0], w[1], w[2], w[3], f[0], f[1], f[2], f[3]);
+            }
+        } else {
+            sp(b, " (not host-readable)");
+        }
+        sp(b, "\n");
+    }
+}
+
 // The textures, images and samplers of info's bindings; 3D textures are queued for a copy.
 static void describe_bindings(Str *b, const VkExec *ex, const VkPipeInfo *info) {
     static const char *stn[6] = {"vs", "fs", "?", "?", "?", "cs"};
@@ -699,6 +737,7 @@ void vk_dump_draw(VkExec *ex, const VkPipeState *s, VkPipeline p, const VkPipeIn
         if (o) sp(&b, " nvn2 %016llx", (unsigned long long)o);
     }
     sp(&b, "\n");
+    describe_vertex(&b, ex, s, info);
     describe_bindings(&b, ex, info);
     ents[nents++] = (Ent){p, th, 1, b.s};
 out:
