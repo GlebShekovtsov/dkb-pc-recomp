@@ -262,6 +262,7 @@ change passes these, all run with `.venv`:
 | `tests\flags_check.py` | the function-local flag helpers of `runtime\cpu.h` against its packed ones | no |
 | `tests\excl_mt.py` | the exclusive monitor helpers under contention and ABA, on several threads | no |
 | `tests\codec_abi_test.py`, `tests\jcms_abi_test.py`, `tests\system_services_test.py`, `tests\nvn_version_test.py` | the `nn::codec` VP9 ABI, the Jcms peripheral stubs, the system service host bindings and the NVN minor version per target | no |
+| `tests\aoc_romfs_test.py --cc <clang>` | the add-on content reader on synthetic TOTKRFS1 packs: bad and unsorted indexes, EOF reads, handle table, unmount and remount, `ListAddOnContent` paging | no |
 | `tests\jumptables_check.py` | `recomp/jumptables.py` against a Unicorn oracle; must report 0 disagreements, on 1.4.3 too | yes |
 
 Runtime probes, each a mode of `totk.exe` (the list is at the top of `runtime/main.c`): `--probe-kernel`,

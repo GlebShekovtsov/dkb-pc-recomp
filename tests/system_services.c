@@ -149,3 +149,9 @@ int main(void) {
     puts("system services: display version, empty AOC and offline network/BCAT bindings passed");
     return 0;
 }
+
+// aoc_romfs.c is not part of this harness: the reader's surface is stubbed at its boundary, since these overrides are
+// what is under test here. The reader itself is covered by --probe-aoc.
+uint32_t aoc_count(void) { return 0; }
+uint32_t aoc_list(uint32_t *out, int offset, int count) { (void)out, (void)offset, (void)count; return 0; }
+int plat_mem_readable(uint64_t addr, uint64_t n) { (void)addr, (void)n; return 1; }

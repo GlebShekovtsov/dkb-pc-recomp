@@ -1,0 +1,145 @@
+--- a/src/Ryujinx.Graphics.Shader/IntermediateRepresentation/StorageKind.cs
++++ b/src/Ryujinx.Graphics.Shader/IntermediateRepresentation/StorageKind.cs
+@@ -18,6 +18,7 @@
+         GlobalMemoryS16, // TODO: Remove this and store type as a field on the Operation class itself.
+         GlobalMemoryU8, // TODO: Remove this and store type as a field on the Operation class itself.
+         GlobalMemoryU16, // TODO: Remove this and store type as a field on the Operation class itself.
++        GlobalMemoryF16x2, // Packed half2 reduction (RED F16x2FtzRn Add), storage candidates only.
+     }
+ 
+     static class StorageKindExtensions
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMemory.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMemory.cs
+@@ -161,6 +161,15 @@
+             InstRed op = context.GetOp<InstRed>();
+ 
+             (Operand addrLow, Operand addrHigh) = Get40BitsAddress(context, new Register(op.SrcA, RegisterType.Gpr), op.E, op.Imm20);
++
++            if (context.TranslatorContext.GpuAccessor.QueryStorageBufferRuntimeCandidates() &&
++                op.RedSize == AtomSize.F16x2FtzRn && (AtomOp)op.RedOp == AtomOp.Add)
++            {
++                // The packed half reduction is bounds-checked and emitted as a guarded 32-bit compare-exchange
++                // (GlobalToStorage PackedHalfAddFtzRn). Other types and operations keep the rejection in EmitAtomicOp.
++                context.AtomicAdd(StorageKind.GlobalMemoryF16x2, addrLow, addrHigh, GetDest(op.SrcB));
++                return;
++            }
+ 
+             EmitAtomicOp(context, StorageKind.GlobalMemory, (AtomOp)op.RedOp, op.RedSize, addrLow, addrHigh, GetDest(op.SrcB));
+         }
+--- a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
+@@ -298,7 +298,8 @@
+                    StorageKind.GlobalMemoryS8 or
+                    StorageKind.GlobalMemoryS16 or
+                    StorageKind.GlobalMemoryU8 or
+-                   StorageKind.GlobalMemoryU16;
++                   StorageKind.GlobalMemoryU16 or
++                   StorageKind.GlobalMemoryF16x2;
+         }
+ 
+         private static bool IsSmallInt(StorageKind storageKind)
+@@ -419,7 +420,9 @@
+         {
+             // The halfword store is the only sub-word global operation admitted here.
+             bool halfwordStore = operation.StorageKind == StorageKind.GlobalMemoryU16 && operation.Inst == Instruction.Store;
+-            if ((operation.StorageKind != StorageKind.GlobalMemory && !halfwordStore) ||
++            // The packed half2 reduction, as a 32-bit aligned compare-exchange; no other F16x2 operation is admitted.
++            bool packedHalfAdd = operation.StorageKind == StorageKind.GlobalMemoryF16x2 && operation.Inst == Instruction.AtomicAdd;
++            if ((operation.StorageKind != StorageKind.GlobalMemory && !halfwordStore && !packedHalfAdd) ||
+                 (operation.Inst != Instruction.Load && operation.Inst != Instruction.Store && !operation.Inst.IsAtomic()))
+             {
+                 throw new NotSupportedException("Storage candidates v1 supports aligned 32-bit global operations and the U16 store only.");
+@@ -972,6 +975,7 @@
+                 StorageKind.GlobalMemoryS16 => "S16",
+                 StorageKind.GlobalMemoryU8 => "U8",
+                 StorageKind.GlobalMemoryU16 => "U16",
++                StorageKind.GlobalMemoryF16x2 => "F16x2",
+                 _ => string.Empty,
+             });
+ 
+@@ -1011,6 +1015,17 @@
+             }
+ 
+             Operand wordOffset = context.ShiftRightU32(offset, Const(2));
++
++            if (guarded && storageKind == StorageKind.GlobalMemoryF16x2 && inst == Instruction.AtomicAdd)
++            {
++                // RED.E.ADD.F16x2.FTZ.RN. One guarded compare-exchange on the word. The IR operation always has a
++                // result local, so the guarded function returns a value: the old word, which the RED does not consume.
++                resultValue = GenerateAtomicCasLoop(context, wordOffset, binding, (memValue) =>
++                {
++                    return PackedHalfAddFtzRn(context, memValue, value);
++                });
++                return true;
++            }
+ 
+             if (inst.IsAtomic())
+             {
+@@ -1164,6 +1179,67 @@
+             return true;
+         }
+ 
++        // Packed half2 add, RED.E.ADD.F16x2.FTZ.RN, on one 32-bit word. Each half is decoded exactly to an f32
++        // bit pattern (a zero or subnormal half flushes to a signed zero; Inf and NaN keep their class), the two f32
++        // values are added with one f32 add, and the sum is rounded to half with round-to-nearest-even. A result below
++        // the half normal range flushes to a signed zero, overflow gives a signed Inf, and NaN gives 0x7E00.
++        // Only integer selects and one f32 add are emitted, so the sum is exact for the f16 inputs: the f32 add rounds
++        // the exact sum once, and rounding that to 11 bits again is innocuous for addition (24 >= 2 * 11 + 2).
++        private static Operand PackedHalfAddFtzRn(EmitterContext context, Operand word, Operand addend)
++        {
++            Operand low = PackedHalfFieldAdd(context, word, addend, 0);
++            Operand high = PackedHalfFieldAdd(context, word, addend, 16);
++            return context.BitwiseOr(low, context.ShiftLeft(high, Const(16)));
++        }
++
++        private static Operand PackedHalfFieldAdd(EmitterContext context, Operand word, Operand addend, int shift)
++        {
++            Operand a = context.BitwiseAnd(context.ShiftRightU32(word, Const(shift)), Const(0xFFFF));
++            Operand b = context.BitwiseAnd(context.ShiftRightU32(addend, Const(shift)), Const(0xFFFF));
++            Operand sum = context.FPAdd(HalfToFloatBits(context, a), HalfToFloatBits(context, b));
++            return FloatBitsToHalfFtzRn(context, sum);
++        }
++
++        private static Operand HalfToFloatBits(EmitterContext context, Operand h)
++        {
++            Operand sign = context.ShiftLeft(context.BitwiseAnd(h, Const(0x8000)), Const(16));
++            Operand exponent = context.BitwiseAnd(context.ShiftRightU32(h, Const(10)), Const(31));
++            Operand mantissaBits = context.ShiftLeft(context.BitwiseAnd(h, Const(1023)), Const(13));
++            Operand normal = context.BitwiseOr(sign,
++                context.BitwiseOr(context.ShiftLeft(context.IAdd(exponent, Const(112)), Const(23)), mantissaBits));
++            Operand specialValue = context.BitwiseOr(sign, context.BitwiseOr(Const(0x7F800000), mantissaBits));
++            return context.ConditionalSelect(context.ICompareEqual(exponent, Const(31)), specialValue,
++                context.ConditionalSelect(context.ICompareEqual(exponent, Const(0)), sign, normal));
++        }
++
++        private static Operand FloatBitsToHalfFtzRn(EmitterContext context, Operand s)
++        {
++            Operand sign16 = context.BitwiseAnd(context.ShiftRightU32(s, Const(16)), Const(0x8000));
++            Operand exponent = context.BitwiseAnd(context.ShiftRightU32(s, Const(23)), Const(255));
++            Operand mantissa = context.BitwiseAnd(s, Const(0x7FFFFF));
++            Operand keep = context.BitwiseAnd(context.ShiftRightU32(mantissa, Const(13)), Const(1023));
++            Operand rem = context.BitwiseAnd(mantissa, Const(0x1FFF));
++            Operand keepOdd = context.ICompareNotEqual(context.BitwiseAnd(keep, Const(1)), Const(0));
++            Operand roundUp = context.BitwiseOr(context.ICompareGreater(rem, Const(0x1000)),
++                context.BitwiseAnd(context.ICompareEqual(rem, Const(0x1000)), keepOdd));
++            Operand kept = context.IAdd(keep, context.ConditionalSelect(roundUp, Const(1), Const(0)));
++            Operand carry = context.ShiftRightU32(kept, Const(10));
++            Operand mant = context.BitwiseAnd(kept, Const(1023));
++            // Half exponent: exponent - 112 (+1 on a mantissa carry). Only meaningful when exponent >= 112.
++            Operand biased = context.IAdd(context.ISubtract(exponent, Const(112)), carry);
++            Operand normal = context.BitwiseOr(sign16, context.BitwiseOr(context.ShiftLeft(biased, Const(10)), mant));
++            Operand infinity = context.BitwiseOr(sign16, Const(0x7C00));
++            Operand isSpecial = context.ICompareEqual(exponent, Const(255));
++            Operand isNan = context.ICompareNotEqual(mantissa, Const(0));
++            Operand specialValue = context.ConditionalSelect(isNan, Const(0x7E00), infinity);
++            // Below the half normal range: exponent < 112, or exactly 112 with no carry (biased == 0), flush to zero.
++            Operand flushed = context.BitwiseOr(context.ICompareLessUnsigned(exponent, Const(112)),
++                context.ICompareEqual(biased, Const(0)));
++            Operand overflow = context.ICompareGreaterOrEqualUnsigned(biased, Const(31));
++            return context.ConditionalSelect(isSpecial, specialValue,
++                context.ConditionalSelect(flushed, sign16, context.ConditionalSelect(overflow, infinity, normal)));
++        }
++
+         private static Operand GenerateAtomicCasLoop(EmitterContext context, Operand wordOffset, int binding, Func<Operand, Operand> opCallback)
+         {
+             Operand lblLoopHead = Label();

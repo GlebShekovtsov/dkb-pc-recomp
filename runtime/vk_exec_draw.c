@@ -2860,19 +2860,6 @@ static void op_draw_idx_ind(VkExec *ex, const p_draw_idx_ind *d) {
 // after the intro, e.g. 2095x1179 in).
 static int mvk_upscale_cs(uint64_t h) { return h == 0x3f3390cfdfa1f9e8ull || h == 0x4f9090b273fa7e4full; }
 
-// FNV-1a of a shader's SPIR-V, cached for the last shader of the calling thread (dispatches may be recorded on more
-// than one).
-static uint64_t spirv_fnv(const GfxShader *s) {
-    static _Thread_local const GfxShader *last;
-    static _Thread_local uint64_t last_h;
-    if (s == last) return last_h;
-    uint64_t words = 0, h = 0xcbf29ce484222325ull;
-    const uint8_t *b = (const uint8_t *)gfx_shader_spirv(s, &words);
-    for (uint64_t i = 0; b && i < words * 4; i++) h = (h ^ b[i]) * 0x100000001b3ull;
-    last = s, last_h = h;
-    return h;
-}
-
 // Whether the device can blit from format f with linear filtering (src) or into it (dst), optimal tiling.
 static int blit_ok(VkFormat f, int dst) {
     VkFormatProperties fp;
@@ -2887,7 +2874,10 @@ static int blit_ok(VkFormat f, int dst) {
 static int mvk_upscale_blit(VkExec *ex, const GfxShader *cs) {
     static int on = -1;
     if (on < 0) on = vk_caps.moltenvk && cfg_bool("TOTK_MVK_UPSCALE_BLIT");
-    if (!on || !mvk_upscale_cs(spirv_fnv(cs))) return 0;
+    // The hash is kept with the shader (gfx_shader_spirv_fnv): a cache of the last shader alone missed on nearly every
+    // dispatch, as dispatches alternate between compute shaders, and hashing the whole SPIR-V each time took about 12%
+    // of the replaying thread on an M4.
+    if (!on || !mvk_upscale_cs(gfx_shader_spirv_fnv(cs))) return 0;
     uint64_t hs = ex->tex[NVN_STAGE_CS][0], hd = ex->img[NVN_STAGE_CS][1];
     view_t vs, vd;
     int hvs = 0, hvd = 0;

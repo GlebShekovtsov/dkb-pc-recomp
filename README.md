@@ -132,7 +132,7 @@ crash. Follow the
 The executable is made from the game's own code, so it cannot be shared. Everyone builds it from their own dump; the
 installer does this for you ([docs/installer.md](docs/installer.md)).
 
-**Which version of the game?** Base 1.0.0 and update 3.2.0 (title version 458752, the newest). The installer takes either a `.nup` file (the container Eglantine and Eden load; with the 3.2.0 update inside it builds 3.2.0) or ExeFS and RomFS folders. Other updates are refused by their hashes.
+**Which version of the game?** Base 1.0.0 and update 3.2.0 (title version 458752, the newest). The installer takes either a `.nup` file (the container Eglantine and Eden load; with the 3.2.0 update inside it builds 3.2.0) or ExeFS and RomFS folders. Other updates are refused by their hashes. The 3.2.0 build installs and boots, and held 60 fps for 150 s at the start on an RTX 5060 Ti, but nobody has played it yet. Add-on content (DLC) has a reader (an `aoc-<n>` folder beside the executable, [docs/dkb-testing.md](docs/dkb-testing.md)) checked against synthetic packs and a real one, but it has not been tried in the game.
 
 **Linux?** Preview. The release page carries `DKB-Setup-<version>-linux-x86_64.tar.gz`: the sources and a setup script, not a
 binary. You install the system packages and it builds the game from your dump. The build from source is verified on AMD

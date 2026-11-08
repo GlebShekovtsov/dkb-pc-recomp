@@ -1,0 +1,94 @@
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMemory.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMemory.cs
+@@ -504,10 +504,13 @@
+             int offset,
+             bool extended)
+         {
++            // The halfword store (STG.E.U16) is admitted for candidate mode; the guarded emitter bounds-checks both
++            // bytes and writes them with byte-lane compare-exchange, so no alignment is assumed. Other sub-word sizes stay
++            // rejected until their own tuples are observed.
+             if (context.TranslatorContext.GpuAccessor.QueryStorageBufferRuntimeCandidates() &&
+-                size is not (LsSize2.B32 or LsSize2.B64 or LsSize2.B128))
+-            {
+-                throw new System.NotSupportedException("Storage candidates v1 supports naturally aligned B32/B64/B128 global stores only.");
++                size is not (LsSize2.B32 or LsSize2.B64 or LsSize2.B128 or LsSize2.U16))
++            {
++                throw new System.NotSupportedException("Storage candidates v1 supports naturally aligned B32/B64/B128 and U16 global stores only.");
+             }
+             if (size > LsSize2.B128)
+             {
+--- a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
+@@ -417,10 +417,12 @@
+             GtsContext gtsContext, ResourceManager resourceManager, IGpuAccessor gpuAccessor,
+             TargetLanguage targetLanguage, BasicBlock block, Operation operation)
+         {
+-            if (operation.StorageKind != StorageKind.GlobalMemory ||
++            // The halfword store is the only sub-word global operation admitted here.
++            bool halfwordStore = operation.StorageKind == StorageKind.GlobalMemoryU16 && operation.Inst == Instruction.Store;
++            if ((operation.StorageKind != StorageKind.GlobalMemory && !halfwordStore) ||
+                 (operation.Inst != Instruction.Load && operation.Inst != Instruction.Store && !operation.Inst.IsAtomic()))
+             {
+-                throw new NotSupportedException("Storage candidates v1 supports aligned 32-bit global operations only.");
++                throw new NotSupportedException("Storage candidates v1 supports aligned 32-bit global operations and the U16 store only.");
+             }
+ 
+             bool storageUnaligned = gpuAccessor.QueryHasUnalignedStorageBuffer();
+@@ -518,7 +520,18 @@
+                 Operand words = context.StorageBufferLength(binding);
+                 Operand inRange = context.BitwiseAnd(context.ICompareEqual(deltaHigh, Const(0)),
+                     context.ICompareLessUnsigned(word, words));
+-                inRange = context.BitwiseAnd(inRange, context.ICompareEqual(context.BitwiseAnd(deltaLow, Const(3)), Const(0)));
++                if (halfwordStore)
++                {
++                    // A halfword that starts at byte 3 of a word also writes the next word, which must be in range.
++                    Operand crosses = context.ConditionalSelect(
++                        context.ICompareEqual(context.BitwiseAnd(deltaLow, Const(3)), Const(3)), Const(1), Const(0));
++                    inRange = context.BitwiseAnd(inRange,
++                        context.ICompareLessUnsigned(context.IAdd(word, crosses), words));
++                }
++                else
++                {
++                    inRange = context.BitwiseAnd(inRange, context.ICompareEqual(context.BitwiseAnd(deltaLow, Const(3)), Const(0)));
++                }
+ 
+                 Operand skip = Label();
+                 context.BranchIfFalse(skip, inRange);
+@@ -1073,7 +1086,36 @@
+                     _ => 32,
+                 };
+ 
+-                if (bitSize < 32)
++                if (guarded && bitSize == 16)
++                {
++                    // Guarded halfword store. A halfword starting at byte 3 of a word has its low byte in that word
++                    // and its high byte in the next one (the caller bounds-checks both words). Any other halfword lies in
++                    // one word, where a single 16-bit compare-exchange is the same as the legacy store.
++                    Operand crossing = context.ICompareEqual(context.BitwiseAnd(offset, Const(3)), Const(3));
++                    Operand single = Label();
++                    Operand done = Label();
++                    context.BranchIfFalse(single, crossing);
++
++                    GenerateAtomicCasLoop(context, wordOffset, binding, (memValue) =>
++                    {
++                        return context.BitfieldInsert(memValue, value, Const(24), Const(8));
++                    });
++                    Operand nextWord = context.IAdd(wordOffset, Const(1));
++                    GenerateAtomicCasLoop(context, nextWord, binding, (memValue) =>
++                    {
++                        return context.BitfieldInsert(memValue, context.ShiftRightU32(value, Const(8)), Const(0), Const(8));
++                    });
++                    context.Branch(done);
++
++                    context.MarkLabel(single);
++                    Operand halfBitOffset = HelperFunctionManager.GetBitOffset(context, offset);
++                    GenerateAtomicCasLoop(context, wordOffset, binding, (memValue) =>
++                    {
++                        return context.BitfieldInsert(memValue, value, halfBitOffset, Const(16));
++                    });
++                    context.MarkLabel(done);
++                }
++                else if (bitSize < 32)
+                 {
+                     Operand bitOffset = HelperFunctionManager.GetBitOffset(context, offset);
+ 

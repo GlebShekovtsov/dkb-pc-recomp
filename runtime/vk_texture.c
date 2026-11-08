@@ -47,6 +47,8 @@ typedef struct Tex {
     int uploaded, released;
     uint32_t n_up;                // uploads of this entry (vk_texture_debug)
     int last_ch;                  // last vk_mem_changed result of make_fresh: 1 written, 0 clean, -1 not tracked
+    uint8_t hashed;               // chash holds the storage hash taken just before the last upload (untracked pages)
+    uint64_t chash;
     struct Tex *next_at;          // other entries at the same storage address
     uint8_t gpu_dirty;            // mirrored, and the GPU wrote the image after the last write-back to the storage
     uint32_t gpu_gen;             // page generation when the GPU write that set gpu_dirty was recorded
@@ -92,6 +94,7 @@ static Tex *rel_head, *rel_tail;   // released entries in release order (sweep_r
 static uint64_t n_uploads, n_reuploads;
 // Re-uploads since the last perf line (tex_lock): all, and those of textures a WriteTexels wrote since their last upload.
 static uint64_t ru_n, ru_bytes, ru_ns, ru_wt_n, ru_wt_bytes, ru_wt_ns;
+static uint64_t n_hash_kept;   // untracked checks whose storage hash matched the last upload's (untracked_same)
 // TOTK_TEX_ALIAS (default on; =0: a new image over live storage starts empty): a new descriptor over the storage of a
 // live image that the GPU wrote gets that image's content (alias_copy). Counts since the last log line.
 static int tex_alias = -1;
@@ -759,12 +762,65 @@ static int storage_rewritten(const Tex *e, uint32_t since, uint32_t *now) {
     return 0;
 }
 
+// ---- content hash for untracked storage (TOTK_TEX_HASH, default on; =0 uploads again on every untracked check)
+// Where the pages have no write watch (macOS: vk_mem_changed answers -1), a mirrored texture used to be deswizzled and
+// uploaded again in every submission that bound it. On an M4 that grew to 17,000-20,000 re-uploads (about 3 GiB) per
+// 60 frames a minute into play, and the frame rate fell to 8-11 fps (#116). Instead, the storage bytes are hashed just
+// before each upload, and an untracked check uploads again only when the hash differs.
+// Why a match is safe: a match is treated as a clean write-watch answer (ch == 0), which is what the tracked platforms
+// do for a texture whose pages did not change. Most GPU writes into the image (vk_texture_gpu_written, alias_copy)
+// make it GPU-owned for good, so it is never uploaded again. Two writers do not: storage-image stores
+// (tex_info_full in vk_exec_draw.c only calls vk_texture_storage_bound_locked) and the MoltenVK upscaler blit
+// (mvk_upscale_blit). Their results survive an unchanged-storage check exactly as they survive ch == 0 on Windows,
+// where the old macOS path wiped them on every submission. The hash is taken before the copy, so a guest write racing
+// the copy leaves the stored hash older than the image and costs one extra upload, never a missed one. The one miss
+// is an ABA: the guest changes a block A to B while it is hashed, the copy reads B, then the guest writes A back, so
+// the next check matches and the image keeps B. A write watch would catch that; the odds are small.
+static int tex_hash = -1;
+
+static inline uint64_t rotl64(uint64_t x, int r) { return x << r | x >> (64 - r); }
+
+// Four independent multiply-rotate lanes over 32-byte blocks (the xxHash64 round), then the tail and a final mix:
+// several GB/s, where the byte-wise FNV-1a manages about one. Equality detection only, not a stable format.
+static uint64_t storage_hash(const Tex *e) {
+    const uint8_t *p = (const uint8_t *)(uintptr_t)e->pub.addr;
+    uint64_t n = e->t.L.size, i = 0;
+    const uint64_t P1 = 0x9e3779b185ebca87ull, P2 = 0xc2b2ae3d27d4eb4full;
+    uint64_t a = P1 + P2, b = P2, c = 0, d = 0 - P1;
+    for (; i + 32 <= n; i += 32) {
+        uint64_t w[4];
+        memcpy(w, p + i, 32);
+        a = rotl64(a + w[0] * P2, 31) * P1;
+        b = rotl64(b + w[1] * P2, 31) * P1;
+        c = rotl64(c + w[2] * P2, 31) * P1;
+        d = rotl64(d + w[3] * P2, 31) * P1;
+    }
+    uint64_t h = rotl64(a, 1) + rotl64(b, 7) + rotl64(c, 12) + rotl64(d, 18) + n;
+    for (; i < n; i++) h = rotl64(h ^ (p[i] * P1), 11) * P2;
+    h ^= h >> 33, h *= P2, h ^= h >> 29, h *= P1, h ^= h >> 32;
+    return h;
+}
+
+// Called with the page answer ch just before e would be uploaded. Untracked (-1): takes the storage hash for the upload
+// that may follow and returns 1 when it equals the one taken before e's last upload (the upload is then skipped).
+// Tracked: forgets the hash, since an upload made on a write-watch answer has none.
+static int untracked_same(Tex *e, int ch) {
+    if (tex_hash < 0) tex_hash = cfg_bool("TOTK_TEX_HASH");
+    if (ch != -1 || !tex_hash) { e->hashed = 0; return 0; }
+    uint64_t h = storage_hash(e);
+    int same = e->hashed && e->uploaded && h == e->chash;
+    e->chash = h, e->hashed = 1;
+    if (same) n_hash_kept++;
+    return same;
+}
+
 // A mirrored texture is uploaded on first use and again when its storage pages carry a newer write generation.
 static void make_fresh(Tex *e) {
     if (!e->pub.mirrored || e->pub.gpu_owned) return;
     uint64_t size = e->t.L.size;
     if (!e->uploaded) {
-        vk_mem_changed(e->pub.addr, size, 0, &e->wgen);   // resets the write bits before the storage is read
+        int ch = vk_mem_changed(e->pub.addr, size, 0, &e->wgen);   // resets the write bits before the storage is read
+        untracked_same(e, ch);   // takes the hash for the next untracked check
         upload(e);
         return;
     }
@@ -772,7 +828,7 @@ static void make_fresh(Tex *e) {
     int ch = vk_mem_changed(e->pub.addr, size, e->wgen, &now);
     e->wgen = now;
     e->last_ch = ch;
-    if (ch) upload(e);   // 1 written, -1 not tracked: both upload again
+    if (ch && !untracked_same(e, ch)) upload(e);   // 1 written, -1 not tracked and the bytes changed: upload again
 }
 
 // make_fresh for draw bindings: the page check answers from this submission's write-watch snapshot (vk_memory.c
@@ -784,9 +840,9 @@ static void make_fresh_snap(Tex *e) {
     n_checks++;
     int ch = vk_mem_changed_snap(e->pub.addr, e->t.L.size, e->uploaded ? e->wgen : 0, submit_epoch, &now);
     e->wgen = now;
-    if (!e->uploaded) { upload(e); return; }
+    if (!e->uploaded) { untracked_same(e, ch); upload(e); return; }
     e->last_ch = ch;
-    if (ch) upload(e);
+    if (ch && !untracked_same(e, ch)) upload(e);
 }
 
 // ---------------------------------------------------------------- aliases (TOTK_TEX_ALIAS)
@@ -1182,10 +1238,11 @@ void vk_texture_new_submit(void) {
                (unsigned long long)f * 60, (unsigned long long)n_alias_copied, (unsigned long long)n_alias_upload,
                (unsigned long long)n_alias_uninit);
         n_alias_copied = n_alias_upload = n_alias_uninit = 0;
-        rt_log("perf: frame %llu: texture re-uploads %llu (%.1f MiB, %.2f ms), after WriteTexels %llu (%.1f MiB, %.2f ms)",
+        rt_log("perf: frame %llu: texture re-uploads %llu (%.1f MiB, %.2f ms), after WriteTexels %llu (%.1f MiB, %.2f ms); "
+               "untracked and unchanged, kept %llu",
                (unsigned long long)f * 60, (unsigned long long)ru_n, ru_bytes / 1048576.0, ru_ns / 1e6,
-               (unsigned long long)ru_wt_n, ru_wt_bytes / 1048576.0, ru_wt_ns / 1e6);
-        ru_n = ru_bytes = ru_ns = ru_wt_n = ru_wt_bytes = ru_wt_ns = 0;
+               (unsigned long long)ru_wt_n, ru_wt_bytes / 1048576.0, ru_wt_ns / 1e6, (unsigned long long)n_hash_kept);
+        ru_n = ru_bytes = ru_ns = ru_wt_n = ru_wt_bytes = ru_wt_ns = n_hash_kept = 0;
         uint64_t ck, calls, untr;
         vk_mem_snap_stats(&ck, &calls, &untr);
         rt_log("perf: frame %llu: binding storage checks %llu (texture %llu), write-watch snapshot queries %llu, untracked %llu",

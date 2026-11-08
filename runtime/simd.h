@@ -215,9 +215,9 @@ SI int simd_fe_mode(uint64_t fpcr) {
 }
 
 #if defined(__aarch64__) || defined(_M_ARM64)
-// On AArch64 the host FPCR is the guest FPCR (cpu.h rt_fpcr_sync is a no-op), so host FP already rounds, flushes and
-// saturates the way the instruction it lowers does: there is nothing to switch around one operation and no directed
-// rounding to take a slow path for. simd_rm_* stay as no-ops so the shared lowering compiles unchanged.
+// On AArch64 the host FPCR is the guest FPCR (cpu.h rt_fpcr_sync makes the host FPCR the guest's), so host FP already
+// rounds, flushes and saturates the way the instruction it lowers does: there is nothing to switch around one operation
+// and no directed rounding to take a slow path for. simd_rm_* stay as no-ops so the shared lowering compiles unchanged.
 SI unsigned simd_rm_enter(uint64_t fpcr) { (void)fpcr; return 0; }
 SI void simd_rm_rz(void) {}
 SI void simd_rm_leave(unsigned old) { (void)old; }

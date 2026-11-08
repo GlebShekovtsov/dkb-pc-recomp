@@ -19,8 +19,8 @@
 #include <string.h>
 #include <time.h>
 
+#include "aoc_romfs.h"
 #include "cfg.h"
-#include "fs.h"
 #include "host.h"
 #include "ov.h"
 #include "platform/platform.h"
@@ -345,16 +345,21 @@ static void ov_show_error(Cpu *c) {
 
 // ==== SDK-internal initialisation (services.c)
 static void ov_diag_startup(Cpu *c) { (void)c; rt_log("diag: host diagnostics"); }
-static void ov_aoc_initialize(Cpu *c) { (void)c; rt_log("aoc: no add-on content"); }
-// 1.4.3's main lists add-on content (MNG services.c host_aoc_list): there is none.
-// int ListAddOnContent(AddOnContentIndex *out, int offset, int count)
+static void ov_aoc_initialize(Cpu *c) { (void)c; rt_log("aoc: %u add-on content(s)", aoc_count()); }
+static void ov_aoc_count(Cpu *c) { ret_x(c, aoc_count()); }
+// int ListAddOnContent(int *out, int offset, int count): the add-on content indices this machine has, paged. The
+// argument layout and the count in the return value are the mangled signature's (EPiii); the buffer is checked to be
+// mapped (the host can only probe readability) before a single entry lands in it, because a wrong layout here would corrupt guest memory silently.
 static void ov_aoc_list(Cpu *c) {
-    int offset = (int)arg_x(c, 1), count = (int)arg_x(c, 2);
+    int32_t *out = arg_p(c, 0);
+    int offset = (int32_t)arg_x(c, 1), count = (int32_t)arg_x(c, 2);
     if (offset < 0 || count < 0) rt_fatal("aoc: ListAddOnContent range %d+%d", offset, count);
-    ret_x(c, 0);
+    uint32_t ids[AOC_MAX];
+    uint32_t n = aoc_list(ids, offset, count < AOC_MAX ? count : AOC_MAX);
+    if (n && !(out && plat_mem_readable((uintptr_t)out, n * sizeof *out))) n = 0;   // nothing written, nothing reported
+    for (uint32_t i = 0; i < n; i++) out[i] = (int32_t)ids[i];
+    ret_x(c, n);
 }
-// int CountAddOnContent()
-static void ov_aoc_count(Cpu *c) { ret_x(c, 0); }
 static void ov_err_context(Cpu *c) { (void)c; rt_log("err: error contexts stay local"); }
 static void ov_pctl_initialize(Cpu *c) { (void)c; rt_log("pctl: no parental controls"); }
 static void ov_abort_observer(Cpu *c) { (void)c; rt_log("diag: the host crash reporter observes aborts"); }
@@ -902,8 +907,8 @@ HOST_OVERRIDE("_ZN2nn3err9ShowErrorENS_6ResultE", ov_show_error);
 
 HOST_OVERRIDE("nndiagStartup", ov_diag_startup);
 HOST_OVERRIDE("_ZN2nn3aoc10InitializeEv", ov_aoc_initialize);
-HOST_OVERRIDE("_ZN2nn3aoc16ListAddOnContentEPiii", ov_aoc_list);
 HOST_OVERRIDE("_ZN2nn3aoc17CountAddOnContentEv", ov_aoc_count);
+HOST_OVERRIDE("_ZN2nn3aoc16ListAddOnContentEPiii", ov_aoc_list);
 HOST_OVERRIDE("_ZN2nn3err26InitializeContextWriterApiEv", ov_err_context);
 HOST_OVERRIDE("_ZN2nn4pctl10InitializeEv", ov_pctl_initialize);
 HOST_OVERRIDE("_ZN2nn4diag34InitializeApplicationAbortObserverEv", ov_abort_observer);

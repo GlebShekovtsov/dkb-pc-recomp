@@ -110,7 +110,8 @@ Issues: [#2] [#3] [#4] [#5] [#7] [#8] [#9]; the whole list is the
 - NVN 2 calls the host accepts and does not record yet (`runtime/nvn_api_nvn2.c`, `NVN2_NOT_RECORDED`): mesh shaders,
   variable-rate shading, DLSS, ray tracing, device command buffers. Each one is logged on its first call. None of
   them has mattered so far.
-- Play-testing of update 3.2.0 (`dkb458752`) as far as the base has been played.
+- Play-testing of update 3.2.0 (`dkb458752`): the installer supports it and it boots, but nobody has played it as
+  far as the base has been played. Add-on content (`runtime/aoc_romfs.c`) is likewise untested in game.
 - Linux, which TotK Recomp's toolchain supports.
 
 ## Alongside
