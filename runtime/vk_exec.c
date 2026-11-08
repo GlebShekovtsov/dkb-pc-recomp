@@ -28,6 +28,28 @@
 #include "vk.h"
 #include "vk_exec.h"
 
+// nvnCommandBufferSetDepthClamp as the replay applies it. TotK on RADV showed "vertex explosions" from the driver's
+// dynamic depth clamp (docs/maxwell.md 1.6), and Bananza's map on AMD shows long flat sheets that clipping should
+// have removed, so the changes are logged (the first 8, then every power of two) and TOTK_DEPTH_CLAMP=0 or 1 forces
+// the state for comparisons; unset, the game's value applies.
+static int depth_clamp_state(int game) {
+    static int force = -2, last = -1;
+    static uint64_t changes;
+    if (force == -2) {
+        const char *e = cfg_get("TOTK_DEPTH_CLAMP");
+        force = e && *e ? strcmp(e, "0") != 0 : -1;
+        if (force >= 0) rt_log("vk: depth clamp forced %s (TOTK_DEPTH_CLAMP)", force ? "on" : "off");
+    }
+    if (game != last) {
+        last = game;
+        changes++;
+        if (changes <= 8 || !(changes & (changes - 1)))
+            rt_log("vk: the game turned depth clamp %s (change %llu)%s", game ? "on" : "off",
+                   (unsigned long long)changes, force >= 0 ? ", overridden" : "");
+    }
+    return force >= 0 ? force : game;
+}
+
 #define WEAK __attribute__((weak))
 #define CALL_DEPTH 8
 
@@ -927,7 +949,7 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
             memcpy(ex->blend_color, ((const p_blend_color *)a)->rgba, sizeof ex->blend_color);
             ex->dirty |= VK_EXEC_DIRTY_BLEND_CONST;
             break;
-        case OP_DEPTH_CLAMP: ex->pipe.depth_clamp = ((const p_flag *)a)->value != 0; break;
+        case OP_DEPTH_CLAMP: ex->pipe.depth_clamp = depth_clamp_state(((const p_flag *)a)->value != 0); break;
         case OP_RASTER_DISCARD: ex->pipe.raster_discard = ((const p_flag *)a)->value != 0; break;
         case OP_PRIM_RESTART: ex->prim_restart = *(const p_prim_restart *)a; break;
         case OP_COPY_STRIDE: ex->copy_stride = ((const p_copy_stride *)a)->stride; break;
