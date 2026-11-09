@@ -37,8 +37,23 @@ The same spot with the stage 1 build (0901269, `TOTK_TRACE=perf`, 60-frame windo
 
 The last point decides the design: parallel recording by parts alone cannot spread a large pass. Its draws have to be
 recorded into secondary command buffers (`VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT` with dynamic rendering)
-by several workers, and executed in order by the primary (`vkCmdExecuteCommands`). A frame dump's `passes.txt` of the
-spot gives the draws per pass and tells how much of the frame such passes hold.
+by several workers, and executed in order by the primary (`vkCmdExecuteCommands`). A frame dump of the spot
+(`passes.txt`, 103 render passes and 27 dispatches, 28,428 draws) confirms it:
+
+| Pass | Targets | Draws | Share |
+|---|---|---|---|
+| 54 | r11g11b10f, rgba8, r16f, d32f 1397x786 (lit opaque) | 11,984 | 42% |
+| 36 | r11g11b10f, rgba8, d32f 1397x786 (opaque before lighting) | 11,780 | 41% |
+| 27, 26 | 1496x1496 (shadow map) | 3,932 | 14% |
+| the other 99 passes | | 732 | 3% |
+
+Two passes hold 84% of the draws. In pass 36 one pipeline draws 5,973 times (a mesh of about a hundred vertices, its
+own transform in uniform block c4 each time, no instancing) and another 3,236 times; pass 54 repeats the pattern
+(4,119 + 1,854 and 3,236). Splitting between passes cannot help here; slices of these passes recorded in parallel into
+secondary command buffers can.
+
+The repeated pipelines also suggest a cheaper per-draw path for runs of draws that change only uniform block
+addresses and vertex buffers: dynamic uniform buffer offsets instead of a new push of the whole set.
 
 ## What already exists
 
