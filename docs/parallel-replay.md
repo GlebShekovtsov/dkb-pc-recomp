@@ -120,9 +120,9 @@ costs). The next stage moves `prepare_draw`'s state to the recording thread and 
 
 ## Stage B: workers (DKB_REPLAY_THREADS=N)
 
-Result of stage A on the RX 9070 XT: the frame looks the same, no hazard was logged, and the replay took about 1.17 us
-per draw against 1.00 (the bind ops are applied twice, once when collecting and once in the slice, and each slice starts
-with cold memos).
+Stage A has not run in game yet: the test runs so far had `TOTK_DUMP=key` set, which keeps every pass unsliced (the
+dump follows draws one by one), so their unchanged frames and timings say nothing about slicing. The log now says so,
+and `TOTK_TRACE=perf` reports the passes, slices and draws sliced.
 
 With `N` > 1, `par_flush` hands the slices to `N-1` workers and the submitting thread; each takes the next slice from a
 counter tagged with the flush's generation (a late worker finds another generation and takes nothing), records it into a

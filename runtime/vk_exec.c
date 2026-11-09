@@ -52,6 +52,7 @@ static _Thread_local int x_here;   // this thread is inside vk_exec_record (vk_e
 typedef struct { uint64_t sig; uint32_t draws; uint8_t banned; } ParHist;
 static ParHist par_hist[PAR_HIST];
 static int par_mode = -1;                       // DKB_REPLAY_THREADS: 0 off, else the threads (stage A: 1)
+static uint64_t par_passes, par_slices, par_sliced_draws, par_skipped_oq;   // since the last perf line
 static _Thread_local int par_slice, par_hazard; // recording a slice; a slice dropped a pass or barrier call
 static int pass_secondary;                      // the next vk_exec_pass_begin opens a pass of secondary command buffers
 static uint32_t pass_draws;                     // draws of the open pass, for par_hist
@@ -1075,7 +1076,13 @@ static int par_start(VkExec *ex) {
         if (par_mode) rt_log("vk: passes of %d or more draws are recorded in slices of %d into secondary command buffers "
                              "(TOTK_REPLAY_THREADS=%d: recorded by that many threads)", PAR_MIN_DRAWS, PAR_SLICE_DRAWS, par_mode);
     }
-    if (!par_mode || ex->in_pass || ex != &X || ex->render_disabled || vk_dump_armed || vk_exec_oq_counting()) return 0;
+    if (!par_mode || ex->in_pass || ex != &X || ex->render_disabled) return 0;
+    if (vk_dump_armed) {   // the dump follows draws one by one, on one thread
+        static int told;
+        if (!told++) rt_log("vk: TOTK_DUMP is set: no pass is sliced in this run (TOTK_REPLAY_THREADS has no effect)");
+        return 0;
+    }
+    if (vk_exec_oq_counting()) return par_skipped_oq++, 0;
     uint64_t sig = par_sig(ex);
     ParHist *e = par_find(sig, 0);
     if (!e || e->banned || e->draws < PAR_MIN_DRAWS) return 0;
@@ -1243,8 +1250,17 @@ static void par_start_workers(void) {
 }
 
 static void par_flush(VkExec *ex) {
+    if (!ex) {   // TOTK_TRACE=perf (record_impl): what was sliced since the last line
+        if (par_mode > 0)
+            rt_log("perf: sliced passes %llu with %llu slices and %llu draws; %llu passes not sliced while occlusion queries "
+                   "counted", (unsigned long long)par_passes, (unsigned long long)par_slices,
+                   (unsigned long long)par_sliced_draws, (unsigned long long)par_skipped_oq);
+        par_passes = par_slices = par_sliced_draws = par_skipped_oq = 0;
+        return;
+    }
     if (!PC.on) return;
     PC.on = 0;
+    par_passes++, par_slices += (uint64_t)PC.nslices, par_sliced_draws += (uint64_t)PC.draws;
     if (PC.nslices > cpar_out) {
         free(par_out);
         cpar_out = PC.nslices * 2;
@@ -1400,6 +1416,7 @@ static int record_impl(VkCommandBuffer cb, const uint64_t *handles, int n, uint6
     if (memory) n_subs++;
     if ((rt_trace & RT_TRACE_PERF) && n_subs >= 240) {
         rt_log("perf: replay command buffer parts per submission %.2f", (double)(n_subs + n_parts) / (double)n_subs);
+        par_flush(NULL);   // its perf line
         n_subs = n_parts = 0;
     }
     return ex->recorded - part_start;   // what the last part holds
