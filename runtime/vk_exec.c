@@ -47,7 +47,7 @@ static _Thread_local int x_here;   // this thread is inside vk_exec_record (vk_e
 // Parallel passes: the state shared with the pass handlers (the rest is at the op loop).
 #define PAR_MIN_DRAWS 256
 #define PAR_SLICE_DRAWS 1024
-#define PAR_HIST 64
+#define PAR_HIST 256
 enum { PAR_WHY_UNSEEN, PAR_WHY_NONE, PAR_WHY_NEW, PAR_WHY_SMALL, PAR_WHY_BANNED, PAR_WHY_NOATT, PAR_WHY_QUERY };
 #define PAR_BAN_AFTER 8   // hazards after which a target set is not sliced again
 
@@ -115,12 +115,22 @@ static uint64_t par_sig(const VkExec *ex) {
     return h | 1;
 }
 
+// The entry of target set sig, among 4 neighbours of its slot. add: a missing one takes a free neighbour, else the one
+// with the fewest draws. Two of the busy area's big target sets fell on one slot of the first, direct-mapped table (their
+// signatures differed in the high bits only) and evicted each other every frame, so neither was ever sliced.
+static uint32_t par_slot(uint64_t sig) { return (uint32_t)((sig ^ sig >> 29) * 0x9E3779B97F4A7C15ull >> 56) % PAR_HIST; }
+
 static ParHist *par_find(uint64_t sig, int add) {
-    ParHist *e = &par_hist[sig % PAR_HIST];
-    if (e->sig == sig) return e;
+    uint32_t i0 = par_slot(sig);
+    ParHist *low = NULL;
+    for (uint32_t k = 0; k < 4; k++) {
+        ParHist *e = &par_hist[(i0 + k) % PAR_HIST];
+        if (e->sig == sig) return e;
+        if (!low || (!e->sig && low->sig) || (e->sig && low->sig && e->draws < low->draws)) low = e;
+    }
     if (!add) return NULL;
-    *e = (ParHist){sig, 0, 0};
-    return e;
+    *low = (ParHist){sig, 0, 0};
+    return low;
 }
 
 
@@ -713,14 +723,14 @@ void vk_exec_pass_end(VkExec *ex) {
     if (ex == &X && !ex->pass_noatt && !par_restart) {
         uint64_t sig = par_sig(ex);
         static int told;
-        if (par_mode > 0 && !pass_sliced && pass_draws >= PAR_SLICE_DRAWS && told < 24) {
+        if (par_mode > 0 && !pass_sliced && pass_draws >= PAR_SLICE_DRAWS && (told < 24 || told % 1000 == 0 || !++told)) {
             static const char *const why[] = {"no direct draw reached par_start", "not refused", "targets not seen before",
                                               "targets drew little before", "banned", "no attachment", "queries"};
             ParHist *h = par_find(sig, 0);
-            told++;
+            told++;   // the first 24, then one in a thousand
             rt_log("vk: a pass of %u draws was not sliced: %s (targets %016llx, slot %u, kept count %u, slot holds %016llx)",
-                   pass_draws, why[pass_why], (unsigned long long)sig, (unsigned)(sig % PAR_HIST), h ? h->draws : 0,
-                   (unsigned long long)par_hist[sig % PAR_HIST].sig);
+                   pass_draws, why[pass_why], (unsigned long long)sig, (unsigned)par_slot(sig), h ? h->draws : 0,
+                   (unsigned long long)par_hist[par_slot(sig)].sig);
         }
         ParHist *e = par_find(sig, pass_draws >= PAR_MIN_DRAWS);
         if (e) e->draws = pass_draws >= e->draws ? pass_draws : e->draws - e->draws / 8;

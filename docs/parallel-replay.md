@@ -195,6 +195,18 @@ The workers still waited while the walk collected a whole pass. A slice is now p
 copies have a fixed place for that (`PAR_MAX_OPS`, `PAR_MAX_SLICES`). At the end the submitting thread records what is
 left and waits for the rest.
 
+### Sixteen threads, and half the draws still unsliced
+
+With slices handed out during collection (689c575) and 16 threads: replay 17.6 ms for 28,600 draws, 34-35 fps, no
+hazard, same picture. Only 14,400 of the 28,600 draws a frame went through slices. The unsliced big passes logged
+"targets not seen before" for two signatures that differ in their high bits only and fell on one slot of the
+direct-mapped history, evicting each other every frame. The history has 256 entries now, a mixed index and four
+neighbours per signature.
+
+The render thread is busy 27-28 ms a frame there, 10 ms of it outside the replay (the game building its commands), so
+the replay alone cannot bring the frame under 16.7 ms on the submitting thread; `TOTK_REPLAY_ASYNC=1` with the sliced
+replay is the next thing to measure.
+
 ## Plan
 
 1. **Measure and remove the cheap waste** (done here).
