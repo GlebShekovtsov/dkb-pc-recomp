@@ -163,6 +163,13 @@ slice does not know what earlier slices wrote, so it starts with every attachmen
 that samples one records the by-region barrier in the secondary command buffer. A target learned inside a slice is a
 hazard (its pass restart is dropped); a target set is left alone after eight hazards instead of one.
 
+### The key of the draw history
+
+With all of that, the big passes were still unsliced, and the log line for them (6838ba9) gave the reason: "targets not
+seen before", with another signature every frame for what is the same pass. The history was keyed by a hash of the
+`OP_SET_RT` payload, whose bytes are not the same from frame to frame for the same targets, so a big pass never found
+the count its targets kept. The key is now the resolved images with their level and layers.
+
 ## Plan
 
 1. **Measure and remove the cheap waste** (done here).

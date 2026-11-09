@@ -97,10 +97,19 @@ static void *par_grow(void *p, int *cap, size_t size) {
     return q;
 }
 
+// The pass's targets as one number: the resolved images with their level and layers. Not the OP_SET_RT payload, whose
+// bytes differ from frame to frame for the same targets (every pass of a run logged "targets not seen before" with it).
+// The targets must be resolved (resolve_rt).
 static uint64_t par_sig(const VkExec *ex) {
     uint64_t h = 0xcbf29ce484222325ull;
-    const uint8_t *b = (const uint8_t *)&ex->rt;
-    for (size_t i = 0; i < sizeof ex->rt; i++) h = (h ^ b[i]) * 0x100000001b3ull;
+    for (uint32_t i = 0; i < 9; i++) {
+        const VkExecTarget *t = i < 8 ? &ex->color[i] : &ex->depth;
+        uint64_t v[2] = {0, 0};
+        if ((i == 8 || i < ex->pass_ncolor) && t->image)
+            v[0] = (uint64_t)(uintptr_t)t->image, v[1] = (uint64_t)t->level << 40 | (uint64_t)t->base_layer << 20 | t->layers;
+        h = (h ^ v[0]) * 0x100000001b3ull;
+        h = (h ^ v[1]) * 0x100000001b3ull;
+    }
     return h | 1;
 }
 
@@ -1115,12 +1124,12 @@ static int par_start(VkExec *ex) {
         if (!told++) rt_log("vk: TOTK_DUMP is set: no pass is sliced in this run (TOTK_REPLAY_THREADS has no effect)");
         return 0;
     }
+    resolve_rt(ex);
     uint64_t sig = par_sig(ex);
     ParHist *e = par_find(sig, 0);
     if (!e) return pass_why = PAR_WHY_NEW, par_no[0]++, 0;
     if (e->draws < PAR_MIN_DRAWS) return pass_why = PAR_WHY_SMALL, par_no[0]++, 0;
     if (e->banned >= PAR_BAN_AFTER) return pass_why = PAR_WHY_BANNED, par_no[1]++, 0;
-    resolve_rt(ex);
     if (ex->pass_noatt) return pass_why = PAR_WHY_NOATT, par_no[2]++, 0;
     if (ex->in_pass) {
         par_restart = 1;
