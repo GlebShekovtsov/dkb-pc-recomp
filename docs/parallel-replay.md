@@ -146,6 +146,15 @@ command, so a sliced pass's query now begins before `vkCmdBeginRendering` and en
 (`vk_exec_xfer.c` `vk_exec_oq_begin_outside`, `vk_exec_oq_pass_ended`), and the slices inherit it
 (`occlusionQueryEnable`, device feature `inheritedQueries`; without it the pass is not sliced).
 
+### Passes a clear opens
+
+With queries handled (31b640e), the busy area still sliced one pass of about 350 draws per four frames. The perf line
+showed why: counter ops ended ten collections per 240 submissions, and the two big passes never reached `par_start`,
+which only looked at draws outside a pass. Those passes begin with a clear, and the clear opens the pass. `par_start`
+now also takes the first draw of an open pass: the pass is ended and opened again with secondary contents (one more
+`vkCmdBeginRendering` that loads the attachments). The draw history of a pass's targets also falls by an eighth instead
+of following a smaller pass at once, so the piece after a counter op is sliced too.
+
 ## Plan
 
 1. **Measure and remove the cheap waste** (done here).
