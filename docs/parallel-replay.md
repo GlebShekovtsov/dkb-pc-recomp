@@ -55,6 +55,25 @@ secondary command buffers can.
 The repeated pipelines also suggest a cheaper per-draw path for runs of draws that change only uniform block
 addresses and vertex buffers: dynamic uniform buffer offsets instead of a new push of the whole set.
 
+### Per-draw breakdown
+
+`DKB_DRAW_PROFILE=1` in the same spot (727d63e, 1642 windows of 60000 draws, median ns per draw; the profile itself
+adds about 4 ms of replay a frame, and `TOTK_TRACE=perf` was on, which adds `note_work` to other-ops):
+
+| Section | ns | Section | ns |
+|---|---|---|---|
+| other ops (about 3.2 bind ops and the draw command per draw) | 234 | ubo | 81 |
+| bind-sig (signature and the binding loop itself) | 144 | textures | 78 |
+| sets (push or allocate) | 103 | pipeline | 48 |
+| vertex buffers | 99 | ssbo | 42 |
+| tail | 28 | shaders | 40 |
+| state | 23 | pass, feedback | 17, 14 |
+| **total** | **964** | | |
+
+No section dominates. Shortening the larger ones (other ops, the signature and loop, sets, vertex buffers) can take a
+share of the per-draw time, not halve it: the frame stays above 16.7 ms on one thread, so recording in parallel is still
+the way to 60 fps in this spot.
+
 ## What already exists
 
 - The replay splits a submission into parts between passes (`vk_exec.c` `maybe_split`, `TOTK_SPLIT_DRAWS`,
