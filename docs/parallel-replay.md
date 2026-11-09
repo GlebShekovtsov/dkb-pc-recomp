@@ -102,6 +102,22 @@ The replay keeps its state in file-level variables, written for one thread:
   the part that samples them), written ranges and feedback tracking (`note_written`, `feedback_*`), GPU-written
   notes, the dump. A part recorded early must not publish these before the parts ahead of it.
 
+## Stage A: slices on one thread (DKB_REPLAY_THREADS=1)
+
+A pass whose targets drew at least 256 draws the last time (`par_hist`, keyed by the `OP_SET_RT` payload) opens with
+`VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT`. From its first draw the walk collects ops (`par_take`): state
+and bind ops are applied to the replay state as usual, draws are only kept, and every 1024 draws a copy of the replay
+state starts a new slice. The first op of another kind (other targets, a clear, a copy, a barrier, an indirect draw, an
+uniform update, the end of the submission) flushes (`par_flush`): each slice is replayed from its copy into its own
+secondary command buffer, inheriting the pass's formats, and the primary executes them in order and ends the pass.
+
+Kept out: passes without attachments, passes with feedback-layout targets, passes while occlusion queries count, and
+frames being dumped. Inside a slice, anything that would end, restart or begin a pass, record a full barrier or an
+inline texture command is dropped and marks a hazard; the pass's targets are then not sliced again.
+
+This stage records the slices on the same thread, so it only checks that slicing keeps the frame unchanged (and what it
+costs). The next stage moves `prepare_draw`'s state to the recording thread and hands slices to workers.
+
 ## Plan
 
 1. **Measure and remove the cheap waste** (done here).

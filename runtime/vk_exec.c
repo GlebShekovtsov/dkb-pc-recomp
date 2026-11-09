@@ -44,6 +44,58 @@ static VkExec X;
 static int x_ready;
 static _Thread_local int x_here;   // this thread is inside vk_exec_record (vk_exec_inline_begin)
 
+// Parallel passes: the state shared with the pass handlers (the rest is at the op loop).
+#define PAR_MIN_DRAWS 256
+#define PAR_SLICE_DRAWS 1024
+#define PAR_HIST 64
+
+typedef struct { uint64_t sig; uint32_t draws; uint8_t banned; } ParHist;
+static ParHist par_hist[PAR_HIST];
+static int par_mode = -1;                       // DKB_REPLAY_THREADS: 0 off, else the threads (stage A: 1)
+static _Thread_local int par_slice, par_hazard; // recording a slice; a slice dropped a pass or barrier call
+static int pass_secondary;                      // the next vk_exec_pass_begin opens a pass of secondary command buffers
+static uint32_t pass_draws;                     // draws of the open pass, for par_hist
+static struct {
+    int on;
+    uint64_t sig;
+    const op_hdr **ops;                          // the collected ops in order
+    int nops, cops;
+    VkExec *snap;                                // X before each slice's first op
+    int *start;                                  // each slice's first op
+    int nslices, cslices;
+    int draws, slice_draws;
+} PC;
+
+static PlatMutex par_lock = PLAT_MUTEX_INIT;
+static VkCommandPool par_pool;
+static VkCommandBuffer *par_free;               // secondaries whose submission completed (completion thread adds)
+static int npar_free, cpar_free;
+typedef struct { int n; VkCommandBuffer cb[]; } ParDone;
+
+static void *par_grow(void *p, int *cap, size_t size) {
+    int c = *cap ? *cap * 2 : 64;
+    void *q = realloc(p, (size_t)c * size);
+    if (!q) rt_fatal("vk: out of memory");
+    *cap = c;
+    return q;
+}
+
+static uint64_t par_sig(const VkExec *ex) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    const uint8_t *b = (const uint8_t *)&ex->rt;
+    for (size_t i = 0; i < sizeof ex->rt; i++) h = (h ^ b[i]) * 0x100000001b3ull;
+    return h | 1;
+}
+
+static ParHist *par_find(uint64_t sig, int add) {
+    ParHist *e = &par_hist[sig % PAR_HIST];
+    if (e->sig == sig) return e;
+    if (!add) return NULL;
+    *e = (ParHist){sig, 0, 0};
+    return e;
+}
+
+
 // ---- TOTK_TRACE=gfx frame counters
 
 VkExecFrame vk_exec_frame;
@@ -89,6 +141,9 @@ WEAK void vk_exec_op_draw(VkExec *ex, uint32_t op, const void *payload) {
     (void)ex, (void)payload;
     rt_fatal("vk: op %s is not replayed yet", nvn_op_name(op));
 }
+
+WEAK void vk_exec_draw_slice_begin(void) {}
+WEAK int vk_exec_oq_counting(void) { return 0; }
 
 WEAK void vk_exec_op_xfer(VkExec *ex, uint32_t op, const void *payload) {
     (void)ex, (void)payload;
@@ -570,6 +625,7 @@ void vk_exec_barrier(VkExec *ex) { barrier_to(ex, NULL, NULL, 0); }
 
 void vk_exec_pass_begin(VkExec *ex) {
     if (ex->in_pass) return;
+    if (par_slice) { par_hazard = 1; return; }   // a slice cannot open a pass (parallel passes)
     resolve_rt(ex);
     // Learned targets (VkTexImage.fb_learned) are attached in the feedback layout
     VkImage want[9];
@@ -609,8 +665,10 @@ void vk_exec_pass_begin(VkExec *ex) {
                           .layerCount = ex->pass_layers, .colorAttachmentCount = ex->pass_ncolor,
                           .pColorAttachments = ca,
                           .pDepthAttachment = ex->pass_depth ? &da : NULL,
-                          .pStencilAttachment = ex->pass_stencil ? &sa : NULL};
+                          .pStencilAttachment = ex->pass_stencil ? &sa : NULL,
+                          .flags = pass_secondary ? VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT : 0};
     vkCmdBeginRendering(ex->cb, &ri);
+    pass_draws = 0;
     vk_exec_frame.passes++;
     ex->recorded++;
     ex->in_pass = 1;
@@ -618,6 +676,12 @@ void vk_exec_pass_begin(VkExec *ex) {
 
 void vk_exec_pass_end(VkExec *ex) {
     if (!ex->in_pass) return;
+    if (par_slice) { par_hazard = 1; return; }   // a slice cannot end the pass (parallel passes)
+    if (ex == &X && !ex->pass_noatt) {          // the draws this pass's targets take, for the next time (par_start)
+        uint64_t sig = par_sig(ex);
+        ParHist *e = par_find(sig, pass_draws >= PAR_MIN_DRAWS);
+        if (e) e->draws = pass_draws;
+    }
     vk_exec_oq_pass_end(ex);
     vkCmdEndRendering(ex->cb);
     ex->recorded++;
@@ -635,6 +699,7 @@ void vk_exec_pass_end(VkExec *ex) {
 VkCommandBuffer vk_exec_inline_begin(int *reopen) {
     VkExec *ex = &X;
     *reopen = 0;
+    if (par_slice) { par_hazard = 1; return VK_NULL_HANDLE; }   // not inside a slice (parallel passes)
     if (!x_here || !ex->cb) return VK_NULL_HANDLE;
     *reopen = ex->in_pass;
     vk_exec_barrier(ex);   // ends the pass; feedback-layout targets go back to GENERAL
@@ -877,11 +942,262 @@ static uint64_t draws_total;   // draws and dispatches walked since the start (v
 
 uint64_t vk_exec_draws_total(void) { return draws_total; }
 
+// The fixed-function and pool state ops: they only change VkExec (the draws record what they set).
+static void state_op(VkExec *ex, uint32_t op, const void *a) {
+    switch (op) {
+    case OP_VIEWPORTS: {
+        const p_viewports *v = a;
+        for (int i = 0; i < v->n && v->first + i < 16; i++)
+            if (v->first + i >= 0) memcpy(ex->vp[v->first + i], v->v[i], sizeof ex->vp[0]);
+        ex->has_vp = 1;
+        ex->dirty |= VK_EXEC_DIRTY_VIEWPORT;
+        break;
+    }
+    case OP_SCISSOR:
+        ex->scissor = *(const p_scissor *)a;
+        ex->has_scissor = 1;
+        ex->dirty |= VK_EXEC_DIRTY_SCISSOR;
+        break;
+    case OP_DEPTH_RANGE: {
+        const p_depth_range *r = a;
+        ex->depth_range[0] = r->n, ex->depth_range[1] = r->f;
+        ex->dirty |= VK_EXEC_DIRTY_VIEWPORT;
+        break;
+    }
+    case OP_STENCIL: {
+        const p_stencil *s = a;
+        for (int f = 0; f < 2; f++) {
+            if (!(s->face & (1 << f))) continue;
+            if (s->which == 0) ex->st_vmask[f] = (uint32_t)s->value_mask;
+            else if (s->which == 1) ex->st_wmask[f] = (uint32_t)s->mask;
+            else ex->st_ref[f] = (uint32_t)s->ref;
+        }
+        ex->dirty |= VK_EXEC_DIRTY_STENCIL;
+        break;
+    }
+    case OP_POLY_OFFSET:
+        ex->poly_offset = *(const p_poly_offset *)a;
+        ex->dirty |= VK_EXEC_DIRTY_DEPTH_BIAS;
+        break;
+    case OP_BLEND_COLOR:
+        memcpy(ex->blend_color, ((const p_blend_color *)a)->rgba, sizeof ex->blend_color);
+        ex->dirty |= VK_EXEC_DIRTY_BLEND_CONST;
+        break;
+    case OP_DEPTH_CLAMP: ex->pipe.depth_clamp = ((const p_flag *)a)->value != 0; break;
+    case OP_RASTER_DISCARD: ex->pipe.raster_discard = ((const p_flag *)a)->value != 0; break;
+    case OP_PRIM_RESTART: ex->prim_restart = *(const p_prim_restart *)a; break;
+    case OP_COPY_STRIDE: ex->copy_stride = ((const p_copy_stride *)a)->stride; break;
+    case OP_SET_TEX_POOL: ex->tex_pool = ((const p_set_pool *)a)->pool, ex->tex_serial++; break;
+    case OP_SET_SAMP_POOL: ex->samp_pool = ((const p_set_pool *)a)->pool, ex->tex_serial++; break;
+    default: break;
+    }
+}
+
+// ---- parallel passes (DKB_REPLAY_THREADS, docs/parallel-replay.md)
+// A render pass whose targets drew at least PAR_MIN_DRAWS draws the last time is recorded in slices: from its first
+// draw the walk collects the pass's state, bind and draw ops instead of replaying them, applying only the state and bind
+// ops to X and keeping a copy of X every PAR_SLICE_DRAWS draws. When an op that is none of those comes (or the
+// submission ends), each slice is replayed from its copy into a secondary command buffer, and the primary executes them
+// in order inside the pass, which began with VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT; the pass then ends.
+// Stage A of the plan: the slices are recorded one after another on the replaying thread, to check that slicing keeps
+// the frame the same before workers record them at once. A slice that would end or restart the pass, or record a full
+// barrier (a feedback target learned, an inline texture command) is a hazard: the call is dropped, and the targets are
+// not sliced again.
+int vk_exec_par_slice(void) { return par_slice; }
+void vk_exec_par_hazard(void) { par_hazard = 1; }
+
+static void par_done(void *arg) {   // completion thread: the secondaries of a finished submission can be reused
+    ParDone *d = arg;
+    plat_mutex_lock(&par_lock);
+    for (int i = 0; i < d->n; i++) {
+        if (npar_free == cpar_free) par_free = par_grow(par_free, &cpar_free, sizeof *par_free);
+        par_free[npar_free++] = d->cb[i];
+    }
+    plat_mutex_unlock(&par_lock);
+    free(d);
+}
+
+static VkCommandBuffer par_secondary(void) {
+    VkCtx *c = vk_ctx();
+    VkCommandBuffer cb = VK_NULL_HANDLE;
+    plat_mutex_lock(&par_lock);
+    if (npar_free) cb = par_free[--npar_free];
+    plat_mutex_unlock(&par_lock);
+    if (cb) {
+        vkResetCommandBuffer(cb, 0);
+        return cb;
+    }
+    if (!par_pool) {
+        VkCommandPoolCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+                                      .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+                                      .queueFamilyIndex = c->gfx_family};
+        if (vkCreateCommandPool(c->device, &pi, NULL, &par_pool) != VK_SUCCESS) rt_fatal("vk: secondary command pool failed");
+    }
+    VkCommandBufferAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = par_pool,
+                                      .level = VK_COMMAND_BUFFER_LEVEL_SECONDARY, .commandBufferCount = 1};
+    if (vkAllocateCommandBuffers(c->device, &ai, &cb) != VK_SUCCESS) rt_fatal("vk: secondary command buffer failed");
+    return cb;
+}
+
+// Inherits the open pass: its attachment formats as vkCmdBeginRendering saw them (a slot without a view: UNDEFINED).
+static void par_begin_secondary(const VkExec *ex, VkCommandBuffer cb) {
+    VkFormat color[8];
+    for (uint32_t i = 0; i < ex->pass_ncolor && i < 8; i++) color[i] = ex->color[i].image ? ex->pass_color[i] : VK_FORMAT_UNDEFINED;
+    const VkExecTarget *d = &ex->depth;
+    VkCommandBufferInheritanceRenderingInfo ir = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_RENDERING_INFO,
+        .colorAttachmentCount = ex->pass_ncolor, .pColorAttachmentFormats = color,
+        .depthAttachmentFormat = d->image && (d->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) ? ex->pass_depth : VK_FORMAT_UNDEFINED,
+        .stencilAttachmentFormat = d->image && (d->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) ? ex->pass_stencil : VK_FORMAT_UNDEFINED,
+        .rasterizationSamples = (VkSampleCountFlagBits)(ex->pass_samples ? ex->pass_samples : 1)};
+    VkCommandBufferInheritanceInfo ii = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO, .pNext = &ir};
+    VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                   .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT |
+                                            VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT,
+                                   .pInheritanceInfo = &ii};
+    if (vkBeginCommandBuffer(cb, &bi) != VK_SUCCESS) rt_fatal("vk: secondary command buffer begin failed");
+}
+
+static void resolve_rt(VkExec *ex);
+
+// At a draw outside a pass: 1 when the pass it opens is sliced (the pass is then open, with secondary contents).
+static int par_start(VkExec *ex) {
+    if (par_mode < 0) {
+        const char *e = cfg_get("TOTK_REPLAY_THREADS");
+        par_mode = e && *e ? atoi(e) : 0;
+        if (par_mode < 0) par_mode = 0;
+        if (par_mode) rt_log("vk: passes of %d or more draws are recorded in slices of %d into secondary command buffers "
+                             "(TOTK_REPLAY_THREADS=%d; stage A: on the replaying thread)", PAR_MIN_DRAWS, PAR_SLICE_DRAWS, par_mode);
+    }
+    if (!par_mode || ex->in_pass || ex != &X || ex->render_disabled || vk_dump_armed || vk_exec_oq_counting()) return 0;
+    uint64_t sig = par_sig(ex);
+    ParHist *e = par_find(sig, 0);
+    if (!e || e->banned || e->draws < PAR_MIN_DRAWS) return 0;
+    resolve_rt(ex);
+    if (ex->pass_noatt) return 0;
+    for (uint32_t i = 0; i < 9; i++) {   // feedback-layout targets: the in-pass barriers stay in the primary
+        const VkExecTarget *t = i < 8 ? &ex->color[i] : &ex->depth;
+        if ((i < 8 && i >= ex->pass_ncolor) || !t->image || !t->img) continue;
+        if (t->img->fb_learned) return 0;
+    }
+    pass_secondary = 1;
+    vk_exec_pass_begin(ex);
+    pass_secondary = 0;
+    if (!ex->in_pass) return 0;
+    PC.on = 1, PC.sig = sig, PC.nops = 0, PC.nslices = 0, PC.draws = 0, PC.slice_draws = PAR_SLICE_DRAWS;
+    return 1;
+}
+
+static void par_op(VkExec *ex, uint32_t op, const void *a) {   // replay of one collected op
+    switch (op) {
+    case OP_VIEWPORTS: case OP_SCISSOR: case OP_DEPTH_RANGE: case OP_STENCIL: case OP_POLY_OFFSET:
+    case OP_BLEND_COLOR: case OP_DEPTH_CLAMP: case OP_RASTER_DISCARD: case OP_PRIM_RESTART:
+    case OP_COPY_STRIDE: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL:
+        state_op(ex, op, a);
+        break;
+    default: vk_exec_op_draw(ex, op, a); break;
+    }
+}
+
+// The op h while collecting: 1 when it was taken (state and bind ops applied to ex, draws only kept), 0 when it ends
+// the collection.
+static int par_take(VkExec *ex, const op_hdr *h, const void *a) {
+    switch (h->op) {
+    case OP_SET_RT:
+        return !memcmp(&ex->rt, a, sizeof ex->rt);   // the same targets again: the pass goes on
+    case OP_WAIT_SYNC:
+        return 1;                                     // waited for before the replay (walk)
+    case OP_VIEWPORTS: case OP_SCISSOR: case OP_DEPTH_RANGE: case OP_STENCIL: case OP_POLY_OFFSET:
+    case OP_BLEND_COLOR: case OP_DEPTH_CLAMP: case OP_RASTER_DISCARD: case OP_PRIM_RESTART:
+    case OP_COPY_STRIDE: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL:
+        state_op(ex, h->op, a);
+        break;
+    case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF:
+    case OP_BIND_UBO: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_PUSH_CONST:
+        vk_exec_op_draw(ex, h->op, a);   // binds only change ex
+        break;
+    case OP_DRAW: case OP_DRAW_IDX:
+        if (PC.slice_draws >= PAR_SLICE_DRAWS) {   // a new slice starts at this draw, from ex as it is now
+            if (PC.nslices == PC.cslices) {
+                int c = PC.cslices;
+                PC.snap = par_grow(PC.snap, &c, sizeof *PC.snap);
+                PC.start = realloc(PC.start, (size_t)c * sizeof *PC.start);
+                if (!PC.start) rt_fatal("vk: out of memory");
+                PC.cslices = c;
+            }
+            PC.snap[PC.nslices] = *ex;
+            PC.start[PC.nslices++] = PC.nops;
+            PC.slice_draws = 0;
+        }
+        PC.slice_draws++, PC.draws++;
+        vk_exec_frame.draws_seen++;
+        break;
+    default:
+        return 0;
+    }
+    if (PC.nops == PC.cops) PC.ops = par_grow(PC.ops, &PC.cops, sizeof *PC.ops);
+    PC.ops[PC.nops++] = h;
+    return 1;
+}
+
+static void par_flush(VkExec *ex) {
+    if (!PC.on) return;
+    PC.on = 0;
+    ParDone *done = malloc(sizeof *done + sizeof(VkCommandBuffer) * (size_t)(PC.nslices ? PC.nslices : 1));
+    if (!done) rt_fatal("vk: out of memory");
+    done->n = 0;
+    static VkExec w;
+    par_hazard = 0;
+    for (int i = 0; i < PC.nslices; i++) {
+        VkCommandBuffer cb = par_secondary();
+        par_begin_secondary(ex, cb);
+        w = PC.snap[i];
+        w.cb = cb, w.recorded = 0, w.dirty = VK_EXEC_DIRTY_ALL;
+        w.views = ex->views, w.nviews = ex->nviews, w.cap_views = ex->cap_views;   // the list lives on in ex
+        vk_exec_draw_slice_begin();
+        par_slice = 1;
+        int end = i + 1 < PC.nslices ? PC.start[i + 1] : PC.nops;
+        for (int k = PC.start[i]; k < end; k++) par_op(&w, PC.ops[k]->op, nvn_op_payload(PC.ops[k]));
+        par_slice = 0;
+        if (vkEndCommandBuffer(cb) != VK_SUCCESS) rt_fatal("vk: secondary command buffer end failed");
+        done->cb[done->n++] = cb;
+        ex->views = w.views, ex->nviews = w.nviews, ex->cap_views = w.cap_views;
+        ex->fb_dirty |= w.fb_dirty;
+        ex->recorded += w.recorded;
+    }
+    rec_drain();   // the recorder has made every earlier call into the primary
+    if (done->n) vkCmdExecuteCommands(ex->cb, (uint32_t)done->n, done->cb);
+    ex->recorded++;
+    vk_completion_add(ex->fence, par_done, done);
+    vk_exec_draw_slice_begin();   // the primary's bindings are undefined after vkCmdExecuteCommands
+    ex->dirty = VK_EXEC_DIRTY_ALL;
+    vk_exec_pass_end(ex);         // a pass of secondary command buffers takes nothing else
+    if (par_hazard) {
+        ParHist *e = par_find(PC.sig, 1);
+        e->banned = 1;
+        rt_log("vk: a sliced pass needed a pass or barrier change inside a slice: those targets are not sliced again");
+    }
+}
+
 static void walk(VkExec *ex, const op_hdr *h, int depth) {
     for (;;) {
         if (h->size < sizeof *h || (h->size & 7) || h->op >= OP_COUNT_)
             rt_fatal("vk: corrupt command record at %p: op %u size %u", (const void *)h, h->op, h->size);
         const void *a = nvn_op_payload(h);
+        if (h->op != OP_END && h->op != OP_BEGIN && h->op != OP_JUMP && h->op != OP_CALL) {
+            if (PC.on) {
+                if (par_take(ex, h, a)) {
+                    if (h->op == OP_DRAW || h->op == OP_DRAW_IDX) draws_total++, pass_draws++;
+                    h = nvn_op_next(h);
+                    continue;
+                }
+                par_flush(ex);
+            } else if ((h->op == OP_DRAW || h->op == OP_DRAW_IDX) && par_start(ex) && par_take(ex, h, a)) {
+                draws_total++, pass_draws++;
+                h = nvn_op_next(h);
+                continue;
+            }
+        }
         switch (h->op) {
         case OP_END: return;
         case OP_BEGIN: break;
@@ -893,56 +1209,18 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
         case OP_SET_RT: set_rt(ex, a); break;
         case OP_CLEAR_COLOR: clear_color(ex, a); break;
         case OP_CLEAR_DS: clear_ds(ex, a); break;
-        case OP_VIEWPORTS: {
-            const p_viewports *v = a;
-            for (int i = 0; i < v->n && v->first + i < 16; i++)
-                if (v->first + i >= 0) memcpy(ex->vp[v->first + i], v->v[i], sizeof ex->vp[0]);
-            ex->has_vp = 1;
-            ex->dirty |= VK_EXEC_DIRTY_VIEWPORT;
+        case OP_VIEWPORTS: case OP_SCISSOR: case OP_DEPTH_RANGE: case OP_STENCIL: case OP_POLY_OFFSET:
+        case OP_BLEND_COLOR: case OP_DEPTH_CLAMP: case OP_RASTER_DISCARD: case OP_PRIM_RESTART:
+        case OP_COPY_STRIDE: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL:
+            state_op(ex, h->op, a);
             break;
-        }
-        case OP_SCISSOR:
-            ex->scissor = *(const p_scissor *)a;
-            ex->has_scissor = 1;
-            ex->dirty |= VK_EXEC_DIRTY_SCISSOR;
-            break;
-        case OP_DEPTH_RANGE: {
-            const p_depth_range *r = a;
-            ex->depth_range[0] = r->n, ex->depth_range[1] = r->f;
-            ex->dirty |= VK_EXEC_DIRTY_VIEWPORT;
-            break;
-        }
-        case OP_STENCIL: {
-            const p_stencil *s = a;
-            for (int f = 0; f < 2; f++) {
-                if (!(s->face & (1 << f))) continue;
-                if (s->which == 0) ex->st_vmask[f] = (uint32_t)s->value_mask;
-                else if (s->which == 1) ex->st_wmask[f] = (uint32_t)s->mask;
-                else ex->st_ref[f] = (uint32_t)s->ref;
-            }
-            ex->dirty |= VK_EXEC_DIRTY_STENCIL;
-            break;
-        }
-        case OP_POLY_OFFSET:
-            ex->poly_offset = *(const p_poly_offset *)a;
-            ex->dirty |= VK_EXEC_DIRTY_DEPTH_BIAS;
-            break;
-        case OP_BLEND_COLOR:
-            memcpy(ex->blend_color, ((const p_blend_color *)a)->rgba, sizeof ex->blend_color);
-            ex->dirty |= VK_EXEC_DIRTY_BLEND_CONST;
-            break;
-        case OP_DEPTH_CLAMP: ex->pipe.depth_clamp = ((const p_flag *)a)->value != 0; break;
-        case OP_RASTER_DISCARD: ex->pipe.raster_discard = ((const p_flag *)a)->value != 0; break;
-        case OP_PRIM_RESTART: ex->prim_restart = *(const p_prim_restart *)a; break;
-        case OP_COPY_STRIDE: ex->copy_stride = ((const p_copy_stride *)a)->stride; break;
-        case OP_SET_TEX_POOL: ex->tex_pool = ((const p_set_pool *)a)->pool, ex->tex_serial++; break;
-        case OP_SET_SAMP_POOL: ex->samp_pool = ((const p_set_pool *)a)->pool, ex->tex_serial++; break;
         case OP_BARRIER: vk_exec_barrier(ex); break;
         case OP_WAIT_SYNC: break;   // submit preparation waited before any replay/snapshot; source may be gone
         case OP_DRAW: case OP_DRAW_IDX: case OP_DISPATCH: case OP_UPDATE_UB: case OP_DRAW_IDX_IND: case OP_DISPATCH_IND:
             if (h->op == OP_DRAW || h->op == OP_DRAW_IDX || h->op == OP_DRAW_IDX_IND) vk_exec_frame.draws_seen++, split_draws++;
             if (h->op == OP_DISPATCH || h->op == OP_DISPATCH_IND) vk_exec_frame.dispatches++, split_draws++;
             draws_total += h->op != OP_UPDATE_UB;
+            if (ex->in_pass && (h->op == OP_DRAW || h->op == OP_DRAW_IDX || h->op == OP_DRAW_IDX_IND)) pass_draws++;
         case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF:
         case OP_BIND_UBO: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_PUSH_CONST:
             vk_exec_op_draw(ex, h->op, a);
@@ -989,6 +1267,7 @@ static int record_impl(VkCommandBuffer cb, const uint64_t *handles, int n, uint6
             walk(ex, nvn_op_first(handles[i]), 0);
         }
     }
+    par_flush(ex);
     vk_exec_pass_end(ex);
     x_here = 0;
     if (ex->recorded) vk_exec_barrier(ex);   // later submissions see this one's writes

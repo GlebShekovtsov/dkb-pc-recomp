@@ -206,6 +206,8 @@ void vk_exec_oq_draw(VkExec *ex) {
 
 void vk_exec_oq_pass_end(VkExec *ex) { oq_close(ex); }
 
+int vk_exec_oq_counting(void) { return oq_counting; }
+
 void vk_exec_xfer_shutdown(void) {
     if (oq_state > 0) vkDestroyQueryPool(vk_ctx()->device, oq_pool, NULL);
     oq_pool = VK_NULL_HANDLE, oq_state = 0, oq_next = 0, oq_counting = oq_reported = oq_keep = 0, oq_open = -1;
