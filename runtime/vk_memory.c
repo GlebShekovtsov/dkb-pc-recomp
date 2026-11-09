@@ -1047,14 +1047,19 @@ static int dc_class(const PoolRec *r) {
     return c == VK_MCLS_HOST_CACHED ? DC_CACHED : c == VK_MCLS_HOST_UNC ? DC_UNC : DC_OTHER;
 }
 
-void vk_mem_bound_note(void *pool) {
+void vk_mem_bound_note(void *pool) {   // TOTK_TRACE=perf; parallel slices call it too (dirty_lock)
     PoolRec *r = pool;
-    if (r->bound_sub == dirty_sub) return;
-    r->bound_sub = dirty_sub;
-    if (r->bufbound) return;
-    r->bufbound = 1, r->synced_gen = DIRTY_UNSYNCED;
-    int k = dc_class(r);
-    ever_n[k]++, ever_bytes[k] += r->size, first_pending[k] += r->size;
+    if (__atomic_load_n(&r->bound_sub, __ATOMIC_RELAXED) == dirty_sub) return;
+    plat_mutex_lock(&dirty_lock);
+    if (r->bound_sub != dirty_sub) {
+        r->bound_sub = dirty_sub;
+        if (!r->bufbound) {
+            r->bufbound = 1, r->synced_gen = DIRTY_UNSYNCED;
+            int k = dc_class(r);
+            ever_n[k]++, ever_bytes[k] += r->size, first_pending[k] += r->size;
+        }
+    }
+    plat_mutex_unlock(&dirty_lock);
 }
 
 static uint64_t page_lo(const PoolRec *r) { return r->lo & ~0xfffull; }
@@ -1688,18 +1693,34 @@ static void mirror_sync(PoolRec *r) {
     mrep.sync_t += qpc() - t0;
 }
 
+// Parallel passes (vk_exec.c par_flush) record slices on several threads at once, all inside one submission: the
+// mirror state a binding may change (creation, the first sync of a pool in the submission, the written ranges) is
+// changed under use_lock; a pool already mirrored and synced in this submission takes the fast path without it.
+static PlatMutex use_lock = PLAT_MUTEX_INIT;
+
 void vk_mem_use(VkMemSpan *sp) {
     PoolRec *r = sp->pool;
+    if (__atomic_load_n(&r->mstate, __ATOMIC_ACQUIRE) == MS_ON && __atomic_load_n(&r->acc_sub, __ATOMIC_ACQUIRE) == msub) {
+        sp->buffer = r->mbuf;
+        return;
+    }
+    plat_mutex_lock(&use_lock);
     if (r->mstate == MS_NONE) mirror_create(r);
-    if (r->mstate != MS_ON) return;
-    if (r->acc_sub != msub) mirror_sync(r);
-    sp->buffer = r->mbuf;
+    if (r->mstate == MS_ON) {
+        if (r->acc_sub != msub) mirror_sync(r);
+        sp->buffer = r->mbuf;
+    }
+    plat_mutex_unlock(&use_lock);
 }
 
 void vk_mem_pick(VkMemSpan *sp) {
     PoolRec *r = sp->pool;
-    if (!r || r->mstate != MS_ON) return;
-    if (r->acc_sub != msub) mirror_sync(r);
+    if (!r || __atomic_load_n(&r->mstate, __ATOMIC_ACQUIRE) != MS_ON) return;
+    if (__atomic_load_n(&r->acc_sub, __ATOMIC_ACQUIRE) != msub) {
+        plat_mutex_lock(&use_lock);
+        if (r->acc_sub != msub) mirror_sync(r);
+        plat_mutex_unlock(&use_lock);
+    }
     sp->buffer = r->mbuf;
 }
 
@@ -1714,7 +1735,9 @@ int vk_mem_mirror_probe(uint64_t addr) {
 void vk_mem_gpu_wrote(const VkMemSpan *sp, uint64_t size) {
     PoolRec *r = sp->pool;
     if (!r || r->mstate != MS_ON || sp->buffer != r->mbuf || !size) return;
+    plat_mutex_lock(&use_lock);
     range_add(&wbl, &nwbl, &cwbl, r, sp->offset, size);
+    plat_mutex_unlock(&use_lock);
 }
 
 void nvn_pool_flushed(const pool_t *p, uint64_t off, uint64_t size) {

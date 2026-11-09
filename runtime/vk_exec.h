@@ -141,6 +141,10 @@ void vk_exec_draw_new_cb(void);
 void vk_exec_draw_slice_begin(void);
 // Parallel passes (vk_exec.c par_start): 1 while this thread records a slice; vk_exec_par_hazard marks that the slice
 // needed something only the primary may do (the call is then dropped and the pass's targets are not sliced again).
+// vk_exec_draw.c: a copy of the draw path's per-thread state for a worker (made on the submitting thread while it records
+// nothing), and the worker's switch to it (on the worker).
+void *vk_exec_draw_ctx_new(void);
+void vk_exec_draw_ctx_use(void *ctx);
 int vk_exec_par_slice(void);
 void vk_exec_par_hazard(void);
 // vk_exec_xfer.c: 1 while occlusion queries count draws (a sliced pass is not started then).

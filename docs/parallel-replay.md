@@ -118,6 +118,25 @@ inline texture command is dropped and marks a hazard; the pass's targets are the
 This stage records the slices on the same thread, so it only checks that slicing keeps the frame unchanged (and what it
 costs). The next stage moves `prepare_draw`'s state to the recording thread and hands slices to workers.
 
+## Stage B: workers (DKB_REPLAY_THREADS=N)
+
+Result of stage A on the RX 9070 XT: the frame looks the same, no hazard was logged, and the replay took about 1.17 us
+per draw against 1.00 (the bind ops are applied twice, once when collecting and once in the slice, and each slice starts
+with cold memos).
+
+With `N` > 1, `par_flush` hands the slices to `N-1` workers and the submitting thread; each takes the next slice from a
+counter tagged with the flush's generation (a late worker finds another generation and takes nothing), records it into a
+secondary command buffer of its own pool, and the submitting thread executes them in order once all are recorded.
+
+- The draw path's state (`vk_exec_draw.c`: `B`, `DS`, `RS`, `BS`, `SM`, `PM`, `DP`, the shader, stage, slot,
+  descriptor and sub-range caches, the per-submission resources `cur`, the descriptor-build scratch) is reached through
+  thread-local pointers to the file's objects; `vk_exec_draw_ctx_new` gives a worker its own copies.
+- Shared state a binding may change is locked: the VRAM mirror's creation, first sync and written ranges
+  (`vk_memory.c` `use_lock`), the uniform snapshot drops (`vk_usnap.c` `drop_lock`), the storage-image dummies.
+  Textures, pipelines, shaders, descriptor pools and the completion queue were already locked.
+- The slow-part notes of `TOTK_TRACE=perf` are skipped in slices; frame counters may lose counts.
+- `vk_exec_recording_fence` answers in slices too, so storage images bound there get the submission's write fence.
+
 ## Plan
 
 1. **Measure and remove the cheap waste** (done here).

@@ -129,6 +129,7 @@ void vk_mem_gpu_wrote(const VkMemSpan *span,uint64_t bytes) {CHECK((uintptr_t)sp
 void vk_usnap_drop(uint64_t addr,uint64_t bytes) {CHECK(addr==(uintptr_t)output_words && bytes==sizeof output_words,"write drops exact output snapshot");drops++;}
 void vk_mem_gpu_pending(uint64_t addr,uint64_t bytes) {pending_writes++;pending_addr=addr;pending_size=bytes;}
 int vk_sync_noting(void) {return 0;}
+int vk_exec_par_slice(void) {return 0;}
 void vk_sync_note_write(uint64_t a,uint64_t b,uint64_t c) {(void)a;(void)b;(void)c;abort();}
 void vk_mem_count(int cls,int use,uint64_t bytes) {(void)cls;(void)use;(void)bytes;}
 void vk_mem_bound_note(void *pool) {(void)pool;abort();}

@@ -66,11 +66,16 @@ static struct {
     int draws, slice_draws;
 } PC;
 
-static PlatMutex par_lock = PLAT_MUTEX_INIT;
-static VkCommandPool par_pool;
-static VkCommandBuffer *par_free;               // secondaries whose submission completed (completion thread adds)
-static int npar_free, cpar_free;
-typedef struct { int n; VkCommandBuffer cb[]; } ParDone;
+// A recording thread's secondary command buffers: its own pool (pools are used by one thread at a time) and the ones whose
+// submission completed (the completion thread adds them under lock).
+typedef struct {
+    VkCommandPool pool;
+    PlatMutex lock;
+    VkCommandBuffer *free;
+    int nfree, cfree;
+} ParPool;
+typedef struct { ParPool *pp; VkCommandBuffer cb; } ParCb;
+typedef struct { int n; ParCb cb[]; } ParDone;
 
 static void *par_grow(void *p, int *cap, size_t size) {
     int c = *cap ? *cap * 2 : 64;
@@ -102,7 +107,7 @@ VkExecFrame vk_exec_frame;
 static struct { const uint8_t *mem; uint32_t w, h, fmt, n; } fw[64];   // textures written this frame
 static int nfw;
 
-uint64_t vk_exec_recording_fence(void) { return x_here ? X.fence : 0; }
+uint64_t vk_exec_recording_fence(void) { return x_here || par_slice ? X.fence : 0; }   // slices: workers too
 
 void vk_exec_frame_written(const tex_t *t) {
     if (!(rt_trace & RT_TRACE_GFX) || !t) return;
@@ -1008,32 +1013,33 @@ void vk_exec_par_hazard(void) { par_hazard = 1; }
 
 static void par_done(void *arg) {   // completion thread: the secondaries of a finished submission can be reused
     ParDone *d = arg;
-    plat_mutex_lock(&par_lock);
     for (int i = 0; i < d->n; i++) {
-        if (npar_free == cpar_free) par_free = par_grow(par_free, &cpar_free, sizeof *par_free);
-        par_free[npar_free++] = d->cb[i];
+        ParPool *pp = d->cb[i].pp;
+        plat_mutex_lock(&pp->lock);
+        if (pp->nfree == pp->cfree) pp->free = par_grow(pp->free, &pp->cfree, sizeof *pp->free);
+        pp->free[pp->nfree++] = d->cb[i].cb;
+        plat_mutex_unlock(&pp->lock);
     }
-    plat_mutex_unlock(&par_lock);
     free(d);
 }
 
-static VkCommandBuffer par_secondary(void) {
+static VkCommandBuffer par_secondary(ParPool *pp) {   // on the thread that owns pp
     VkCtx *c = vk_ctx();
     VkCommandBuffer cb = VK_NULL_HANDLE;
-    plat_mutex_lock(&par_lock);
-    if (npar_free) cb = par_free[--npar_free];
-    plat_mutex_unlock(&par_lock);
+    plat_mutex_lock(&pp->lock);
+    if (pp->nfree) cb = pp->free[--pp->nfree];
+    plat_mutex_unlock(&pp->lock);
     if (cb) {
         vkResetCommandBuffer(cb, 0);
         return cb;
     }
-    if (!par_pool) {
+    if (!pp->pool) {
         VkCommandPoolCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
                                       .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
                                       .queueFamilyIndex = c->gfx_family};
-        if (vkCreateCommandPool(c->device, &pi, NULL, &par_pool) != VK_SUCCESS) rt_fatal("vk: secondary command pool failed");
+        if (vkCreateCommandPool(c->device, &pi, NULL, &pp->pool) != VK_SUCCESS) rt_fatal("vk: secondary command pool failed");
     }
-    VkCommandBufferAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = par_pool,
+    VkCommandBufferAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = pp->pool,
                                       .level = VK_COMMAND_BUFFER_LEVEL_SECONDARY, .commandBufferCount = 1};
     if (vkAllocateCommandBuffers(c->device, &ai, &cb) != VK_SUCCESS) rt_fatal("vk: secondary command buffer failed");
     return cb;
@@ -1067,7 +1073,7 @@ static int par_start(VkExec *ex) {
         par_mode = e && *e ? atoi(e) : 0;
         if (par_mode < 0) par_mode = 0;
         if (par_mode) rt_log("vk: passes of %d or more draws are recorded in slices of %d into secondary command buffers "
-                             "(TOTK_REPLAY_THREADS=%d; stage A: on the replaying thread)", PAR_MIN_DRAWS, PAR_SLICE_DRAWS, par_mode);
+                             "(TOTK_REPLAY_THREADS=%d: recorded by that many threads)", PAR_MIN_DRAWS, PAR_SLICE_DRAWS, par_mode);
     }
     if (!par_mode || ex->in_pass || ex != &X || ex->render_disabled || vk_dump_armed || vk_exec_oq_counting()) return 0;
     uint64_t sig = par_sig(ex);
@@ -1140,39 +1146,149 @@ static int par_take(VkExec *ex, const op_hdr *h, const void *a) {
     return 1;
 }
 
+// What recording one slice left: its command buffer, and what the primary's state takes from the slice's copy.
+typedef struct {
+    ParCb cb;
+    uint32_t fb_dirty;
+    int recorded, hazard;
+    ViewEnt *views;      // views the slice made (freed with the submission)
+    int nviews;
+} ParOut;
+
+static ParOut *par_out;
+static int cpar_out;
+
+// Records slice i into a secondary command buffer of pp, from the slice's copy of the replay state, into w.
+static void par_record(int i, ParPool *pp, VkExec *w) {
+    VkCommandBuffer cb = par_secondary(pp);
+    par_begin_secondary(&PC.snap[i], cb);
+    *w = PC.snap[i];
+    w->cb = cb, w->recorded = 0, w->dirty = VK_EXEC_DIRTY_ALL;
+    w->views = NULL, w->nviews = 0, w->cap_views = 0;   // the slice's own; merged into the primary's after
+    vk_exec_draw_slice_begin();
+    par_slice = 1, par_hazard = 0;
+    int end = i + 1 < PC.nslices ? PC.start[i + 1] : PC.nops;
+    for (int k = PC.start[i]; k < end; k++) par_op(w, PC.ops[k]->op, nvn_op_payload(PC.ops[k]));
+    par_slice = 0;
+    if (vkEndCommandBuffer(cb) != VK_SUCCESS) rt_fatal("vk: secondary command buffer end failed");
+    par_out[i] = (ParOut){{pp, cb}, w->fb_dirty, w->recorded, par_hazard, w->views, w->nviews};
+}
+
+// ---- workers (DKB_REPLAY_THREADS=N: N-1 of them; the submitting thread records slices too)
+#define PAR_MAX_WORKERS 15
+typedef struct {
+    PlatThread *t;
+    void *dctx;          // vk_exec_draw_ctx_new
+    ParPool pp;
+    VkExec w;
+    uint32_t seen;
+} ParWorker;
+static ParWorker *par_workers[PAR_MAX_WORKERS];
+static int par_nworkers;
+static PlatMutex pw_lock = PLAT_MUTEX_INIT;
+static PlatCond pw_go, pw_idle;
+static uint32_t pw_gen;                          // bumped per flush (pw_lock)
+static volatile uint64_t pw_job;                 // (flush generation << 32) | the next slice to take
+static volatile int32_t pw_n, pw_left;           // slices of the flush; slices not recorded yet
+static ParPool par_main_pool;
+static VkExec par_main_w;
+
+// Takes and records slices of flush gen until none is left. A thread that comes late (its flush is over, or another
+// one began) finds another generation in pw_job and takes nothing.
+static void par_take_slices(uint32_t gen, ParPool *pp, VkExec *w) {
+    for (;;) {
+        uint64_t v = __atomic_load_n(&pw_job, __ATOMIC_ACQUIRE);
+        if ((uint32_t)(v >> 32) != gen || (int32_t)(uint32_t)v >= __atomic_load_n(&pw_n, __ATOMIC_ACQUIRE)) return;
+        if (!__atomic_compare_exchange_n(&pw_job, &v, v + 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) continue;
+        par_record((int)(uint32_t)v, pp, w);
+        if (__atomic_sub_fetch(&pw_left, 1, __ATOMIC_ACQ_REL) == 0) {
+            plat_mutex_lock(&pw_lock);
+            plat_cond_broadcast(&pw_idle);
+            plat_mutex_unlock(&pw_lock);
+        }
+    }
+}
+
+static void par_worker(void *arg) {
+    ParWorker *pw = arg;
+    vk_exec_draw_ctx_use(pw->dctx);
+    for (;;) {
+        plat_mutex_lock(&pw_lock);
+        while (pw->seen == pw_gen) plat_cond_wait(&pw_go, &pw_lock);
+        uint32_t gen = pw->seen = pw_gen;
+        plat_mutex_unlock(&pw_lock);
+        par_take_slices(gen, &pw->pp, &pw->w);
+    }
+}
+
+static void par_start_workers(void) {
+    int want = par_mode - 1;
+    if (want > PAR_MAX_WORKERS) want = PAR_MAX_WORKERS;
+    if (par_nworkers >= want) return;
+    if (!par_nworkers) plat_cond_init(&pw_go), plat_cond_init(&pw_idle);
+    while (par_nworkers < want) {
+        ParWorker *pw = calloc(1, sizeof *pw);
+        if (!pw) rt_fatal("vk: out of memory");
+        pw->dctx = vk_exec_draw_ctx_new();   // here, while this thread records nothing
+        pw->seen = pw_gen;
+        if (!(pw->t = plat_thread_new_ex(par_worker, pw, "replay slices", 0))) {
+            rt_log("vk: a replay slice worker could not start: %d of %d run", par_nworkers, want);
+            free(pw);
+            par_mode = par_nworkers + 1;
+            return;
+        }
+        par_workers[par_nworkers++] = pw;
+    }
+    rt_log("vk: %d replay slice workers started", par_nworkers);
+}
+
 static void par_flush(VkExec *ex) {
     if (!PC.on) return;
     PC.on = 0;
-    ParDone *done = malloc(sizeof *done + sizeof(VkCommandBuffer) * (size_t)(PC.nslices ? PC.nslices : 1));
-    if (!done) rt_fatal("vk: out of memory");
+    if (PC.nslices > cpar_out) {
+        free(par_out);
+        cpar_out = PC.nslices * 2;
+        if (!(par_out = calloc((size_t)cpar_out, sizeof *par_out))) rt_fatal("vk: out of memory");
+    }
+    if (par_mode > 1 && PC.nslices > 1) par_start_workers();
+    plat_mutex_lock(&pw_lock);
+    uint32_t gen = ++pw_gen;
+    __atomic_store_n(&pw_n, PC.nslices, __ATOMIC_RELEASE);
+    __atomic_store_n(&pw_left, PC.nslices, __ATOMIC_RELEASE);
+    __atomic_store_n(&pw_job, (uint64_t)gen << 32, __ATOMIC_RELEASE);
+    if (par_nworkers && PC.nslices > 1) plat_cond_broadcast(&pw_go);
+    plat_mutex_unlock(&pw_lock);
+    par_take_slices(gen, &par_main_pool, &par_main_w);
+    plat_mutex_lock(&pw_lock);
+    while (__atomic_load_n(&pw_left, __ATOMIC_ACQUIRE) > 0) plat_cond_wait(&pw_idle, &pw_lock);
+    plat_mutex_unlock(&pw_lock);
+    ParDone *done = malloc(sizeof *done + sizeof(ParCb) * (size_t)PC.nslices);
+    VkCommandBuffer *cbs = malloc(sizeof *cbs * (size_t)(PC.nslices ? PC.nslices : 1));
+    if (!done || !cbs) rt_fatal("vk: out of memory");
     done->n = 0;
-    static VkExec w;
-    par_hazard = 0;
+    int hazard = 0;
     for (int i = 0; i < PC.nslices; i++) {
-        VkCommandBuffer cb = par_secondary();
-        par_begin_secondary(ex, cb);
-        w = PC.snap[i];
-        w.cb = cb, w.recorded = 0, w.dirty = VK_EXEC_DIRTY_ALL;
-        w.views = ex->views, w.nviews = ex->nviews, w.cap_views = ex->cap_views;   // the list lives on in ex
-        vk_exec_draw_slice_begin();
-        par_slice = 1;
-        int end = i + 1 < PC.nslices ? PC.start[i + 1] : PC.nops;
-        for (int k = PC.start[i]; k < end; k++) par_op(&w, PC.ops[k]->op, nvn_op_payload(PC.ops[k]));
-        par_slice = 0;
-        if (vkEndCommandBuffer(cb) != VK_SUCCESS) rt_fatal("vk: secondary command buffer end failed");
-        done->cb[done->n++] = cb;
-        ex->views = w.views, ex->nviews = w.nviews, ex->cap_views = w.cap_views;
-        ex->fb_dirty |= w.fb_dirty;
-        ex->recorded += w.recorded;
+        ParOut *o = &par_out[i];
+        done->cb[done->n++] = o->cb;
+        cbs[i] = o->cb.cb;
+        ex->fb_dirty |= o->fb_dirty;
+        ex->recorded += o->recorded;
+        hazard |= o->hazard;
+        for (int k = 0; k < o->nviews; k++) {   // the slice's views go with the submission like the primary's
+            if (ex->nviews == ex->cap_views) ex->views = par_grow(ex->views, &ex->cap_views, sizeof(ViewEnt));
+            ((ViewEnt *)ex->views)[ex->nviews++] = o->views[k];
+        }
+        free(o->views);
     }
     rec_drain();   // the recorder has made every earlier call into the primary
-    if (done->n) vkCmdExecuteCommands(ex->cb, (uint32_t)done->n, done->cb);
+    if (PC.nslices) vkCmdExecuteCommands(ex->cb, (uint32_t)PC.nslices, cbs);
+    free(cbs);
     ex->recorded++;
     vk_completion_add(ex->fence, par_done, done);
     vk_exec_draw_slice_begin();   // the primary's bindings are undefined after vkCmdExecuteCommands
     ex->dirty = VK_EXEC_DIRTY_ALL;
     vk_exec_pass_end(ex);         // a pass of secondary command buffers takes nothing else
-    if (par_hazard) {
+    if (hazard) {
         ParHist *e = par_find(PC.sig, 1);
         e->banned = 1;
         rt_log("vk: a sliced pass needed a pass or barrier change inside a slice: those targets are not sliced again");

@@ -107,7 +107,7 @@ static void support_in(const VkExec *ex,float in[3]) { (void)ex; (void)in; abort
 static uint64_t ubo_ptr(const VkExec *ex,int st,const GfxShaderRes *r) { (void)ex; (void)st; (void)r; abort(); }
 '''
     ac = function(draw, 'static struct { uint64_t context, tex[32],') + ' AC[6];\n'
-    serial = next(line for line in draw.splitlines() if line.startswith('static uint64_t descriptor_serial'))
+    serial = next(line for line in draw.splitlines() if line.startswith(('static uint64_t descriptor_serial', 'static uint64_t _Thread_local descriptor_serial')))
     sub = function(draw, 'typedef struct { VkImage image; uint32_t l0,') + ' SubRange;\n'
     fm = function(draw, 'static struct { uint64_t context, h, tok; uint32_t gen; SubRange r;') + ' FM[FM_N];\n'
     td_start = draw.index('#define TD_N ')
