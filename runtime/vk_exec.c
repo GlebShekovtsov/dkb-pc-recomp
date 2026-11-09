@@ -53,6 +53,9 @@ typedef struct { uint64_t sig; uint32_t draws; uint8_t banned; } ParHist;
 static ParHist par_hist[PAR_HIST];
 static int par_mode = -1;                       // DKB_REPLAY_THREADS: 0 off, else the threads (stage A: 1)
 static uint64_t par_passes, par_slices, par_sliced_draws, par_skipped_oq;   // since the last perf line
+static uint64_t par_end_op[OP_COUNT_ + 1];     // collections ended by each op (OP_COUNT_: the submission's end)
+static uint64_t par_no[5];                      // big-pass draws left unsliced: 0 small or new targets, 1 banned,
+                                                // 2 no attachment, 3 feedback target, 4 pass did not open
 static _Thread_local int par_slice, par_hazard; // recording a slice; a slice dropped a pass or barrier call
 static int pass_secondary;                      // the next vk_exec_pass_begin opens a pass of secondary command buffers
 static uint32_t pass_draws;                     // draws of the open pass, for par_hist
@@ -1015,6 +1018,7 @@ static void state_op(VkExec *ex, uint32_t op, const void *a) {
 // barrier (a feedback target learned, an inline texture command) is a hazard: the call is dropped, and the targets are
 // not sliced again.
 int vk_exec_par_slice(void) { return par_slice; }
+static int par_collecting(void) { return PC.on; }
 void vk_exec_par_hazard(void) { par_hazard = 1; }
 
 static void par_done(void *arg) {   // completion thread: the secondaries of a finished submission can be reused
@@ -1091,13 +1095,14 @@ static int par_start(VkExec *ex) {
     }
     uint64_t sig = par_sig(ex);
     ParHist *e = par_find(sig, 0);
-    if (!e || e->banned || e->draws < PAR_MIN_DRAWS) return 0;
+    if (!e || e->draws < PAR_MIN_DRAWS) return par_no[0]++, 0;
+    if (e->banned) return par_no[1]++, 0;
     resolve_rt(ex);
-    if (ex->pass_noatt) return 0;
+    if (ex->pass_noatt) return par_no[2]++, 0;
     for (uint32_t i = 0; i < 9; i++) {   // feedback-layout targets: the in-pass barriers stay in the primary
         const VkExecTarget *t = i < 8 ? &ex->color[i] : &ex->depth;
         if ((i < 8 && i >= ex->pass_ncolor) || !t->image || !t->img) continue;
-        if (t->img->fb_learned) return 0;
+        if (t->img->fb_learned) return par_no[3]++, 0;
     }
     VkQueryControlFlags qf = 0;
     int qopen = 0, q = vk_exec_oq_begin_outside(ex, &qf, &qopen);
@@ -1105,7 +1110,7 @@ static int par_start(VkExec *ex) {
     pass_secondary = 1;
     vk_exec_pass_begin(ex);
     pass_secondary = 0;
-    if (!ex->in_pass) return vk_exec_oq_pass_ended(ex), 0;
+    if (!ex->in_pass) return par_no[4]++, vk_exec_oq_pass_ended(ex), 0;
     PC.oq = qopen, PC.oq_flags = qf;
     PC.on = 1, PC.sig = sig, PC.nops = 0, PC.nslices = 0, PC.draws = 0, PC.slice_draws = PAR_SLICE_DRAWS;
     return 1;
@@ -1265,6 +1270,20 @@ static void par_flush(VkExec *ex) {
             rt_log("perf: sliced passes %llu with %llu slices and %llu draws; %llu passes not sliced for want of "
                    "inherited queries", (unsigned long long)par_passes, (unsigned long long)par_slices,
                    (unsigned long long)par_sliced_draws, (unsigned long long)par_skipped_oq);
+        if (par_mode > 0) {
+            char line[400];
+            size_t o = 0;
+            line[0] = 0;
+            for (uint32_t i = 0; i <= OP_COUNT_ && o < sizeof line - 48; i++)
+                if (par_end_op[i])
+                    o += (size_t)snprintf(line + o, sizeof line - o, " %s %llu", i < OP_COUNT_ ? nvn_op_name(i) : "submission-end",
+                                          (unsigned long long)par_end_op[i]);
+            rt_log("perf: collections ended by:%s; draws that opened an unsliced pass: small or new targets %llu, banned %llu, "
+                   "no attachment %llu, feedback target %llu, pass not opened %llu", line, (unsigned long long)par_no[0],
+                   (unsigned long long)par_no[1], (unsigned long long)par_no[2], (unsigned long long)par_no[3],
+                   (unsigned long long)par_no[4]);
+        }
+        memset(par_end_op, 0, sizeof par_end_op), memset(par_no, 0, sizeof par_no);
         par_passes = par_slices = par_sliced_draws = par_skipped_oq = 0;
         return;
     }
@@ -1333,6 +1352,7 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
                     h = nvn_op_next(h);
                     continue;
                 }
+                par_end_op[h->op]++;
                 par_flush(ex);
             } else if ((h->op == OP_DRAW || h->op == OP_DRAW_IDX) && par_start(ex) && par_take(ex, h, a)) {
                 draws_total++, pass_draws++;
@@ -1409,6 +1429,7 @@ static int record_impl(VkCommandBuffer cb, const uint64_t *handles, int n, uint6
             walk(ex, nvn_op_first(handles[i]), 0);
         }
     }
+    if (par_collecting()) par_end_op[OP_COUNT_]++;
     par_flush(ex);
     vk_exec_pass_end(ex);
     x_here = 0;
