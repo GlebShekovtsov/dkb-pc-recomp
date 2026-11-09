@@ -957,6 +957,52 @@ static VkDescriptorBufferInfo zero_info(uint64_t max) {
 }
 
 // vk_mem_count, also kept per (class, use) while a graphics build runs (RS).
+// DKB_DRAW_PROFILE=1: where a draw's replay time goes, by section, logged every 60000 draws as nanoseconds per draw.
+// The sections follow prepare_draw from the pass to the vertex buffers; DP_OPS is the rest of vk_exec_op_draw (the
+// bind ops, index buffers, the draw command). Time comes from the TSC (x86) and is scaled to nanoseconds against the
+// clock over each window. Off by default: two TSC reads per section.
+enum { DP_PASS, DP_SHADER, DP_PIPE, DP_STATE, DP_SIG, DP_UBO, DP_SSBO, DP_TEX, DP_SETS, DP_FEEDBACK, DP_VB, DP_TAIL,
+       DP_OPS, DP_N };
+static const char *const dp_name[DP_N] = {"pass", "shaders", "pipeline", "state", "bind-sig", "ubo", "ssbo", "textures",
+                                          "sets", "feedback", "vertex-buffers", "tail", "other-ops"};
+static struct { int on, active; uint64_t t, ticks[DP_N], draws, ops, win_tk, win_ns; } DP = {-1};
+
+static inline uint64_t dp_now(void) {
+#if defined(__x86_64__) || defined(_M_X64)
+    return __builtin_ia32_rdtsc();
+#else
+    return kern_now_ns();
+#endif
+}
+
+static int dp_on(void) {
+    if (DP.on < 0) {
+        const char *e = cfg_get("TOTK_DRAW_PROFILE");
+        DP.on = e && *e && strcmp(e, "0");
+    }
+    return DP.on;
+}
+
+#define DP_MARK(i) do { if (DP.active) { uint64_t t_ = dp_now(); DP.ticks[i] += t_ - DP.t; DP.t = t_; } } while (0)
+
+static void dp_log(void) {
+    uint64_t tk = dp_now(), ns = kern_now_ns();
+    if (!DP.win_tk) { DP.win_tk = tk, DP.win_ns = ns; memset(DP.ticks, 0, sizeof DP.ticks); DP.draws = DP.ops = 0; return; }
+    double per = tk > DP.win_tk ? (double)(ns - DP.win_ns) / (double)(tk - DP.win_tk) : 0;   // ns per tick
+    char line[600];
+    size_t o = 0;
+    double sum = 0;
+    for (int i = 0; i < DP_N; i++) {
+        double v = DP.ticks[i] * per / (double)DP.draws;
+        sum += v;
+        o += (size_t)snprintf(line + o, sizeof line - o, "%s%s %.0f", i ? ", " : "", dp_name[i], v);
+    }
+    rt_log("vk_exec: draw profile over %llu draws (%llu other ops), ns per draw: %s; total %.0f",
+           (unsigned long long)DP.draws, (unsigned long long)DP.ops, line, sum);
+    memset(DP.ticks, 0, sizeof DP.ticks);
+    DP.draws = DP.ops = 0, DP.win_tk = tk, DP.win_ns = ns;
+}
+
 static void count_use(int cls, int use, uint64_t n) {
     vk_mem_count(cls, use, n);
     if (!RS.rec) return;
@@ -1993,10 +2039,12 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
     int skip = gfx ? bind_skip_on() : 0, same = 0, was_valid = B.res_valid;
     if (skip) {
         same = bind_sig(ex, info);
+        DP_MARK(DP_SIG);
         if (same && was_valid && skip == 1) {
             for (int i = 0; i < RS.ncnt; i++) vk_mem_count(RS.cnt[i].cls, RS.cnt[i].use, RS.cnt[i].bytes);
             BS.bind_skip++;
             ex->recorded++;
+            DP_MARK(DP_SETS);
             return;
         }
         B.res_valid = 0;   // until the build below ends
@@ -2039,9 +2087,13 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
             }
             o->buffer = (VkDescriptorBufferInfo){B.sup_buf, B.sup_off, SUPPORT_BYTES};
         } else if (b->kind == GFX_RES_UBO) {
+            DP_MARK(DP_SIG);   // the loop's own work since the last binding
             for (uint32_t k = 0; k < cnt; k++) o[k].buffer = ubo_info(ex, st, r->slot + (int)k);
+            DP_MARK(DP_UBO);
         } else if (b->kind == GFX_RES_SSBO) {
+            DP_MARK(DP_SIG);
             for (uint32_t k = 0; k < cnt; k++) o[k].buffer = ssbo_info(ex, st, r, r->flags & 1);
+            DP_MARK(DP_SSBO);
         } else if (b->kind == GFX_RES_TEX || b->kind == GFX_RES_IMG) {
             int img = b->kind == GFX_RES_IMG;
             if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER || b->type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER) {
@@ -2053,6 +2105,7 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
                 }
             } else {
                 kind = 1;
+                DP_MARK(DP_SIG);
                 vk_texture_lock();   // tex_info looks up with the texture lock held
                 for (uint32_t k = 0; k < cnt; k++) {
                     int slot = r->slot + (int)k;
@@ -2063,6 +2116,7 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
                     o[k].w[2] = (uint32_t)o[k].image.imageLayout;   // zero the tail padding
                 }
                 vk_texture_unlock();
+                DP_MARK(DP_TEX);
             }
         } else {
             rt_fatal("vk: binding %u has an unknown kind %d", (unsigned)b->binding, (int)b->kind);
@@ -2080,6 +2134,7 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
     // stage with no resources) starts at the end instead, so set 0's byte count (d0[1] - d0[0]) covers its descriptors.
     // Left at 0, it pushed set 0's template with 0 bytes copied into the recording, and the driver read the
     // descriptors from whatever followed in the recording.
+    DP_MARK(DP_SIG);
     if (n_sets == 2 && lo[1] == info->n_bindings) d0[1] = nd;
     // Under the validation layer, a new graphics layout binds set 1 before set 0 is pushed or bound. The layer (SDK
     // 1.4.363, PipelineLayoutCompatDef::operator==) takes any two INDEPENDENT_SETS layouts as compatible, so
@@ -2166,6 +2221,7 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
         B.res_valid = valid;
     }
     ex->recorded++;
+    DP_MARK(DP_SETS);
 }
 
 // ---- draws
@@ -2518,7 +2574,7 @@ unsupported:
 }
 
 // Pass, shaders, pipeline, fixed state and resources for a draw. 0: the draw is skipped.
-static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
+static int prepare_draw_impl(VkExec *ex, int prim, int32_t count, int restart) {
     if (ex->render_disabled) return 0;
     static int skip_all = -1;   // DKB_SKIP_DRAWS=1: drop every draw (bisecting GPU faults)
     if (skip_all < 0) skip_all = getenv("DKB_SKIP_DRAWS") != NULL;
@@ -2536,6 +2592,7 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
     if (!ex->in_pass) ex->dirty |= VK_EXEC_DIRTY_VIEWPORT | VK_EXEC_DIRTY_SCISSOR;
     vk_exec_pass_begin(ex);
     VkRect2D sc = vk_exec_scissor(ex);
+    DP_MARK(DP_PASS);
     if (!sc.extent.width || !sc.extent.height) return 0;
     if (!ex->prog) return warn_once(W_PROGRAM, "a draw without a bound program is skipped"), 0;
     int has_vs, has_fs, has_gs = 0, vs_wait = 0, fs_wait = 0, gs_wait = 0, memo = shader_memo_on();
@@ -2598,6 +2655,7 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
         if (gs_wait) gs = shader_for(ex, NVN_STAGE_GS, &has_gs, NULL, 1);
     }
     if (light_quad_fault_skip(ex, vs, fs) || skip_vs_listed(ex) || skip_fs_listed(ex)) return 0;
+    DP_MARK(DP_SHADER);
     if (!vs || (has_fs && !fs) || (want_gs && (!has_gs || !gs))) return 0;
     if (!geometry_feedback_safe(ex, vs, gs)) return 0;
     uint32_t fbl = feedback_prepare(ex, fs);
@@ -2662,6 +2720,7 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
                (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) + 1, waited / 1e6, why,
                pending ? ", skipped after all" : "", count, ex->pass_w, ex->pass_h, tg);
     }
+    DP_MARK(DP_PIPE);
     if (pending) return 0;   // a background worker is building it: the draw is skipped until it is ready
     if (!p || !info) return warn_once(W_PIPELINE, "a graphics pipeline could not be created: draws with it are skipped"), 0;
     bind_pipeline(ex, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
@@ -2672,13 +2731,27 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
     }
     record_fixed(ex);
     repeat_stats(ex, info);
+    DP_MARK(DP_STATE);
     bind_resources(ex, info);
     if (fbl & ex->fb_dirty) feedback_barrier(ex);
     feedback_written(ex, &s);
+    DP_MARK(DP_FEEDBACK);
     bind_vertex_buffers(ex);
+    DP_MARK(DP_VB);
     if (vk_dump_armed) vk_dump_draw(ex, &s, p, info);
     vk_exec_oq_draw(ex);
+    DP_MARK(DP_TAIL);
     return 1;
+}
+
+static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
+    if (!dp_on()) return prepare_draw_impl(ex, prim, count, restart);
+    DP.t = dp_now(), DP.active = 1;
+    int r = prepare_draw_impl(ex, prim, count, restart);
+    DP_MARK(DP_TAIL);   // an early return
+    DP.active = 0;
+    if (++DP.draws >= 60000) dp_log();
+    return r;
 }
 
 // TOTK_TRACE=perf: the draw or dispatch just recorded, with the NVN 2 names of its stages, for the slow-part line
@@ -3137,7 +3210,7 @@ static void bind_handles(uint64_t *dst, int cap, const p_bind_handles *b) {
     memcpy(&dst[b->first], b->h, sizeof(uint64_t) * (size_t)b->n);
 }
 
-void vk_exec_op_draw(VkExec *ex, uint32_t op, const void *payload) {
+static void op_draw_impl(VkExec *ex, uint32_t op, const void *payload) {
     geometry_context_log(ex, op, payload);
     switch (op) {
     case OP_BIND_PROGRAM: {
@@ -3241,4 +3314,19 @@ void vk_exec_op_draw(VkExec *ex, uint32_t op, const void *payload) {
     case OP_DISPATCH_IND: op_dispatch_ind(ex, payload); break;
     default: rt_fatal("vk: op %s is not a draw op", nvn_op_name(op));
     }
+}
+
+void vk_exec_op_draw(VkExec *ex, uint32_t op, const void *payload) {
+    if (!dp_on()) {
+        op_draw_impl(ex, op, payload);
+        return;
+    }
+    uint64_t before = 0, after = 0, t0 = dp_now();
+    for (int i = 0; i < DP_OPS; i++) before += DP.ticks[i];
+    op_draw_impl(ex, op, payload);
+    uint64_t total = dp_now() - t0;
+    for (int i = 0; i < DP_OPS; i++) after += DP.ticks[i];
+    uint64_t inside = after >= before ? after - before : 0;   // prepare_draw's sections (a window may have reset them)
+    DP.ticks[DP_OPS] += total > inside ? total - inside : 0;
+    DP.ops++;
 }
