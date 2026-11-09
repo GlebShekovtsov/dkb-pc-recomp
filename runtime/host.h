@@ -34,6 +34,9 @@ void prof_write(void);                          // idempotent; boot.c calls it b
 uint64_t perf_begin(void);                      // start time of a wait; pair with perf_end
 void perf_end(int kind, uint64_t t0);           // counts render-thread time only
 void perf_replay(uint64_t t0);                  // replay (NVN -> Vulkan recording) time on any thread, waits inside it included
+// Running totals after a replay: draws and dispatches recorded, descriptor pools taken and created (the per-draw cost
+// and pool line of TOTK_TRACE=perf).
+void perf_replay_totals(uint64_t draws, uint64_t pools_taken, uint64_t pools_created);
 void perf_replay_thread(void);                  // the calling thread replays for the render thread: perf_end counts its waits
 void perf_main_thread(void);                    // the calling thread is the guest main thread (TOTK_PROFILE_MAIN)
 // Events per 60-frame window: graphics pipelines finished by the background workers, draws skipped while pending,

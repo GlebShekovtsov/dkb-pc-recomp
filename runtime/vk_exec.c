@@ -873,6 +873,10 @@ int vk_exec_read_buffer(VkExec *ex, uint64_t addr, uint64_t size, void *out) {
     return result == VK_SUCCESS;
 }
 
+static uint64_t draws_total;   // draws and dispatches walked since the start (vk_exec_draws_total)
+
+uint64_t vk_exec_draws_total(void) { return draws_total; }
+
 static void walk(VkExec *ex, const op_hdr *h, int depth) {
     for (;;) {
         if (h->size < sizeof *h || (h->size & 7) || h->op >= OP_COUNT_)
@@ -938,6 +942,7 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
         case OP_DRAW: case OP_DRAW_IDX: case OP_DISPATCH: case OP_UPDATE_UB: case OP_DRAW_IDX_IND: case OP_DISPATCH_IND:
             if (h->op == OP_DRAW || h->op == OP_DRAW_IDX || h->op == OP_DRAW_IDX_IND) vk_exec_frame.draws_seen++, split_draws++;
             if (h->op == OP_DISPATCH || h->op == OP_DISPATCH_IND) vk_exec_frame.dispatches++, split_draws++;
+            draws_total += h->op != OP_UPDATE_UB;
         case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF:
         case OP_BIND_UBO: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_PUSH_CONST:
             vk_exec_op_draw(ex, h->op, a);

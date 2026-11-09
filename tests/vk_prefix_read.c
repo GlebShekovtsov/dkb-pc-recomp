@@ -49,6 +49,9 @@ uint64_t perf_begin(void) { return 123; }
 void perf_end(int k, uint64_t t) { (void)k; (void)t; }
 void perf_gpu_wait(uint64_t t) { (void)t; }
 void perf_replay(uint64_t t) { (void)t; }
+void perf_replay_totals(uint64_t d, uint64_t t, uint64_t c) { (void)d; (void)t; (void)c; }
+uint64_t vk_exec_draws_total(void) { return 0; }
+void vk_exec_pool_counts(uint64_t *c, uint64_t *t) { *c = *t = 0; }
 uint64_t kern_now_ns(void) { return 456; }
 void vk_sync_start(void) {}
 void vk_mem_dirty_submit(void) {}

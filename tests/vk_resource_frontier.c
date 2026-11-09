@@ -51,6 +51,9 @@ void rt_log(const char *format, ...) { (void)format; }
 void perf_count(int kind) { (void)kind; }
 uint64_t perf_begin(void) { return 0; }
 void perf_replay(uint64_t start) { (void)start; }
+void perf_replay_totals(uint64_t d, uint64_t t, uint64_t c) { (void)d; (void)t; (void)c; }
+uint64_t vk_exec_draws_total(void) { return 0; }
+void vk_exec_pool_counts(uint64_t *c, uint64_t *t) { *c = *t = 0; }
 // The actual shared split helper also contains the ordered-readback branch. Retirement scenarios must keep using
 // the nonwaiting branch; reaching any of these new dependencies is a fixture failure, not a simulated success.
 void perf_end(int kind, uint64_t start) { (void)kind; (void)start; check(0, "retirement never times a prefix wait"); }

@@ -102,6 +102,14 @@ void perf_replay(uint64_t t0) {
     if (__atomic_load_n(&perf_on, __ATOMIC_RELAXED)) plat_add64(&replay_ns, d);
 }
 
+static volatile uint64_t replay_tot[3];   // perf_replay_totals: draws, pools taken, pools created (running totals)
+
+void perf_replay_totals(uint64_t draws, uint64_t pools_taken, uint64_t pools_created) {
+    __atomic_store_n(&replay_tot[0], draws, __ATOMIC_RELAXED);
+    __atomic_store_n(&replay_tot[1], pools_taken, __ATOMIC_RELAXED);
+    __atomic_store_n(&replay_tot[2], pools_created, __ATOMIC_RELAXED);
+}
+
 static volatile int64_t counts[PERF_CNT_N];   // running totals: the perf log and the flight recorder take differences
 
 void perf_count(int kind) {
@@ -311,8 +319,15 @@ void perf_present(uint64_t frame) {
     int64_t oneshot = win[PERF_CNT_ONESHOT_WAIT];
     uint64_t shader_keys, shader_xlated;
     gfx_shader_counts(&shader_keys, &shader_xlated);
+    static uint64_t rt_prev[3];   // replay_tot at the previous line
+    double rd[3];
+    for (int i = 0; i < 3; i++) {
+        uint64_t v = __atomic_load_n(&replay_tot[i], __ATOMIC_RELAXED);
+        rd[i] = (double)(v - rt_prev[i]), rt_prev[i] = v;
+    }
+    int64_t rep_ns = plat_xchg64(&replay_ns, 0);
     if (n && span)
-        rt_log("perf: frame %llu: interval avg %.2f ms max %.2f ms (%.1f fps); render thread blocked: pacing %.0f%% fence %.0f%% drain %.0f%% pipeline build %.0f%% shader xlate %.0f%% texture %.0f%% (astc %.0f%%); pipelines built in background %lld, draws skipped pending %lld, waited %lld, waiting for a shader %lld, one-shot waited %lld; textures uploaded %lld re-uploaded %lld; slowest frame: xlate %.1f ms texture %.1f ms (astc %.1f) pipeline %.1f ms fence %.1f ms; shaders: %llu keys, %llu translated; render busy avg %.2f ms; replay avg %.2f ms; ab %llu/%llu; world %.1f s",
+        rt_log("perf: frame %llu: interval avg %.2f ms max %.2f ms (%.1f fps); render thread blocked: pacing %.0f%% fence %.0f%% drain %.0f%% pipeline build %.0f%% shader xlate %.0f%% texture %.0f%% (astc %.0f%%); pipelines built in background %lld, draws skipped pending %lld, waited %lld, waiting for a shader %lld, one-shot waited %lld; textures uploaded %lld re-uploaded %lld; slowest frame: xlate %.1f ms texture %.1f ms (astc %.1f) pipeline %.1f ms fence %.1f ms; shaders: %llu keys, %llu translated; render busy avg %.2f ms; replay avg %.2f ms, %.0f draws and dispatches per frame, %.2f us each, descriptor pools taken %.1f created %.1f per frame; ab %llu/%llu; world %.1f s",
                (unsigned long long)frame, sum / 1e6 / n, max / 1e6, n * 1e9 / sum, 100.0 * wait_ns[PERF_PACE] / span,
                100.0 * wait_ns[PERF_FENCE] / span, 100.0 * wait_ns[PERF_DRAIN] / span,
                100.0 * wait_ns[PERF_PIPE] / span, 100.0 * wait_ns[PERF_XLATE] / span,
@@ -321,7 +336,8 @@ void perf_present(uint64_t frame) {
                worst_ns[PERF_ASTC] / 1e6, worst_ns[PERF_PIPE] / 1e6, worst_ns[PERF_FENCE] / 1e6,
                (unsigned long long)shader_keys, (unsigned long long)shader_xlated,
                (span > wait_ns[PERF_PACE] ? span - wait_ns[PERF_PACE] : 0) / 1e6 / n,
-               plat_xchg64(&replay_ns, 0) / 1e6 / n, (unsigned long long)ab_b, (unsigned long long)n, frame_step_world_us() / 1e6);
+               rep_ns / 1e6 / n, rd[0] / n, rd[0] > 0 ? rep_ns / 1e3 / rd[0] : 0.0, rd[1] / n, rd[2] / n,
+               (unsigned long long)ab_b, (unsigned long long)n, frame_step_world_us() / 1e6);
     if (n && span) perf_gpu_line(frame, sum / 1e6 / n, (double)wait_ns[PERF_PACE] / span, n);
     sum = max = n = ab_b = 0;
     memset(wait_ns, 0, sizeof wait_ns);

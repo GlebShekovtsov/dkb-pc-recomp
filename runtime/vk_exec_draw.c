@@ -104,6 +104,7 @@ static uint64_t cur_fence;
 #define SPARE_CHUNKS 16
 static PlatMutex spare_lock = PLAT_MUTEX_INIT;
 static VkDescriptorPool spare_pool[SPARE_POOLS];
+static uint64_t pools_created, pools_taken;   // replay thread: pools created, and pools a command buffer took (spare or new)
 static Chunk spare_chunk[SPARE_CHUNKS];
 static int nspare_pool, nspare_chunk;
 
@@ -1696,6 +1697,10 @@ static void tex_info(VkExec *ex, const GfxShaderRes *r, uint64_t h, int storage,
     if (v) out->imageView = v, out->imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 }
 
+void vk_exec_pool_counts(uint64_t *created, uint64_t *taken) {   // TOTK_TRACE=perf, replay thread
+    *created = pools_created, *taken = pools_taken;
+}
+
 static VkDescriptorSet alloc_set(VkExec *ex, VkDescriptorSetLayout layout) {
     CbRes *r = cb_res(ex);
     VkCtx *c = vk_ctx();
@@ -1709,19 +1714,27 @@ static VkDescriptorSet alloc_set(VkExec *ex, VkDescriptorSetLayout layout) {
             if (res == VK_SUCCESS) return set;
             if (res != VK_ERROR_OUT_OF_POOL_MEMORY && res != VK_ERROR_FRAGMENTED_POOL) rt_fatal("vk: descriptor set allocation failed (%d)", (int)res);
         }
+        // 1024 sets a pool (256 before). In a profile of a busy area on an RX 9070 XT, alloc_set took about 5% of the
+        // render thread, half of it in kernel calls (win32u) under vkAllocateDescriptorSets: a pool's first sets and a
+        // new pool cost a driver allocation. Fewer, larger pools make that rarer. TOTK_TRACE=perf counts the pools
+        // created (vk_exec_pool_counts).
         static const VkDescriptorPoolSize sizes[] = {
-            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4096}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2048},
-            {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4096}, {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1024},
-            {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1024}, {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 256},
-            {VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 256}};
-        VkDescriptorPoolCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 256,
+            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 16384}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8192},
+            {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 16384}, {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4096},
+            {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4096}, {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 1024},
+            {VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 1024}};
+        VkDescriptorPoolCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1024,
                                          .poolSizeCount = sizeof sizes / sizeof sizes[0], .pPoolSizes = sizes};
         if (r->npools == r->cpools) r->pools = grow(r->pools, &r->cpools, sizeof *r->pools);
         VkDescriptorPool pool = VK_NULL_HANDLE;
         plat_mutex_lock(&spare_lock);
         if (nspare_pool) pool = spare_pool[--nspare_pool];
         plat_mutex_unlock(&spare_lock);
-        if (!pool && vkCreateDescriptorPool(c->device, &pi, NULL, &pool) != VK_SUCCESS) rt_fatal("vk: descriptor pool failed");
+        if (!pool) {
+            if (vkCreateDescriptorPool(c->device, &pi, NULL, &pool) != VK_SUCCESS) rt_fatal("vk: descriptor pool failed");
+            pools_created++;
+        }
+        pools_taken++;
         r->pools[r->npools++] = pool;
     }
     rt_fatal("vk: descriptor set allocation failed twice");

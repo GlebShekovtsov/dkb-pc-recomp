@@ -20,6 +20,7 @@
 #include "host.h"
 #include "nvn_api.h"
 #include "vk.h"
+#include "vk_exec.h"
 #include "platform/platform.h"
 
 #define WEAK __attribute__((weak))
@@ -493,6 +494,11 @@ uint64_t vk_sync_submit_record(VkSyncRecordFn record, void *context, uint64_t su
     // The recorder is done with the part: the end-of-submission crumb, then the end, by the recorder when it records.
     if (!rec_end_cb(s->cb, VK_CRUMB_SUBMIT_END, fence)) vkEndCommandBuffer(s->cb);
     perf_replay(t0);
+    if (rt_trace & RT_TRACE_PERF) {
+        uint64_t created, taken;
+        vk_exec_pool_counts(&created, &taken);
+        perf_replay_totals(vk_exec_draws_total(), taken, created);
+    }
     // After the recording: the uploads it asked for (and every earlier one) precede it in queue order.
     vk_upload_flush(0);
     VkCommandBuffer pro = prologue(c, fence);
