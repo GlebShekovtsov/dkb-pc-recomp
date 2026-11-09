@@ -65,6 +65,8 @@ static struct {
     int *start;                                  // each slice's first op
     int nslices, cslices;
     int draws, slice_draws;
+    int oq;                                      // an occlusion query spans the pass: the slices inherit it
+    VkQueryControlFlags oq_flags;
 } PC;
 
 // A recording thread's secondary command buffers: its own pool (pools are used by one thread at a time) and the ones whose
@@ -150,6 +152,8 @@ WEAK void vk_exec_op_draw(VkExec *ex, uint32_t op, const void *payload) {
 
 WEAK void vk_exec_draw_slice_begin(void) {}
 WEAK int vk_exec_oq_counting(void) { return 0; }
+WEAK int vk_exec_oq_begin_outside(VkExec *ex, VkQueryControlFlags *flags, int *open) { return (void)ex, (void)flags, *open = 0, 0; }
+WEAK void vk_exec_oq_pass_ended(VkExec *ex) { (void)ex; }
 
 WEAK void vk_exec_op_xfer(VkExec *ex, uint32_t op, const void *payload) {
     (void)ex, (void)payload;
@@ -692,6 +696,7 @@ void vk_exec_pass_end(VkExec *ex) {
     vkCmdEndRendering(ex->cb);
     ex->recorded++;
     ex->in_pass = 0;
+    vk_exec_oq_pass_ended(ex);   // a sliced pass's query, begun before the pass
     for (int i = 0; i < ex->pass_ncolor && i < 8; i++)   // stand-ins of 3D BC targets go to their textures
         if (ex->color[i].image && ex->color[i].img && ex->color[i].img->image != ex->color[i].image)
             bc_copy_back(ex, &ex->color[i]);
@@ -1057,7 +1062,9 @@ static void par_begin_secondary(const VkExec *ex, VkCommandBuffer cb) {
         .depthAttachmentFormat = d->image && (d->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) ? ex->pass_depth : VK_FORMAT_UNDEFINED,
         .stencilAttachmentFormat = d->image && (d->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) ? ex->pass_stencil : VK_FORMAT_UNDEFINED,
         .rasterizationSamples = (VkSampleCountFlagBits)(ex->pass_samples ? ex->pass_samples : 1)};
-    VkCommandBufferInheritanceInfo ii = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO, .pNext = &ir};
+    VkCommandBufferInheritanceInfo ii = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO, .pNext = &ir,
+                                         .occlusionQueryEnable = PC.oq ? VK_TRUE : VK_FALSE,
+                                         .queryFlags = PC.oq ? PC.oq_flags : 0};
     VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT |
                                             VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT,
@@ -1082,7 +1089,6 @@ static int par_start(VkExec *ex) {
         if (!told++) rt_log("vk: TOTK_DUMP is set: no pass is sliced in this run (TOTK_REPLAY_THREADS has no effect)");
         return 0;
     }
-    if (vk_exec_oq_counting()) return par_skipped_oq++, 0;
     uint64_t sig = par_sig(ex);
     ParHist *e = par_find(sig, 0);
     if (!e || e->banned || e->draws < PAR_MIN_DRAWS) return 0;
@@ -1093,10 +1099,14 @@ static int par_start(VkExec *ex) {
         if ((i < 8 && i >= ex->pass_ncolor) || !t->image || !t->img) continue;
         if (t->img->fb_learned) return 0;
     }
+    VkQueryControlFlags qf = 0;
+    int qopen = 0, q = vk_exec_oq_begin_outside(ex, &qf, &qopen);
+    if (q < 0) return par_skipped_oq++, 0;
     pass_secondary = 1;
     vk_exec_pass_begin(ex);
     pass_secondary = 0;
-    if (!ex->in_pass) return 0;
+    if (!ex->in_pass) return vk_exec_oq_pass_ended(ex), 0;
+    PC.oq = qopen, PC.oq_flags = qf;
     PC.on = 1, PC.sig = sig, PC.nops = 0, PC.nslices = 0, PC.draws = 0, PC.slice_draws = PAR_SLICE_DRAWS;
     return 1;
 }
@@ -1252,8 +1262,8 @@ static void par_start_workers(void) {
 static void par_flush(VkExec *ex) {
     if (!ex) {   // TOTK_TRACE=perf (record_impl): what was sliced since the last line
         if (par_mode > 0)
-            rt_log("perf: sliced passes %llu with %llu slices and %llu draws; %llu passes not sliced while occlusion queries "
-                   "counted", (unsigned long long)par_passes, (unsigned long long)par_slices,
+            rt_log("perf: sliced passes %llu with %llu slices and %llu draws; %llu passes not sliced for want of "
+                   "inherited queries", (unsigned long long)par_passes, (unsigned long long)par_slices,
                    (unsigned long long)par_sliced_draws, (unsigned long long)par_skipped_oq);
         par_passes = par_slices = par_sliced_draws = par_skipped_oq = 0;
         return;

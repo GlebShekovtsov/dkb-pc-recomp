@@ -149,6 +149,8 @@ int vk_exec_par_slice(void);
 void vk_exec_par_hazard(void);
 // vk_exec_xfer.c: 1 while occlusion queries count draws (a sliced pass is not started then).
 int vk_exec_oq_counting(void);
+int vk_exec_oq_begin_outside(VkExec *ex, VkQueryControlFlags *flags, int *open);   // vk_exec_xfer.c, sliced passes
+void vk_exec_oq_pass_ended(VkExec *ex);
 VkBuffer vk_exec_inline_buffer(VkDeviceSize size);
 // vk_exec.c: the stand-in a 3D BC render target is drawn through goes with its image (vk_exec_image_gone).
 void vk_exec_bc_gone(VkImage image);

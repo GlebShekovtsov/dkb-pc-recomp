@@ -137,6 +137,15 @@ secondary command buffer of its own pool, and the submitting thread executes the
 - The slow-part notes of `TOTK_TRACE=perf` are skipped in slices; frame counters may lose counts.
 - `vk_exec_recording_fence` answers in slices too, so storage images bound there get the submission's write fence.
 
+### Occlusion queries
+
+The first run that really sliced (3bd1079, `DKB_REPLAY_THREADS=4`) started its workers and sliced passes in the menus,
+but in the busy area almost none: the game counts samples there, and passes were left alone while occlusion queries
+counted (60 to 70 passes per 240 submissions against 6 to 8 sliced). A pass of secondary command buffers takes no query
+command, so a sliced pass's query now begins before `vkCmdBeginRendering` and ends after `vkCmdEndRendering`
+(`vk_exec_xfer.c` `vk_exec_oq_begin_outside`, `vk_exec_oq_pass_ended`), and the slices inherit it
+(`occlusionQueryEnable`, device feature `inheritedQueries`; without it the pass is not sliced).
+
 ## Plan
 
 1. **Measure and remove the cheap waste** (done here).
