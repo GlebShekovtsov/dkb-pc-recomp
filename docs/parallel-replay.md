@@ -184,6 +184,17 @@ A slice now takes a texture descriptor from its thread's memo without the lock w
 already bound in this submission (`tex_info_hit`), and takes the lock only for the rest. The census counters, the
 snapshot hit counter and the frame's draw counter are not written from slices, so their cache lines stay with one thread.
 
+### First gain, and slices handed out while the pass is collected
+
+With the texture memo (8d39619) the same spot ran at 30 fps where it had dropped to 25-27: replay 19-20 ms for 28,000
+draws (0.70 us a draw against 1.00 on one thread), 15.5 ms for 25,000, no hazard, same picture. The frame is then paced
+to 30 fps, since it still misses 16.7 ms.
+
+The workers still waited while the walk collected a whole pass. A slice is now published as soon as the next one starts
+(`par_publish`), so the workers record the first slices while the walk collects the later ones; the lists of ops and
+copies have a fixed place for that (`PAR_MAX_OPS`, `PAR_MAX_SLICES`). At the end the submitting thread records what is
+left and waits for the rest.
+
 ## Plan
 
 1. **Measure and remove the cheap waste** (done here).

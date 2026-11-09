@@ -65,14 +65,16 @@ static int pass_secondary;                      // the next vk_exec_pass_begin o
 static int pass_tried, pass_sliced;             // the open pass: par_start looked at it; it has secondary contents
 static int pass_why;                            // why par_start left the open pass alone (PAR_WHY_*), for the log
 static uint32_t pass_draws;                     // draws of the open pass, for par_hist
+#define PAR_MAX_SLICES 256       // a pass with more draws than these hold keeps adding to its last slice
+#define PAR_MAX_OPS (1 << 20)    // collected ops of one pass; a full list ends the collection
 static struct {
     int on;
     uint64_t sig;
-    const op_hdr **ops;                          // the collected ops in order
-    int nops, cops;
-    VkExec *snap;                                // X before each slice's first op
-    int *start;                                  // each slice's first op
-    int nslices, cslices;
+    const op_hdr **ops;                          // the collected ops in order (PAR_MAX_OPS, never moved: workers read it)
+    int nops;
+    VkExec *snap;                                // X before each slice's first op (PAR_MAX_SLICES)
+    int start[PAR_MAX_SLICES], end[PAR_MAX_SLICES];   // each slice's ops; end is set when the slice is published
+    int nslices;
     int draws, slice_draws;
     int oq;                                      // an occlusion query spans the pass: the slices inherit it
     VkQueryControlFlags oq_flags;
@@ -1105,6 +1107,8 @@ static void par_begin_secondary(const VkExec *ex, VkCommandBuffer cb) {
 }
 
 static void resolve_rt(VkExec *ex);
+static void par_publish(void);
+static void par_start_workers(void);
 
 // At a draw outside a pass: 1 when the pass it opens is sliced (the pass is then open, with secondary contents).
 static int par_start(VkExec *ex) {
@@ -1146,6 +1150,11 @@ static int par_start(VkExec *ex) {
     pass_tried = 1;
     if (!ex->in_pass) return par_no[4]++, vk_exec_oq_pass_ended(ex), 0;
     PC.oq = qopen, PC.oq_flags = qf;
+    if (!PC.ops) {
+        PC.ops = malloc(sizeof *PC.ops * PAR_MAX_OPS), PC.snap = malloc(sizeof *PC.snap * PAR_MAX_SLICES);
+        if (!PC.ops || !PC.snap) rt_fatal("vk: out of memory");
+    }
+    if (par_mode > 1) par_start_workers();
     PC.on = 1, PC.sig = sig, PC.nops = 0, PC.nslices = 0, PC.draws = 0, PC.slice_draws = PAR_SLICE_DRAWS;
     return 1;
 }
@@ -1164,6 +1173,7 @@ static void par_op(VkExec *ex, uint32_t op, const void *a) {   // replay of one 
 // The op h while collecting: 1 when it was taken (state and bind ops applied to ex, draws only kept), 0 when it ends
 // the collection.
 static int par_take(VkExec *ex, const op_hdr *h, const void *a) {
+    if (PC.nops == PAR_MAX_OPS) return 0;
     switch (h->op) {
     case OP_SET_RT:
         return !memcmp(&ex->rt, a, sizeof ex->rt);   // the same targets again: the pass goes on
@@ -1179,14 +1189,9 @@ static int par_take(VkExec *ex, const op_hdr *h, const void *a) {
         vk_exec_op_draw(ex, h->op, a);   // binds only change ex
         break;
     case OP_DRAW: case OP_DRAW_IDX:
-        if (PC.slice_draws >= PAR_SLICE_DRAWS) {   // a new slice starts at this draw, from ex as it is now
-            if (PC.nslices == PC.cslices) {
-                int c = PC.cslices;
-                PC.snap = par_grow(PC.snap, &c, sizeof *PC.snap);
-                PC.start = realloc(PC.start, (size_t)c * sizeof *PC.start);
-                if (!PC.start) rt_fatal("vk: out of memory");
-                PC.cslices = c;
-            }
+        if (PC.slice_draws >= PAR_SLICE_DRAWS && PC.nslices < PAR_MAX_SLICES) {
+            // A new slice starts at this draw, from ex as it is now; the one before is complete and goes to the workers.
+            if (PC.nslices) par_publish();
             PC.snap[PC.nslices] = *ex;
             PC.start[PC.nslices++] = PC.nops;
             PC.slice_draws = 0;
@@ -1197,7 +1202,6 @@ static int par_take(VkExec *ex, const op_hdr *h, const void *a) {
     default:
         return 0;
     }
-    if (PC.nops == PC.cops) PC.ops = par_grow(PC.ops, &PC.cops, sizeof *PC.ops);
     PC.ops[PC.nops++] = h;
     return 1;
 }
@@ -1211,8 +1215,7 @@ typedef struct {
     int nviews;
 } ParOut;
 
-static ParOut *par_out;
-static int cpar_out;
+static ParOut par_out[PAR_MAX_SLICES];
 
 // Records slice i into a secondary command buffer of pp, from the slice's copy of the replay state, into w.
 static void par_record(int i, ParPool *pp, VkExec *w) {
@@ -1227,8 +1230,7 @@ static void par_record(int i, ParPool *pp, VkExec *w) {
     vk_exec_draw_slice_begin();
     par_slice = 1, par_hazard = 0;
     vk_mem_count_quiet(1), vk_usnap_quiet(1);
-    int end = i + 1 < PC.nslices ? PC.start[i + 1] : PC.nops;
-    for (int k = PC.start[i]; k < end; k++) par_op(w, PC.ops[k]->op, nvn_op_payload(PC.ops[k]));
+    for (int k = PC.start[i], end = PC.end[i]; k < end; k++) par_op(w, PC.ops[k]->op, nvn_op_payload(PC.ops[k]));
     par_slice = 0;
     vk_mem_count_quiet(0), vk_usnap_quiet(0);
     if (vkEndCommandBuffer(cb) != VK_SUCCESS) rt_fatal("vk: secondary command buffer end failed");
@@ -1242,43 +1244,37 @@ typedef struct {
     void *dctx;          // vk_exec_draw_ctx_new
     ParPool pp;
     VkExec w;
-    uint32_t seen;
 } ParWorker;
 static ParWorker *par_workers[PAR_MAX_WORKERS];
 static int par_nworkers;
+// The slices of the pass being collected, under pw_lock: published (complete, their ops fixed), taken and recorded.
+// The walk publishes a slice when the next one starts, so the workers record while it still collects.
 static PlatMutex pw_lock = PLAT_MUTEX_INIT;
 static PlatCond pw_go, pw_idle;
-static uint32_t pw_gen;                          // bumped per flush (pw_lock)
-static volatile uint64_t pw_job;                 // (flush generation << 32) | the next slice to take
-static volatile int32_t pw_n, pw_left;           // slices of the flush; slices not recorded yet
+static int pw_conds;
+static int pw_pub, pw_next, pw_done;
 static ParPool par_main_pool;
 static VkExec par_main_w;
 
-// Takes and records slices of flush gen until none is left. A thread that comes late (its flush is over, or another
-// one began) finds another generation in pw_job and takes nothing.
-static void par_take_slices(uint32_t gen, ParPool *pp, VkExec *w) {
-    for (;;) {
-        uint64_t v = __atomic_load_n(&pw_job, __ATOMIC_ACQUIRE);
-        if ((uint32_t)(v >> 32) != gen || (int32_t)(uint32_t)v >= __atomic_load_n(&pw_n, __ATOMIC_ACQUIRE)) return;
-        if (!__atomic_compare_exchange_n(&pw_job, &v, v + 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) continue;
-        par_record((int)(uint32_t)v, pp, w);
-        if (__atomic_sub_fetch(&pw_left, 1, __ATOMIC_ACQ_REL) == 0) {
-            plat_mutex_lock(&pw_lock);
-            plat_cond_broadcast(&pw_idle);
-            plat_mutex_unlock(&pw_lock);
-        }
-    }
+static void par_publish(void) {   // the last slice made is complete
+    plat_mutex_lock(&pw_lock);
+    PC.end[PC.nslices - 1] = PC.nops;
+    pw_pub = PC.nslices;
+    if (par_nworkers) plat_cond_broadcast(&pw_go);
+    plat_mutex_unlock(&pw_lock);
 }
 
 static void par_worker(void *arg) {
     ParWorker *pw = arg;
     vk_exec_draw_ctx_use(pw->dctx);
+    plat_mutex_lock(&pw_lock);
     for (;;) {
-        plat_mutex_lock(&pw_lock);
-        while (pw->seen == pw_gen) plat_cond_wait(&pw_go, &pw_lock);
-        uint32_t gen = pw->seen = pw_gen;
+        while (pw_next >= pw_pub) plat_cond_wait(&pw_go, &pw_lock);
+        int i = pw_next++;
         plat_mutex_unlock(&pw_lock);
-        par_take_slices(gen, &pw->pp, &pw->w);
+        par_record(i, &pw->pp, &pw->w);
+        plat_mutex_lock(&pw_lock);
+        if (++pw_done == pw_pub) plat_cond_broadcast(&pw_idle);
     }
 }
 
@@ -1286,12 +1282,11 @@ static void par_start_workers(void) {
     int want = par_mode - 1;
     if (want > PAR_MAX_WORKERS) want = PAR_MAX_WORKERS;
     if (par_nworkers >= want) return;
-    if (!par_nworkers) plat_cond_init(&pw_go), plat_cond_init(&pw_idle);
+    if (!pw_conds) plat_cond_init(&pw_go), plat_cond_init(&pw_idle), pw_conds = 1;
     while (par_nworkers < want) {
         ParWorker *pw = calloc(1, sizeof *pw);
         if (!pw) rt_fatal("vk: out of memory");
         pw->dctx = vk_exec_draw_ctx_new();   // here, while this thread records nothing
-        pw->seen = pw_gen;
         if (!(pw->t = plat_thread_new_ex(par_worker, pw, "replay slices", 0))) {
             rt_log("vk: a replay slice worker could not start: %d of %d run", par_nworkers, want);
             free(pw);
@@ -1330,22 +1325,17 @@ static void par_flush(VkExec *ex) {
     if (!PC.on) return;
     PC.on = 0;
     par_passes++, par_slices += (uint64_t)PC.nslices, par_sliced_draws += (uint64_t)PC.draws;
-    if (PC.nslices > cpar_out) {
-        free(par_out);
-        cpar_out = PC.nslices * 2;
-        if (!(par_out = calloc((size_t)cpar_out, sizeof *par_out))) rt_fatal("vk: out of memory");
+    if (PC.nslices) par_publish();
+    plat_mutex_lock(&pw_lock);
+    while (pw_next < pw_pub) {   // the submitting thread records slices too
+        int i = pw_next++;
+        plat_mutex_unlock(&pw_lock);
+        par_record(i, &par_main_pool, &par_main_w);
+        plat_mutex_lock(&pw_lock);
+        pw_done++;
     }
-    if (par_mode > 1 && PC.nslices > 1) par_start_workers();
-    plat_mutex_lock(&pw_lock);
-    uint32_t gen = ++pw_gen;
-    __atomic_store_n(&pw_n, PC.nslices, __ATOMIC_RELEASE);
-    __atomic_store_n(&pw_left, PC.nslices, __ATOMIC_RELEASE);
-    __atomic_store_n(&pw_job, (uint64_t)gen << 32, __ATOMIC_RELEASE);
-    if (par_nworkers && PC.nslices > 1) plat_cond_broadcast(&pw_go);
-    plat_mutex_unlock(&pw_lock);
-    par_take_slices(gen, &par_main_pool, &par_main_w);
-    plat_mutex_lock(&pw_lock);
-    while (__atomic_load_n(&pw_left, __ATOMIC_ACQUIRE) > 0) plat_cond_wait(&pw_idle, &pw_lock);
+    while (pw_done < pw_pub) plat_cond_wait(&pw_idle, &pw_lock);
+    pw_pub = pw_next = pw_done = 0;
     plat_mutex_unlock(&pw_lock);
     ParDone *done = malloc(sizeof *done + sizeof(ParCb) * (size_t)PC.nslices);
     VkCommandBuffer *cbs = malloc(sizeof *cbs * (size_t)(PC.nslices ? PC.nslices : 1));
