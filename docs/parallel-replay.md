@@ -23,6 +23,23 @@ The driver (`amdvlk64.dll`) takes under 4%. No single function dominates: each d
 microsecond, and there are many draws. Shaving the per-draw path can win a few percent; reaching 60 fps there needs
 the replay to take about half the time, which means recording on more than one thread.
 
+### Stage 1 measurements
+
+The same spot with the stage 1 build (0901269, `TOTK_TRACE=perf`, 60-frame windows over about four minutes):
+
+- 29,350-29,400 draws and dispatches per frame, steady; 1.00-1.10 us of replay per draw; replay 29-32 ms, 24-27 fps.
+  In the empty view before it: 60-90 draws per frame.
+- 17 descriptor pools taken per frame, none created: about 17,000 allocated descriptor sets per frame, written with
+  update templates. With the old 256-set pools that is about 68 pools a frame, more than the 64 spares, so pools were
+  created inside the frame before; the frame rate did not change measurably.
+- 2.3 command buffer parts per submission (about 3 submissions per frame): parts are only cut between render passes,
+  so a frame of 29,000 draws has around 7 parts, and a single pass can hold thousands of draws.
+
+The last point decides the design: parallel recording by parts alone cannot spread a large pass. Its draws have to be
+recorded into secondary command buffers (`VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT` with dynamic rendering)
+by several workers, and executed in order by the primary (`vkCmdExecuteCommands`). A frame dump's `passes.txt` of the
+spot gives the draws per pass and tells how much of the frame such passes hold.
+
 ## What already exists
 
 - The replay splits a submission into parts between passes (`vk_exec.c` `maybe_split`, `TOTK_SPLIT_DRAWS`,
@@ -67,8 +84,9 @@ The replay keeps its state in file-level variables, written for one thread:
    its own (same images, same frame time).
 4. **Ordered side effects.** Each part collects its uploads, written ranges and feedback notes in a list; the
    submitting thread applies them in part order when it submits the part.
-5. **Workers.** N workers record parts from their `VkExec` copies into their own command buffers (without the
-   recorder thread); the submitting thread submits them in order. Off by default (`TOTK_REPLAY_THREADS`), compared
+5. **Workers.** N workers record chunks of draws from their `VkExec` copies: whole parts into their own primary
+   command buffers, and slices of a large pass into secondary command buffers that the primary executes in order
+   (without the recorder thread for those); the submitting thread submits the parts in order. Off by default (`TOTK_REPLAY_THREADS`), compared
    against the single thread with the dump (`TOTK_DUMP=key`) and `TOTK_TRACE=perf` in the hills.
 
 Each stage is a commit that keeps the game working; stage 3 onward is checked in game on the RX 9070 XT before the
