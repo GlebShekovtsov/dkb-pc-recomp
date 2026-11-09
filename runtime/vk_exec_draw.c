@@ -1513,10 +1513,6 @@ static uint32_t feedback_prepare(VkExec *ex, const GfxShader *fs) {
 
 // By-region barrier inside the pass: earlier attachment writes become visible to this draw's fragment shader reads.
 static void feedback_barrier(VkExec *ex) {
-    if (vk_exec_par_slice()) {   // sliced passes have no feedback targets (par_start); one learned now is a hazard
-        vk_exec_par_hazard();
-        return;
-    }
     VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
                            .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
                                            VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,

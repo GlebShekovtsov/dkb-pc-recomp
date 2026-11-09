@@ -155,6 +155,14 @@ now also takes the first draw of an open pass: the pass is ended and opened agai
 `vkCmdBeginRendering` that loads the attachments). The draw history of a pass's targets also falls by an eighth instead
 of following a smaller pass at once, so the piece after a counter op is sliced too.
 
+### Feedback targets
+
+The next run (261dff0) reopened no pass: three passes a frame, the big ones, were refused before that because a target
+of theirs is attached in the feedback layout (a draw of the pass samples an attachment). Such passes are sliced now. A
+slice does not know what earlier slices wrote, so it starts with every attachment marked written, and its first draw
+that samples one records the by-region barrier in the secondary command buffer. A target learned inside a slice is a
+hazard (its pass restart is dropped); a target set is left alone after eight hazards instead of one.
+
 ## Plan
 
 1. **Measure and remove the cheap waste** (done here).

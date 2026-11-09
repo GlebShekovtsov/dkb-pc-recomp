@@ -48,6 +48,7 @@ static _Thread_local int x_here;   // this thread is inside vk_exec_record (vk_e
 #define PAR_MIN_DRAWS 256
 #define PAR_SLICE_DRAWS 1024
 #define PAR_HIST 64
+#define PAR_BAN_AFTER 8   // hazards after which a target set is not sliced again
 
 typedef struct { uint64_t sig; uint32_t draws; uint8_t banned; } ParHist;
 static ParHist par_hist[PAR_HIST];
@@ -56,7 +57,7 @@ static uint64_t par_restarts;                   // passes a clear opened that we
 static uint64_t par_passes, par_slices, par_sliced_draws, par_skipped_oq;   // since the last perf line
 static uint64_t par_end_op[OP_COUNT_ + 1];     // collections ended by each op (OP_COUNT_: the submission's end)
 static uint64_t par_no[5];                      // big-pass draws left unsliced: 0 small or new targets, 1 banned,
-                                                // 2 no attachment, 3 feedback target, 4 pass did not open
+                                                // 2 no attachment, 3 hazards in slices, 4 pass did not open
 static _Thread_local int par_slice, par_hazard; // recording a slice; a slice dropped a pass or barrier call
 static int par_restart;                         // par_start ends a pass a clear opened, to open it again for slices
 static int pass_secondary;                      // the next vk_exec_pass_begin opens a pass of secondary command buffers
@@ -1102,14 +1103,9 @@ static int par_start(VkExec *ex) {
     uint64_t sig = par_sig(ex);
     ParHist *e = par_find(sig, 0);
     if (!e || e->draws < PAR_MIN_DRAWS) return par_no[0]++, 0;
-    if (e->banned) return par_no[1]++, 0;
+    if (e->banned >= PAR_BAN_AFTER) return par_no[1]++, 0;
     resolve_rt(ex);
     if (ex->pass_noatt) return par_no[2]++, 0;
-    for (uint32_t i = 0; i < 9; i++) {   // feedback-layout targets: the in-pass barriers stay in the primary
-        const VkExecTarget *t = i < 8 ? &ex->color[i] : &ex->depth;
-        if ((i < 8 && i >= ex->pass_ncolor) || !t->image || !t->img) continue;
-        if (t->img->fb_learned) return par_no[3]++, 0;
-    }
     if (ex->in_pass) {
         par_restart = 1;
         vk_exec_pass_end(ex);
@@ -1198,6 +1194,9 @@ static void par_record(int i, ParPool *pp, VkExec *w) {
     par_begin_secondary(&PC.snap[i], cb);
     *w = PC.snap[i];
     w->cb = cb, w->recorded = 0, w->dirty = VK_EXEC_DIRTY_ALL;
+    // Feedback targets: what earlier slices wrote is not known here, so every attachment counts as written and the
+    // slice's first draw that samples one records its by-region barrier (vk_exec_draw.c feedback_barrier).
+    w->fb_dirty = 0x1ff;
     w->views = NULL, w->nviews = 0, w->cap_views = 0;   // the slice's own; merged into the primary's after
     vk_exec_draw_slice_begin();
     par_slice = 1, par_hazard = 0;
@@ -1291,7 +1290,7 @@ static void par_flush(VkExec *ex) {
                     o += (size_t)snprintf(line + o, sizeof line - o, " %s %llu", i < OP_COUNT_ ? nvn_op_name(i) : "submission-end",
                                           (unsigned long long)par_end_op[i]);
             rt_log("perf: collections ended by:%s; draws that opened an unsliced pass: small or new targets %llu, banned %llu, "
-                   "no attachment %llu, feedback target %llu, pass not opened %llu; passes opened again after a clear %llu", line, (unsigned long long)par_no[0],
+                   "no attachment %llu, hazards in slices %llu, pass not opened %llu; passes opened again after a clear %llu", line, (unsigned long long)par_no[0],
                    (unsigned long long)par_no[1], (unsigned long long)par_no[2], (unsigned long long)par_no[3],
                    (unsigned long long)par_no[4], (unsigned long long)par_restarts);
         }
@@ -1348,8 +1347,12 @@ static void par_flush(VkExec *ex) {
     vk_exec_pass_end(ex);         // a pass of secondary command buffers takes nothing else
     if (hazard) {
         ParHist *e = par_find(PC.sig, 1);
-        e->banned = 1;
-        rt_log("vk: a sliced pass needed a pass or barrier change inside a slice: those targets are not sliced again");
+        // A feedback target learned inside a slice is one: its pass restart was dropped, and the next pass attaches
+        // the target in the feedback layout, so a few hazards are expected; a set that keeps having them is left alone.
+        par_no[3]++;
+        if (e->banned < 255 && ++e->banned == PAR_BAN_AFTER)
+            rt_log("vk: a sliced pass needed a pass or barrier change inside a slice %d times: those targets are not sliced again",
+                   PAR_BAN_AFTER);
     }
 }
 
