@@ -48,6 +48,7 @@ static _Thread_local int x_here;   // this thread is inside vk_exec_record (vk_e
 #define PAR_MIN_DRAWS 256
 #define PAR_SLICE_DRAWS 1024
 #define PAR_HIST 64
+enum { PAR_WHY_UNSEEN, PAR_WHY_NONE, PAR_WHY_NEW, PAR_WHY_SMALL, PAR_WHY_BANNED, PAR_WHY_NOATT, PAR_WHY_QUERY };
 #define PAR_BAN_AFTER 8   // hazards after which a target set is not sliced again
 
 typedef struct { uint64_t sig; uint32_t draws; uint8_t banned; } ParHist;
@@ -61,6 +62,8 @@ static uint64_t par_no[5];                      // big-pass draws left unsliced:
 static _Thread_local int par_slice, par_hazard; // recording a slice; a slice dropped a pass or barrier call
 static int par_restart;                         // par_start ends a pass a clear opened, to open it again for slices
 static int pass_secondary;                      // the next vk_exec_pass_begin opens a pass of secondary command buffers
+static int pass_tried, pass_sliced;             // the open pass: par_start looked at it; it has secondary contents
+static int pass_why;                            // why par_start left the open pass alone (PAR_WHY_*), for the log
 static uint32_t pass_draws;                     // draws of the open pass, for par_hist
 static struct {
     int on;
@@ -684,7 +687,7 @@ void vk_exec_pass_begin(VkExec *ex) {
                           .pStencilAttachment = ex->pass_stencil ? &sa : NULL,
                           .flags = pass_secondary ? VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT : 0};
     vkCmdBeginRendering(ex->cb, &ri);
-    pass_draws = 0;
+    pass_draws = 0, pass_tried = 0, pass_sliced = pass_secondary, pass_why = PAR_WHY_UNSEEN;
     vk_exec_frame.passes++;
     ex->recorded++;
     ex->in_pass = 1;
@@ -698,6 +701,16 @@ void vk_exec_pass_end(VkExec *ex) {
     // take a small pass in the same frame.
     if (ex == &X && !ex->pass_noatt && !par_restart) {
         uint64_t sig = par_sig(ex);
+        static int told;
+        if (par_mode > 0 && !pass_sliced && pass_draws >= PAR_SLICE_DRAWS && told < 24) {
+            static const char *const why[] = {"no direct draw reached par_start", "not refused", "targets not seen before",
+                                              "targets drew little before", "banned", "no attachment", "queries"};
+            ParHist *h = par_find(sig, 0);
+            told++;
+            rt_log("vk: a pass of %u draws was not sliced: %s (targets %016llx, slot %u, kept count %u, slot holds %016llx)",
+                   pass_draws, why[pass_why], (unsigned long long)sig, (unsigned)(sig % PAR_HIST), h ? h->draws : 0,
+                   (unsigned long long)par_hist[sig % PAR_HIST].sig);
+        }
         ParHist *e = par_find(sig, pass_draws >= PAR_MIN_DRAWS);
         if (e) e->draws = pass_draws >= e->draws ? pass_draws : e->draws - e->draws / 8;
     }
@@ -1093,8 +1106,10 @@ static int par_start(VkExec *ex) {
         if (par_mode) rt_log("vk: passes of %d or more draws are recorded in slices of %d into secondary command buffers "
                              "(TOTK_REPLAY_THREADS=%d: recorded by that many threads)", PAR_MIN_DRAWS, PAR_SLICE_DRAWS, par_mode);
     }
-    // A pass a clear opened (no draw yet) can still be sliced: it is ended and opened again below.
-    if (!par_mode || (ex->in_pass && pass_draws) || ex != &X || ex->render_disabled) return 0;
+    // An open pass (a clear opened it, or its first draws were indirect) can still be sliced: it is ended and opened
+    // again below. One look per pass. Disabled rendering does not matter: the slices skip their draws as the walk would.
+    if (!par_mode || ex != &X || (ex->in_pass && pass_tried)) return 0;
+    pass_tried = 1, pass_why = PAR_WHY_NONE;
     if (vk_dump_armed) {   // the dump follows draws one by one, on one thread
         static int told;
         if (!told++) rt_log("vk: TOTK_DUMP is set: no pass is sliced in this run (TOTK_REPLAY_THREADS has no effect)");
@@ -1102,10 +1117,11 @@ static int par_start(VkExec *ex) {
     }
     uint64_t sig = par_sig(ex);
     ParHist *e = par_find(sig, 0);
-    if (!e || e->draws < PAR_MIN_DRAWS) return par_no[0]++, 0;
-    if (e->banned >= PAR_BAN_AFTER) return par_no[1]++, 0;
+    if (!e) return pass_why = PAR_WHY_NEW, par_no[0]++, 0;
+    if (e->draws < PAR_MIN_DRAWS) return pass_why = PAR_WHY_SMALL, par_no[0]++, 0;
+    if (e->banned >= PAR_BAN_AFTER) return pass_why = PAR_WHY_BANNED, par_no[1]++, 0;
     resolve_rt(ex);
-    if (ex->pass_noatt) return par_no[2]++, 0;
+    if (ex->pass_noatt) return pass_why = PAR_WHY_NOATT, par_no[2]++, 0;
     if (ex->in_pass) {
         par_restart = 1;
         vk_exec_pass_end(ex);
@@ -1114,10 +1130,11 @@ static int par_start(VkExec *ex) {
     }
     VkQueryControlFlags qf = 0;
     int qopen = 0, q = vk_exec_oq_begin_outside(ex, &qf, &qopen);
-    if (q < 0) return par_skipped_oq++, 0;
+    if (q < 0) return pass_why = PAR_WHY_QUERY, pass_tried = 1, par_skipped_oq++, 0;
     pass_secondary = 1;
     vk_exec_pass_begin(ex);
     pass_secondary = 0;
+    pass_tried = 1;
     if (!ex->in_pass) return par_no[4]++, vk_exec_oq_pass_ended(ex), 0;
     PC.oq = qopen, PC.oq_flags = qf;
     PC.on = 1, PC.sig = sig, PC.nops = 0, PC.nslices = 0, PC.draws = 0, PC.slice_draws = PAR_SLICE_DRAWS;
