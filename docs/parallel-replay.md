@@ -207,6 +207,18 @@ The render thread is busy 27-28 ms a frame there, 10 ms of it outside the replay
 the replay alone cannot bring the frame under 16.7 ms on the submitting thread; `TOTK_REPLAY_ASYNC=1` with the sliced
 replay is the next thing to measure.
 
+### Where it stands (278aab1, 16 threads)
+
+Every big pass is sliced after its first frame (about 17,500 of 29,000 draws a frame go through slices, the rest are
+small passes), with no hazard and the same picture. The replay stays at 17.8 ms (0.61 us a draw), 31-35 fps against
+25-27 on one thread, and 16 threads do little better than 4: what is left is the serial part (collecting the ops and
+applying binds on the submitting thread, the small passes, the copies of the replay state) and the wait for the slices.
+
+`TOTK_REPLAY_ASYNC=1` with slices was slower again (29 fps): the render thread is busy 28 ms a frame even without the
+replay on it, and the game's other threads wait 18 ms a frame on fences. The frame there is about the replay (17 ms)
+followed by the GPU's 11-14 ms, which begins only when the big passes are submitted, so 60 fps in this spot needs both
+shorter and overlapped, not the replay alone.
+
 ## Plan
 
 1. **Measure and remove the cheap waste** (done here).
