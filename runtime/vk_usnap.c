@@ -276,6 +276,10 @@ static int first_above(uint64_t a) {
     return lo;
 }
 
+static _Thread_local int find_quiet;
+
+void vk_usnap_quiet(int on) { find_quiet = on; }
+
 int vk_usnap_find(uint64_t addr, uint64_t n, uint64_t align, VkDescriptorBufferInfo *out) {
     if (!U.on || !n) return 0;
     int i = first_above(addr);
@@ -285,7 +289,7 @@ int vk_usnap_find(uint64_t addr, uint64_t n, uint64_t align, VkDescriptorBufferI
     uint64_t off = r->off + (addr - r->lo);
     if (off % align) return 0;
     *out = (VkDescriptorBufferInfo){U.arena->buf, off, n};
-    U.hits++;
+    if (!find_quiet) U.hits++;   // a statistic; several slice threads would fight over its cache line
     return 1;
 }
 

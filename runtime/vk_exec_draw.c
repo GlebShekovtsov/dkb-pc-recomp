@@ -1555,7 +1555,27 @@ static struct {
     uint8_t separate, valid;
     VkImage image;
     VkDescriptorImageInfo out;
-} TD[TD_N];
+} TD_m[TD_N];
+static _Thread_local __typeof__(TD_m) *TD_tp = &TD_m;
+#define TD (*TD_tp)
+
+// The memo hit of tex_info_lookup without the texture lock, for the slices of a parallel pass (vk_exec.c par_flush):
+// every slice thread has its own memo, and the hit reads nothing the lock guards (slot_still takes it itself when the
+// global generation moved). With four threads taking the lock for every texture of every draw, the threads spent their
+// time handing it to each other and the replay got slower than on one thread. 0: not a plain hit, take the lock.
+static int tex_info_hit(VkExec *ex, const GfxShaderRes *r, uint64_t h, int separate, VkDescriptorImageInfo *out) {
+    if (!h || td_mode() != 1) return 0;
+    descriptor_state(ex);
+    uint32_t gen = vk_texture_slots_gen(), ep = vk_texture_epoch(), sg = vk_sampler_gen();
+    typeof(TD[0]) *m = &TD[(h * 0x9E3779B97F4A7C15ull ^ (uint64_t)r->type << 7 ^ (uint64_t)separate) >> 51];
+    if (!m->valid || m->context != descriptor_serial || m->h != h || m->type != r->type || m->separate != separate ||
+        m->sgen != sg || m->epoch != ep || !slot_still(ex, &m->gen, m->tok, h, gen))
+        return 0;
+    *out = m->out;
+    out->imageLayout = m->image && ex->nfbl && in_fbl(ex, m->image) ? VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT
+                                                                      : VK_IMAGE_LAYOUT_GENERAL;
+    return 1;
+}
 
 static void tex_info_lookup(VkExec *ex, const GfxShaderRes *r, uint64_t h, int storage, int separate,
                             VkDescriptorImageInfo *out) {
@@ -2164,16 +2184,22 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
             } else {
                 kind = 1;
                 DP_MARK(DP_SIG);
-                vk_texture_lock();   // tex_info looks up with the texture lock held
+                int locked = 0, slice = vk_exec_par_slice();
+                if (!slice) vk_texture_lock(), locked = 1;   // tex_info looks up with the texture lock held
                 for (uint32_t k = 0; k < cnt; k++) {
                     int slot = r->slot + (int)k;
                     uint64_t h = 0;
                     if (img) h = slot >= 0 && slot < 32 ? ex->img[st][slot] : 0;
                     else h = slot >= 0 && slot < 128 ? ex->tex[st][slot] : 0;
+                    if (slice && !img && tex_info_hit(ex, r, h, r->separate, &o[k].image)) {
+                        o[k].w[2] = (uint32_t)o[k].image.imageLayout;
+                        continue;
+                    }
+                    if (!locked) vk_texture_lock(), locked = 1;
                     tex_info(ex, r, h, img, r->separate, &o[k].image);
                     o[k].w[2] = (uint32_t)o[k].image.imageLayout;   // zero the tail padding
                 }
-                vk_texture_unlock();
+                if (locked) vk_texture_unlock();
                 DP_MARK(DP_TEX);
             }
         } else {
@@ -2869,7 +2895,7 @@ static void op_draw(VkExec *ex, const p_draw *d) {
     c0_binst = (uint32_t)d->base_instance;
     if (indirect_reset_draw(ex, d)) return;
     if (d->count <= 0 || !prepare_draw(ex, d->prim, d->count, 0)) return;
-    vk_exec_frame.draws++;
+    if (!vk_exec_par_slice()) vk_exec_frame.draws++;   // a trace counter: not from several threads
     uint32_t inst = d->instances > 0 ? (uint32_t)d->instances : 1, first = (uint32_t)d->first, n = (uint32_t)d->count;
     if (d->prim == NVN_DRAW_PRIMITIVE_QUADS && n >= 4) {   // quads become two triangles each
         uint32_t q = n / 4;
@@ -2938,7 +2964,7 @@ static void op_draw_idx(VkExec *ex, const p_draw_idx *d) {
     if (d->itype < 0 || d->itype > 2) return warn_once(W_INDEX, "index type %d is unknown: draw skipped", d->itype);
     int restart = restart_for(ex, d->prim, d->itype);
     if (d->count <= 0 || !prepare_draw(ex, d->prim, d->count, restart)) return;
-    vk_exec_frame.draws++;
+    if (!vk_exec_par_slice()) vk_exec_frame.draws++;   // a trace counter: not from several threads
     uint64_t bytes = (uint64_t)d->count * isize[d->itype];
     VkMemSpan sp;
     if (!vk_mem_resolve(d->ibuf, bytes, &sp)) return warn_once(W_INDEX, "index buffer %#llx is not backed: draws with it are skipped", (unsigned long long)d->ibuf);
@@ -2982,7 +3008,7 @@ static void op_draw_idx_ind(VkExec *ex, const p_draw_idx_ind *d) {
     if (!vk_mem_resolve(d->ibuf, 1, &ib) || ib.offset % (d->itype == NVN_INDEX_TYPE_UNSIGNED_SHORT ? 2 : 4))
         return warn_once(W_INDEX, "index buffer %#llx is not backed or not aligned: indirect draws skipped", (unsigned long long)d->ibuf);
     if (!prepare_draw(ex, d->prim, 0x7fffffff, restart_for(ex, d->prim, d->itype))) return;
-    vk_exec_frame.draws++;
+    if (!vk_exec_par_slice()) vk_exec_frame.draws++;   // a trace counter: not from several threads
     VK_MEM_USE(ip);
     VK_MEM_USE(ib);
     vkCmdBindIndexBuffer(ex->cb, ib.buffer, ib.offset, d->itype == NVN_INDEX_TYPE_UNSIGNED_SHORT ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
@@ -3404,7 +3430,7 @@ void vk_exec_op_draw(VkExec *ex, uint32_t op, const void *payload) {
 // file's own objects (*_m) on every thread until vk_exec_draw_ctx_use points them at a worker's copies. A worker's copies
 // start as the submitting thread's at vk_exec_draw_ctx_new, without what belongs to that thread alone (its per-submission
 // resources, the descriptor-build lists) and without the caches keyed by its descriptor contexts.
-#define DRAW_CTX_OBJS(X) X(c0_lay) X(cur) X(cur_fence) X(DS) X(rs_lists) X(rs_last) X(rs_last_l) X(bind_gen) X(shader_tab) X(stagem) X(AC) X(slotm) X(FM) X(SM) X(PM) X(DP) X(c0_dim) X(c0_binst) X(native_gs_vs) X(native_gs_fs) X(B) X(BS) X(RS) X(bind_w) X(bind_d) X(bind_bv)
+#define DRAW_CTX_OBJS(X) X(c0_lay) X(cur) X(cur_fence) X(DS) X(rs_lists) X(rs_last) X(rs_last_l) X(bind_gen) X(shader_tab) X(stagem) X(AC) X(slotm) X(FM) X(SM) X(PM) X(DP) X(c0_dim) X(c0_binst) X(native_gs_vs) X(native_gs_fs) X(B) X(BS) X(RS) X(bind_w) X(bind_d) X(bind_bv) X(TD)
 typedef struct {
 #define X(n) __typeof__(n##_m) *p_##n;
     DRAW_CTX_OBJS(X)
@@ -3424,7 +3450,7 @@ void *vk_exec_draw_ctx_new(void) {
     *c->p_cur = NULL, *c->p_cur_fence = 0;
     memset(c->p_rs_lists, 0, sizeof *c->p_rs_lists);
     *c->p_rs_last = NULL, *c->p_rs_last_l = NULL;
-    memset(c->p_AC, 0, sizeof *c->p_AC), memset(c->p_FM, 0, sizeof *c->p_FM);   // keyed by this thread's contexts
+    memset(c->p_AC, 0, sizeof *c->p_AC), memset(c->p_FM, 0, sizeof *c->p_FM), memset(c->p_TD, 0, sizeof *c->p_TD);   // keyed by this thread's contexts
     memset(c->p_B, 0, sizeof *c->p_B);
     c->p_SM->valid = 0, c->p_PM->valid = 0, c->p_RS->info = NULL, c->p_DP->active = 0;
     return c;

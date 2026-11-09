@@ -1226,9 +1226,11 @@ static void par_record(int i, ParPool *pp, VkExec *w) {
     w->views = NULL, w->nviews = 0, w->cap_views = 0;   // the slice's own; merged into the primary's after
     vk_exec_draw_slice_begin();
     par_slice = 1, par_hazard = 0;
+    vk_mem_count_quiet(1), vk_usnap_quiet(1);
     int end = i + 1 < PC.nslices ? PC.start[i + 1] : PC.nops;
     for (int k = PC.start[i]; k < end; k++) par_op(w, PC.ops[k]->op, nvn_op_payload(PC.ops[k]));
     par_slice = 0;
+    vk_mem_count_quiet(0), vk_usnap_quiet(0);
     if (vkEndCommandBuffer(cb) != VK_SUCCESS) rt_fatal("vk: secondary command buffer end failed");
     par_out[i] = (ParOut){{pp, cb}, w->fb_dirty, w->recorded, par_hazard, w->views, w->nviews};
 }

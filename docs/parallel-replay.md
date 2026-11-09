@@ -170,6 +170,20 @@ seen before", with another signature every frame for what is the same pass. The 
 `OP_SET_RT` payload, whose bytes are not the same from frame to frame for the same targets, so a big pass never found
 the count its targets kept. The key is now the resolved images with their level and layers.
 
+### First run with the big passes sliced: slower, on the texture lock
+
+With the history keyed by images (164615a) about 15,000 draws a frame went through the slices on four threads, without
+hazards, and the replay took 35 ms against 28 (20 fps against 27). A `TOTK_PROFILE_CHAINS` profile of 15 s there:
+
+- the three workers waited for work 61% of the time (the walk collects a pass on one thread before any slice starts);
+- of the rest, 56% was `plat_rmutex_lock` under `bind_resources`: the texture lock, taken for every texture binding of
+  every draw. The submitting thread spent 47% of its slice time there too. Four threads handing one lock to each other
+  cost more than one thread taking it alone.
+
+A slice now takes a texture descriptor from its thread's memo without the lock when the memo hits and the slot was
+already bound in this submission (`tex_info_hit`), and takes the lock only for the rest. The census counters, the
+snapshot hit counter and the frame's draw counter are not written from slices, so their cache lines stay with one thread.
+
 ## Plan
 
 1. **Measure and remove the cheap waste** (done here).

@@ -238,11 +238,15 @@ void vk_mem_pick(VkMemSpan *sp);
 #define VK_MEM_USE(sp) do { if (vk_mirror_on && (sp).pool) vk_mem_use(&(sp)); } while (0)
 #define VK_MEM_PICK(sp) do { if (vk_mirror_on && (sp).pool) vk_mem_pick(&(sp)); } while (0)
 void vk_mem_gpu_wrote(const VkMemSpan *sp, uint64_t size);
+// The calling thread's vk_mem_count calls count nothing while on (the slices of a parallel pass, vk_exec.c par_record:
+// the census is single-writer).
+void vk_mem_count_quiet(int on);
 // Uniform blocks as of the submit call (vk_usnap.c): vk_exec_record copies the uniform ranges a submission binds before
 // it records, ubo bindings take the copy (0: not copied, bind memory), GPU writes of the replay drop the copies they touch.
 void vk_usnap_begin(const uint64_t *handles, int n, uint64_t fence);
 void vk_usnap_end(uint64_t fence);
 int vk_usnap_find(uint64_t addr, uint64_t n, uint64_t align, VkDescriptorBufferInfo *out);
+void vk_usnap_quiet(int on);   // the calling thread's finds are not counted while on (slices of a parallel pass)
 void vk_usnap_drop(uint64_t addr, uint64_t n);   // the replay makes the GPU write [addr, addr+n) of guest memory
 uint64_t vk_usnap_gen(void);                      // changes whenever a binding may resolve differently
 void vk_usnap_shutdown(void);                     // vk_exec_draw_shutdown: frees the arenas

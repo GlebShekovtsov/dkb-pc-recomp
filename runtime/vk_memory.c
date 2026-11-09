@@ -717,7 +717,12 @@ static volatile int64_t traffic[VK_MCLS_N][VK_MUSE_N];
 
 // Every caller is the replay (vk_exec*, under vk_sync_submit's lock), about ten adds per draw: one writer at a time, so
 // a plain add, not a locked one. An add racing the census's reset may be lost.
+static _Thread_local int count_quiet;   // a slice of a parallel pass: several threads would fight over the counters' lines
+
+void vk_mem_count_quiet(int on) { count_quiet = on; }
+
 void vk_mem_count(int cls, int use, uint64_t bytes) {
+    if (count_quiet) return;
     if ((unsigned)cls < VK_MCLS_N && (unsigned)use < VK_MUSE_N)
         __atomic_store_n(&traffic[cls][use], __atomic_load_n(&traffic[cls][use], __ATOMIC_RELAXED) + (int64_t)bytes,
                          __ATOMIC_RELAXED);
