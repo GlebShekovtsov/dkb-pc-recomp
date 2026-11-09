@@ -90,6 +90,8 @@
 
  "ui.title": "TotK Setup",
  "ui.version": "version {version}",
+ "ui.update_available": "A newer release, {tag}, is available. Click to open its page.",
+ "warn.update_available": "A newer release, {tag}, is available: {url}",
  "ui.intro": "Builds a playable Tears of the Kingdom folder from your own game files. This takes a while and runs once.",
  "ui.notice": "The folder this setup builds contains the game. It is for your own use only; do not share or upload it.",
  "ui.keys_private": "The keys file is read in place. Its contents are never shown, copied or stored.",
@@ -212,6 +214,7 @@
  "dkb.busy": "Another setup is already using {path}. Wait for it to finish or cancel it first.",
  "dkb.space": "Setup needs about {need} GiB free for the installed data and temporary build files.",
  "dkb.tool_failed": "The {step} step failed with exit code {code}. Details: {log}.",
+ "dkb.elevation_required": "Windows asked for administrator rights to start {exe}. Right-click it, choose Properties, Compatibility, and clear \"Run this program as an administrator\" (also under \"Change settings for all users\"). Check that your antivirus did not touch it, or run the setup once as administrator. Then run the setup again; it resumes.",
  "dkb.patches_missing": "The generated code lacks the required Bananza patch table. Setup stopped before compiling.",
  "dkb.need_nup": "Choose an existing .nup file.",
  "dkb.nup_and_folders": "Choose either a .nup file or ExeFS and RomFS folders, not both.",

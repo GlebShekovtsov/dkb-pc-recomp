@@ -130,6 +130,7 @@ void vk_usnap_drop(uint64_t addr,uint64_t bytes) {CHECK(addr==(uintptr_t)output_
 void vk_mem_gpu_pending(uint64_t addr,uint64_t bytes) {pending_writes++;pending_addr=addr;pending_size=bytes;}
 int vk_sync_noting(void) {return 0;}
 int vk_exec_par_slice(void) {return 0;}
+void vk_exec_par_order_hazard(void) {}
 void vk_sync_note_write(uint64_t a,uint64_t b,uint64_t c) {(void)a;(void)b;(void)c;abort();}
 void vk_mem_count(int cls,int use,uint64_t bytes) {(void)cls;(void)use;(void)bytes;}
 void vk_mem_bound_note(void *pool) {(void)pool;abort();}

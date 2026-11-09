@@ -26,8 +26,9 @@
 // Its controller consumes an integer rate at patch page +12; its game clocks
 // consume the precise 60 Hz ratio at +8. The existing FPS limit sets the host cap.
 //
-// The world clock (frame_step_world_us) sums the steps from the first present that finds the player actor away from
-// the origin, where the title screen keeps it: the end of the first save load. Recorded and scripted input
+// The world clock (frame_step_world_us) sums the game time stepped (the patch page's step, whole vsyncs without the
+// real-time step) from the first present that finds the player actor away from the origin, where the title screen
+// keeps it: the end of the first save load (Bananza: the first present). Recorded and scripted input
 // (input.c) runs on it, so a replay presses at the same game time at any frame rate and after a first load of any
 // length; a later load (fast travel) still shifts what follows by its length.
 //
@@ -74,6 +75,10 @@ static void step_store(float seconds) {
 
 static void frame_limit_live(void);
 static int no_table;   // this game version has no realtime patch table in this build
+// TOTK_FIXED_STEP=1 (with the real-time step): every present steps the game 1/60 s whatever its display time, so game
+// time is presents / 60 and a scripted run (input.c) steps the same game time per frame in every run. The game slows
+// down when frames take longer than 1/60 s and speeds up above 60 fps; meant for A/B and image tests.
+static int fixed_step;
 
 void frame_step_init(void) {
     int fps60 = rt_patch_set("fps60"), realtime = rt_patch_set("realtime"), cloth = rt_patch_set("cloth");
@@ -91,6 +96,12 @@ void frame_step_init(void) {
         step_interval = (_Atomic uint32_t *)((uint8_t *)rt_patch_page() + 8);
         if (!rt_game_version) dkb_rate = (_Atomic uint32_t *)((uint8_t *)rt_patch_page() + 12);
         step_store((float)STEP_FIRST_S);
+    }
+    const char *fx = cfg_get("TOTK_FIXED_STEP");
+    if (fx && !strcmp(fx, "1")) {
+        fixed_step = step_word != NULL;
+        rt_log("frame rate: %s", fixed_step ? "fixed step, 1/60 s of game time per present (TOTK_FIXED_STEP=1)"
+               : "TOTK_FIXED_STEP=1 needs the real-time step (TOTK_REALTIME=1); the game keeps its own timing");
     }
     frame_limit_live();   // TOTK_FPS_LIMIT decides the set fps60 from the start
     if (!rt_game_version) {
@@ -249,7 +260,10 @@ static uint64_t presents;
 int64_t frame_step_world_us(void) { return atomic_load_explicit(&world_us, memory_order_relaxed); }
 uint64_t frame_step_ticks(void) { return atomic_load_explicit(&game_us, memory_order_relaxed) * 60 / 1000000; }
 
-static void world_clock(double dt, double step) {
+// game: the game time this present stepped, the same amount frame_step_ticks adds. The world clock once summed the
+// display time without the real-time step and skipped the frames of a step reset (first frame, a long gap) with it,
+// so a load or a shader-compile stall moved every later timed script event by a few frames between runs.
+static void world_clock(double game) {
     presents++;
     int64_t w = atomic_load_explicit(&world_us, memory_order_relaxed);
     if (w < 0) {
@@ -264,14 +278,15 @@ static void world_clock(double dt, double step) {
         atomic_store_explicit(&world_us, 0, memory_order_relaxed);
         return;
     }
-    if (!step_word) step = dt > STEP_MAX_S ? STEP_MAX_S : dt;   // whole-vsync steps: the display time stands in
-    atomic_store_explicit(&world_us, w + (int64_t)(step * 1e6 + 0.5), memory_order_relaxed);
+    atomic_store_explicit(&world_us, w + (int64_t)(game * 1e6 + 0.5), memory_order_relaxed);
 }
 
 void frame_step_present(uint64_t display_ns, int interval) {
     frame_limit_live();
     double step = 0, dt = last_ns ? (double)(display_ns - last_ns) * 1e-9 : 0;
-    if (step_word && last_ns) {
+    if (step_word && fixed_step) {
+        step = STEP_FIRST_S;   // the patch page keeps the 1/60 s frame_step_init stored
+    } else if (step_word && last_ns) {
         if (dt > STEP_RESET_S || dt < 0.001) {
             sample_count = sample_next = 0;
         } else {
@@ -290,6 +305,6 @@ void frame_step_present(uint64_t display_ns, int interval) {
     double game = step_word ? step_now : (interval > 0 ? interval : 1) / 60.0;
     atomic_store_explicit(&game_us, atomic_load_explicit(&game_us, memory_order_relaxed) + (uint64_t)(game * 1e6 + 0.5),
                           memory_order_relaxed);
-    world_clock(dt, step);
+    world_clock(game);
     if (rt_trace & RT_TRACE_PERF) speed_report(display_ns, step, interval);
 }

@@ -103,6 +103,16 @@ Every guest thread is a host thread. TotK assumes Horizon's scheduler: three app
   HUD stretched over it. The `aspect` setting (`fit`, the default; `stretch`) decides what the present does
   when the window's shape differs from the output's: `fit` letterboxes, where a 16:9 game in a wider window used to be
   stretched.
+- HDR (`hdr = 1`, experimental, `vk_hdr.c`). The game's window texture is 8-bit sRGB, so HDR is an inverse tonemap of
+  it, not the scene's real range. On an HDR10 swapchain (A2B10G10R10, ST 2084; `VK_EXT_swapchain_colorspace`,
+  `VK_EXT_hdr_metadata`) the present chain is game, FSR, SMAA, the HDR pass, the menu. FSR and SMAA write an 8-bit
+  image of the swapchain's size; `shaders/hdr_encode.frag` then linearises it, stretches the largest channel above a
+  knee towards `hdr_peak_nits` (all channels scaled together, so hue is kept), puts white at `hdr_game_nits`, converts
+  Rec. 709 to Rec. 2020 and PQ-encodes into the swapchain image. The in-game menu is drawn into an RGBA8 image and
+  blended on at `hdr_ui_nits`. Without an HDR10 surface format (Windows with "Use HDR" off, a compositor without
+  colour management) the swapchain stays SDR and none of this runs.
+- DLSS (`upscaler = dlss`, experimental, NVIDIA only, `vk_dlss.c`): the game's upscaler dispatch is replaced by NVIDIA
+  NGX DLSS on the same images, spatial only for now. Setup and limits: [dkb-dlss.md](dkb-dlss.md).
 - Occlusion queries never block the CPU; a result that is not ready counts as visible.
 - ASTC textures are uploaded as they are where the device reports `textureCompressionASTC_LDR`, and decoded by a compute shader everywhere else (`vk_astc.c`, `TOTK_ASTC`). The CPU decoder (`tex_astc*.c`) is the fallback and the test oracle.
 - Draw state. A draw whose program, bound state and textures repeat reuses the previous draw's shaders and skips rebuilding its descriptor sets; descriptor sets are written through update templates (`vk_exec_draw.c`, `vk_pipeline.c`).

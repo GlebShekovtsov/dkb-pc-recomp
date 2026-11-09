@@ -293,9 +293,15 @@ int vk_usnap_find(uint64_t addr, uint64_t n, uint64_t align, VkDescriptorBufferI
     return 1;
 }
 
-// Parallel passes (vk_exec.c par_flush) record slices on several threads: drops are made under drop_lock. A find on
-// another thread may still take a copy a concurrent slice drops; the slices of one pass are unordered on the GPU anyway.
+// Parallel passes (vk_exec.c par_flush) record slices on several threads: drops are made under drop_lock. A drop
+// belongs to a place in the draw order, which slices recorded at once do not keep (a slice ahead in the pass may be
+// recorded after the drop and bind memory where the walk would have bound the copy), so a slice that drops marks its
+// pass's targets and they are not sliced again (vk_exec_par_order_hazard).
 static PlatMutex drop_lock = PLAT_MUTEX_INIT;
+const void *vk_usnap_bytes(uint64_t addr, uint64_t n) {
+    VkDescriptorBufferInfo b;
+    return vk_usnap_find(addr, n, 1, &b) ? U.arena->map + b.offset : NULL;
+}
 
 void vk_usnap_drop(uint64_t addr, uint64_t n) {
     if (!U.mode || !n) return;

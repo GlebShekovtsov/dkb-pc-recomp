@@ -147,6 +147,9 @@ void *vk_exec_draw_ctx_new(void);
 void vk_exec_draw_ctx_use(void *ctx);
 int vk_exec_par_slice(void);
 void vk_exec_par_hazard(void);
+// As vk_exec_par_hazard for a draw whose effect depends on the order of draws across slices (a storage buffer write):
+// the pass's targets are not sliced again from the next pass on.
+void vk_exec_par_order_hazard(void);
 // vk_exec_xfer.c: 1 while occlusion queries count draws (a sliced pass is not started then).
 int vk_exec_oq_counting(void);
 int vk_exec_oq_begin_outside(VkExec *ex, VkQueryControlFlags *flags, int *open);   // vk_exec_xfer.c, sliced passes
@@ -162,6 +165,14 @@ void vk_exec_noatt_dims(const VkExec *ex, uint32_t *w, uint32_t *h);   // pass s
 int vk_exec_targets_recent(VkExec *ex, int any);
 // The current pass's targets with their formats, extents and the frames they were last rendered in (diagnostics).
 void vk_exec_targets_describe(VkExec *ex, char *buf, size_t cap);
+
+// upscaler = dlss (vk_dlss.c), from vk_exec_draw.c. vk_dlss_scene_draw: a draw about to be recorded with a depth
+// target; it notes the scene's depth and camera for the frame's evaluation. vk_dlss_jitter: sets j (pixels) to the
+// viewport offset of draws into depth when it is the scene depth DLSS last ran on; j stays as it is otherwise.
+// vk_dlss_image_gone: image is being destroyed (vk_exec_image_gone).
+void vk_dlss_scene_draw(const VkExec *ex);
+void vk_dlss_jitter(VkImage depth, float j[2]);
+void vk_dlss_image_gone(VkImage image);
 
 // TOTK_TRACE=gfx: replay counters of the current frame, logged and reset at each present (vk_exec_frame_log).
 typedef struct {

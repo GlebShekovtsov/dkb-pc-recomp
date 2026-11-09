@@ -143,6 +143,7 @@ static struct {
     VkDescriptorSetLayout ds_last_layout[2];
     int ds_pushed[2];                    // set number holds the push of DS.psig under ds_layout
     int res_valid;                       // the graphics sets bound hold what the inputs in RS give (bind_resources)
+    float jit[2];                        // the DLSS jitter the recorded viewport carries (vk_dlss_jitter)
 } B_m;
 static _Thread_local __typeof__(B_m) *B_tp = &B_m;
 #define B (*B_tp)
@@ -718,6 +719,7 @@ VkImageView vk_exec_target_view(const VkTexImage *img, VkFormat format, VkImageV
 
 void vk_exec_image_gone(VkImage image) {
     vk_exec_bc_gone(image);
+    vk_dlss_image_gone(image);
     if (!views_by_image.klen) return;
     for (ViewNode *n = nvn_hm_del(&views_by_image, &image), *next; n; n = next) {
         next = n->next;
@@ -1075,7 +1077,10 @@ static int bind_range(VkExec *ex, uint64_t addr, uint64_t size, uint64_t align, 
     if (sp.offset % align == 0) {
         VK_MEM_USE(sp);
         *out = (VkDescriptorBufferInfo){sp.buffer, sp.offset, n};
-        if (written) vk_mem_gpu_wrote(&sp, n), vk_usnap_drop(addr, n);
+        if (written) {
+            vk_mem_gpu_wrote(&sp, n), vk_usnap_drop(addr, n);
+            if (vk_exec_par_slice()) vk_exec_par_order_hazard();   // order-dependent: vk_exec.c par_flush
+        }
         count_use(sp.cls, use, n);
         VK_MEM_BOUND(sp);
         return 1;
@@ -2139,6 +2144,9 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
         if (i1 > lo[s] && !info->tpl[s]) need_w = 1;
     }
     uint32_t nd = 0;
+    typedef struct { const GfxShaderRes *r; VkDescSlot *o; int st, img; uint32_t cnt; } TexPend;
+    static _Thread_local TexPend tp[MAX_BINDINGS];   // per recording thread, like w and d
+    int ntp = 0;
     for (uint32_t i = 0; i < info->n_bindings; i++) {
         const VkPipeBinding *b = &info->bindings[i];
         const GfxShaderRes *r = b->res;
@@ -2183,24 +2191,7 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
                 }
             } else {
                 kind = 1;
-                DP_MARK(DP_SIG);
-                int locked = 0, slice = vk_exec_par_slice();
-                if (!slice) vk_texture_lock(), locked = 1;   // tex_info looks up with the texture lock held
-                for (uint32_t k = 0; k < cnt; k++) {
-                    int slot = r->slot + (int)k;
-                    uint64_t h = 0;
-                    if (img) h = slot >= 0 && slot < 32 ? ex->img[st][slot] : 0;
-                    else h = slot >= 0 && slot < 128 ? ex->tex[st][slot] : 0;
-                    if (slice && !img && tex_info_hit(ex, r, h, r->separate, &o[k].image)) {
-                        o[k].w[2] = (uint32_t)o[k].image.imageLayout;
-                        continue;
-                    }
-                    if (!locked) vk_texture_lock(), locked = 1;
-                    tex_info(ex, r, h, img, r->separate, &o[k].image);
-                    o[k].w[2] = (uint32_t)o[k].image.imageLayout;   // zero the tail padding
-                }
-                if (locked) vk_texture_unlock();
-                DP_MARK(DP_TEX);
+                tp[ntp++] = (TexPend){r, o, st, img, cnt};   // filled below under one texture lock
             }
         } else {
             rt_fatal("vk: binding %u has an unknown kind %d", (unsigned)b->binding, (int)b->kind);
@@ -2213,6 +2204,29 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
             else w[i].pTexelBufferView = &bv[nd];
         }
         nd += cnt;
+    }
+    if (ntp) {
+        // tex_info looks up with the texture lock held: once for the draw's texture bindings. A slice of a parallel pass
+        // first tries its thread's memo without the lock (tex_info_hit) and takes the lock for what is left.
+        DP_MARK(DP_SIG);
+        int slice = vk_exec_par_slice(), locked = 0;
+        if (!slice) vk_texture_lock(), locked = 1;
+        for (int t = 0; t < ntp; t++) {
+            const TexPend *q = &tp[t];
+            for (uint32_t k = 0; k < q->cnt; k++) {
+                int slot = q->r->slot + (int)k;
+                uint64_t h = 0;
+                if (q->img) h = slot >= 0 && slot < 32 ? ex->img[q->st][slot] : 0;
+                else h = slot >= 0 && slot < 128 ? ex->tex[q->st][slot] : 0;
+                if (!(slice && !q->img && tex_info_hit(ex, q->r, h, q->r->separate, &q->o[k].image))) {
+                    if (!locked) vk_texture_lock(), locked = 1;
+                    tex_info(ex, q->r, h, q->img, q->r->separate, &q->o[k].image);
+                }
+                q->o[k].w[2] = (uint32_t)q->o[k].image.imageLayout;   // zero the tail padding
+            }
+        }
+        if (locked) vk_texture_unlock();
+        DP_MARK(DP_TEX);
     }
     // Set 1's first descriptor is noted when the loop reaches its first binding. A set 1 without bindings (a fragment
     // stage with no resources) starts at the end instead, so set 0's byte count (d0[1] - d0[0]) covers its descriptors.
@@ -2314,15 +2328,19 @@ static void bind_pipeline(VkExec *ex, VkPipelineBindPoint bp, VkPipeline p) {
     int k = bp == VK_PIPELINE_BIND_POINT_COMPUTE;
     if (B.pipe[k] == p) return;
     vkCmdBindPipeline(ex->cb, bp, p);
-    if (vk_ctx()->has_nv_checkpoints && vk_checkpoints_on()) {   // DKB_GPU_CHECKPOINTS=1: name the shaders the checkpoint's pipeline holds
+    int ck = vk_ctx()->has_nv_checkpoints && vk_checkpoints_on(), crumb = vk_crumb_bind_on();
+    if (ck || crumb) {   // DKB_GPU_CHECKPOINTS=1 or TOTK_CRUMB_BIND=1: name the shaders the checkpoint's pipeline holds
         uint64_t o[3] = {0};
         const uint8_t *ctl, *code;
         uint32_t len;
         static const int stages[2][3] = {{NVN_STAGE_VS, NVN_STAGE_GS, NVN_STAGE_FS}, {NVN_STAGE_CS, -1, -1}};
         for (int i = 0; i < 3 && ex->prog; i++)
             if (stages[k][i] >= 0 && find_stage(ex->prog, stages[k][i], &ctl, &code, &len)) o[i] = nvn2_origin(code);
-        vk_checkpoint_note(p, o[0], o[1], o[2]);
-        rec_checkpoint(ex->cb, p);
+        if (ck) {
+            vk_checkpoint_note(p, o[0], o[1], o[2]);
+            rec_checkpoint(ex->cb, p);
+        }
+        if (crumb) rec_crumb(ex->cb, VK_CRUMB_BIND, vk_crumb_bind_note(p, o[0], o[1], o[2]));
     }
     ex->recorded++;
     B.pipe[k] = p;
@@ -2331,12 +2349,19 @@ static void bind_pipeline(VkExec *ex, VkPipelineBindPoint bp, VkPipeline p) {
 
 static void record_fixed(VkExec *ex) {
     VkCommandBuffer cb = ex->cb;
+    // upscaler = dlss: the scene's draws are moved by DLSS's sub-pixel jitter (vk_dlss.c); a change of it, entering or
+    // leaving the scene's passes included, records the viewport again.
+    float j[2] = {0, 0};
+    if (ex->depth.image && vk_dlss_wanted()) vk_dlss_jitter(ex->depth.image, j);
+    if (j[0] != B.jit[0] || j[1] != B.jit[1]) ex->dirty |= VK_EXEC_DIRTY_VIEWPORT;
     if (ex->dirty & VK_EXEC_DIRTY_VIEWPORT) {
         float x = 0, y = 0, w = (float)ex->pass_w, h = (float)ex->pass_h;
         if (ex->has_vp) x = ex->vp[0][0], y = ex->vp[0][1], w = ex->vp[0][2], h = ex->vp[0][3];
         if (w < 1) w = 1;
         if (h < 1) h = 1;
         VkViewport v = {x, y + h, w, -h, ex->depth_range[0], ex->depth_range[1]};   // the y flip: negative height
+        if (j[0] != 0 || j[1] != 0) v.x += j[0], v.y += j[1];
+        B.jit[0] = j[0], B.jit[1] = j[1];
         vkCmdSetViewportWithCount(cb, 1, &v);
         ex->recorded++;
     }
@@ -2375,6 +2400,11 @@ static void bind_vertex_buffers(VkExec *ex) {
     // (vk_mem_gen, read before any resolve), resolves to that buffer again: most draws change one stream or none.
     uint64_t gen = vk_mem_gen();
     int same_gen = B.vb_valid && B.vgen == gen;
+    if (same_gen && !memcmp(B.vin, ex->vbuf, sizeof B.vin)) {   // no range changed: the loop below would rebuild B.vb..B.vstr
+        int same_str = 1;
+        for (int b = 0; b < 16 && !dyn; b++) same_str &= B.vstr[b] == ex->pipe.vstream[b].stride;
+        if (same_str) return;
+    }
     for (int b = 0; b < 17; b++) {
         vb[b] = Z.zbuf, vo[b] = 0, vsz[b] = ZERO_BYTES, vstr[b] = b < 16 ? ex->pipe.vstream[b].stride : 0;
         if (b == VK_PIPE_ZERO_BINDING) continue;
@@ -2464,12 +2494,17 @@ typedef struct {
 // that drew in all 17 logged runs. So it is matched by the name of its NVN 2 stage.
 static int light_quad_fault_skip(const VkExec *ex, const GfxShader *vs, const GfxShader *fs) {
     static int on = -1;
-    if (on < 0) on = !rt_game_version && cfg_bool("TOTK_FIX_VS_FAULT") && vk_ctx()->props.vendorID == 0x10de;   // 0: Bananza
+    if (on < 0) {
+        // 0: Bananza. TOTK_FIX_VS_FAULT=all runs the skip on every vendor, to A/B the AMD device loss against it.
+        int nv = vk_ctx()->props.vendorID == 0x10de;
+        on = !rt_game_version && cfg_bool("TOTK_FIX_VS_FAULT") && (nv || !strcasecmp(cfg_value("TOTK_FIX_VS_FAULT"), "all"));
+        if (on && !nv) rt_log("vk: TOTK_FIX_VS_FAULT=all: the light quad skip (#9) also runs on this non-NVIDIA GPU");
+    }
     if (!on || !vs || !fs) return 0;
     const uint8_t *ctl, *code = NULL;
     uint32_t len;
     if (find_stage(ex->prog, NVN_STAGE_VS, &ctl, &code, &len) && nvn2_origin(code) == 0xcae0ef8e9fe9147full) {
-        warn_once(W_FAULT_SKIP2, "the light quad of NVN 2 vertex stage cae0ef8e9fe9147f is skipped on NVIDIA (#9)");
+        warn_once(W_FAULT_SKIP2, "the light quad of NVN 2 vertex stage cae0ef8e9fe9147f is skipped (#9)");
         return 1;
     }
     const GfxShaderRes *r;
@@ -2477,7 +2512,7 @@ static int light_quad_fault_skip(const VkExec *ex, const GfxShader *vs, const Gf
     for (int i = 0; i < n; i++) lights |= r[i].cbuf_slot == 0 && r[i].handle * 4 == 0x530;
     GfxShaderIo io[32];
     if (!lights || !(gfx_shader_inputs(vs, io) >> 9 & 1)) return 0;
-    warn_once(W_FAULT_SKIP, "light-quad draws with ten instance streams are skipped on NVIDIA (#9; TOTK_FIX_VS_FAULT=0 draws them)");
+    warn_once(W_FAULT_SKIP, "light-quad draws with ten instance streams are skipped (#9; TOTK_FIX_VS_FAULT=0 draws them)");
     return 1;
 }
 
@@ -2823,6 +2858,7 @@ static int prepare_draw_impl(VkExec *ex, int prim, int32_t count, int restart) {
         ex->recorded++;
         B.st = s, B.st_valid = 1;
     }
+    if (ex->depth.image && vk_dlss_wanted()) vk_dlss_scene_draw(ex);   // before the jitter in record_fixed
     record_fixed(ex);
     repeat_stats(ex, info);
     DP_MARK(DP_STATE);
@@ -3038,7 +3074,12 @@ static void op_draw_idx_ind(VkExec *ex, const p_draw_idx_ind *d) {
 // extent is the rendered area; a run in the mining tunnel showed no stretch or border.
 // The upscaler's variants: fixed resolution (the intro: 1920x1080 or 1280x720 in) and dynamic resolution (gameplay
 // after the intro, e.g. 2095x1179 in).
-static int mvk_upscale_cs(uint64_t h) { return h == 0x3f3390cfdfa1f9e8ull || h == 0x4f9090b273fa7e4full; }
+// The hashes move with the translator: the first two are from an older translator, the last two from the one of
+// 2026-11-09 (found with the log line "dlss: compute shader ... is not the game's upscaler" of upscaler = dlss).
+static int mvk_upscale_cs(uint64_t h) {
+    return h == 0x3f3390cfdfa1f9e8ull || h == 0x4f9090b273fa7e4full || h == 0xb14741d70eb26339ull ||
+           h == 0xbd63ebb7ee8d50eaull;
+}
 
 // Whether the device can blit from format f with linear filtering (src) or into it (dst), optimal tiling.
 static int blit_ok(VkFormat f, int dst) {
@@ -3087,6 +3128,49 @@ static int mvk_upscale_blit(VkExec *ex, const GfxShader *cs) {
     return 1;
 }
 
+// upscaler = dlss (experimental): the same dispatch of the game's upscaler is replaced by NVIDIA DLSS on its input
+// (texture slot 0) and output (image slot 1), whole images as above (vk_dlss.c). 0 when DLSS is off or failed, or the
+// images do not fit it: the shader then runs. NGX binds its own pipelines and descriptors into the command buffer, so
+// the caller forgets the bound state (vk_exec_draw_new_cb) after it; -1 (NGX failed after it may have bound its own):
+// the caller also binds the game's pipeline and resources again before its dispatch.
+static int dlss_upscale(VkExec *ex, const GfxShader *cs) {
+    if (!vk_dlss_wanted()) return 0;
+    if (!mvk_upscale_cs(gfx_shader_spirv_fnv(cs))) {
+        // The upscaler is matched by hash, which a translator change moves: with DLSS on, list the compute shaders
+        // seen (the first 48 distinct) so a run that never reaches DLSS shows which hash to add.
+        static uint64_t seen[48];
+        static int nseen;
+        uint64_t h = gfx_shader_spirv_fnv(cs);
+        int i = 0;
+        while (i < nseen && seen[i] != h) i++;
+        if (i == nseen && nseen < 48) {
+            seen[nseen++] = h;
+            uint64_t ds = ex->tex[NVN_STAGE_CS][0], dd = ex->img[NVN_STAGE_CS][1];
+            view_t ws, wd;
+            int hws = 0, hwd = 0;
+            const VkTexImage *a = ds ? vk_texture_by_id(&ex->tex_pool, NVN_HANDLE_TEX(ds), &ws, &hws) : NULL;
+            const VkTexImage *b = dd ? vk_texture_by_id(&ex->tex_pool, NVN_HANDLE_TEX(dd), &wd, &hwd) : NULL;
+            rt_log("dlss: compute shader %016llx is not the game's upscaler (tex0 %ux%u fmt %d, img1 %ux%u fmt %d)",
+                   (unsigned long long)h, a ? a->width : 0, a ? a->height : 0, a ? (int)a->format : 0,
+                   b ? b->width : 0, b ? b->height : 0, b ? (int)b->format : 0);
+        }
+        return 0;
+    }
+    uint64_t hs = ex->tex[NVN_STAGE_CS][0], hd = ex->img[NVN_STAGE_CS][1];
+    view_t vs, vd;
+    int hvs = 0, hvd = 0;
+    const VkTexImage *s = hs ? vk_texture_by_id(&ex->tex_pool, NVN_HANDLE_TEX(hs), &vs, &hvs) : NULL;
+    const VkTexImage *t = hd ? vk_texture_by_id(&ex->tex_pool, NVN_HANDLE_TEX(hd), &vd, &hvd) : NULL;
+    if (!s || !t || s->samples > 1 || t->samples > 1 || s->type != VK_IMAGE_TYPE_2D || t->type != VK_IMAGE_TYPE_2D ||
+        !(s->usage & VK_IMAGE_USAGE_SAMPLED_BIT) || !(t->usage & VK_IMAGE_USAGE_STORAGE_BIT)) {
+        static int warned;
+        if (!warned++) rt_log("dlss: the upscaler's images do not resolve to single-sampled 2D sampled and storage images: "
+                              "the game's upscaler runs for them");
+        return 0;
+    }
+    return vk_dlss_record(ex->cb, ex->fence, s, t);
+}
+
 static void op_dispatch(VkExec *ex, const p_dispatch *d) {
     if (d->x <= 0 || d->y <= 0 || d->z <= 0) return;
     static int skip = -1;   // DKB_SKIP_COMPUTE=1: drop every direct dispatch (bisecting GPU faults)
@@ -3109,11 +3193,21 @@ static void op_dispatch(VkExec *ex, const p_dispatch *d) {
     bind_resources(ex, info);
     twin_dispatch = 0;
     int blit = mvk_upscale_blit(ex, cs);
-    if (!blit) vkCmdDispatch(ex->cb, (uint32_t)d->x, (uint32_t)d->y, (uint32_t)d->z);
+    int dlss = blit ? 0 : dlss_upscale(ex, cs);
+    if (dlss) vk_exec_draw_new_cb(), ex->dirty = VK_EXEC_DIRTY_ALL;   // NGX left its own pipeline, descriptors and state
+    if (dlss < 0) {                    // it failed: the game's upscaler runs on its own binds again
+        bind_pipeline(ex, VK_PIPELINE_BIND_POINT_COMPUTE, p);
+        twin_dispatch = 1;
+        bind_resources(ex, info);
+        twin_dispatch = 0;
+        dlss = 0;
+    }
+    if (!blit && !dlss) vkCmdDispatch(ex->cb, (uint32_t)d->x, (uint32_t)d->y, (uint32_t)d->z);
     ex->recorded++;
     // The blit is a transfer write, where what follows expects a compute-shader write: a full barrier makes it visible
-    // to every later access (the one before it, vk_exec_barrier above, already covers the transfer reads).
-    if (blit) vk_exec_barrier(ex);
+    // to every later access (the one before it, vk_exec_barrier above, already covers the transfer reads). DLSS's
+    // writes get the same.
+    if (blit || dlss) vk_exec_barrier(ex);
     note_work(ex, 2, (uint64_t)d->x * (uint64_t)d->y * (uint64_t)d->z);
     if (vk_dump_armed) vk_dump_dispatch(ex, cs, p, info, d);
 }

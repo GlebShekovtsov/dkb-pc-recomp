@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "cfg.h"
 #include "host.h"
 #include "platform/platform.h"
 #include "vk.h"
@@ -16,7 +17,15 @@
 static PFN_vkCmdWriteBufferMarkerAMD write_marker;
 static VkBuffer buf;
 static VmaAllocation alloc;
-static volatile uint32_t *words;
+static volatile uint32_t *words;   // 0 and 1: the newest crumb reached and finished; 2 and 3: the same for VK_CRUMB_BIND
+
+// TOTK_CRUMB_BIND=1: ring of the newest pipeline binds, indexed by bind number & (BIND_RING - 1). Recording runs a frame
+// or more ahead of the GPU, hence the size. Written by recording threads without a lock; a slot's seq holds the bind
+// number plus BIND_VALID (bind number 0 occurs at the 28-bit wrap), so a slot being rewritten is skipped by the report.
+enum { BIND_RING = 1 << 16, BIND_VALID = 1 << 28 };
+static int bind_on;
+static uint32_t bind_n;
+static struct { uint32_t seq; VkPipeline pipe; uint64_t stage[3]; } bind_ring[BIND_RING];
 
 // NVIDIA (VK_NV_device_diagnostic_checkpoints, DKB_GPU_CHECKPOINTS=1): every pipeline bind sets a checkpoint whose marker
 // is the VkPipeline; after a device loss the queue reports the checkpoints the GPU reached. The registry maps a pipeline
@@ -183,7 +192,7 @@ void vk_crumbs_init(VkCtx *c) {
     }
     if (!c->has_buffer_marker) return;
     write_marker = (PFN_vkCmdWriteBufferMarkerAMD)vkGetDeviceProcAddr(c->device, "vkCmdWriteBufferMarkerAMD");
-    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 16,
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 32,
                              .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
                                   .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
@@ -195,8 +204,10 @@ void vk_crumbs_init(VkCtx *c) {
         return;
     }
     words = info.pMappedData;
-    words[0] = words[1] = 0;
-    rt_log("vk: GPU breadcrumbs on (VK_AMD_buffer_marker)");
+    words[0] = words[1] = words[2] = words[3] = 0;
+    const char *bind = cfg_get("TOTK_CRUMB_BIND");
+    bind_on = bind && !strcmp(bind, "1");
+    rt_log("vk: GPU breadcrumbs on (VK_AMD_buffer_marker)%s", bind_on ? ", pipeline binds marked (TOTK_CRUMB_BIND=1)" : "");
 }
 
 // isa_dump state (below), reset on release.
@@ -222,6 +233,8 @@ void vk_crumbs_release(void) {
     cp_tag_n = 0;
     if (buf && c) vmaDestroyBuffer(c->vma, buf, alloc);
     buf = VK_NULL_HANDLE, alloc = NULL, words = NULL, write_marker = NULL;
+    bind_on = 0, bind_n = 0;
+    memset(bind_ring, 0, sizeof bind_ring);
     set_cp = NULL, get_cp = NULL, get_cp2 = NULL;
     get_props = NULL, get_stats = NULL, get_irs = NULL, pipes = 0, written = 0;
     plat_mutex_lock(&cp_lock);
@@ -418,15 +431,28 @@ static void checkpoints_report(void) {
 void vk_crumb(VkCommandBuffer cb, int kind, uint64_t n) {
     if (!write_marker || !cb) return;
     uint32_t code = (uint32_t)kind << 28 | (uint32_t)(n & 0x0fffffff);
-    write_marker(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, buf, 0, code);
-    write_marker(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, buf, 4, code);
+    VkDeviceSize at = kind == VK_CRUMB_BIND ? 8 : 0;   // binds have their own words so they do not hide the submit crumbs
+    write_marker(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, buf, at, code);
+    write_marker(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, buf, at + 4, code);
+}
+
+int vk_crumb_bind_on(void) { return bind_on; }
+
+uint32_t vk_crumb_bind_note(VkPipeline p, uint64_t vs, uint64_t gs, uint64_t fs) {
+    if (!bind_on) return 0;
+    uint32_t seq = __atomic_add_fetch(&bind_n, 1, __ATOMIC_RELAXED) & 0x0fffffff;   // the crumb's 28 bits; 2^28 is a multiple of BIND_RING
+    uint32_t i = seq & (BIND_RING - 1);
+    __atomic_store_n(&bind_ring[i].seq, 0, __ATOMIC_RELAXED);
+    bind_ring[i].pipe = p, bind_ring[i].stage[0] = vs, bind_ring[i].stage[1] = gs, bind_ring[i].stage[2] = fs;
+    __atomic_store_n(&bind_ring[i].seq, seq | BIND_VALID, __ATOMIC_RELEASE);
+    return seq;
 }
 
 static void describe(uint32_t code, char *o, size_t size) {
     static const char *const kinds[] = {"nothing", "the start of a part of submission", "the end of submission",
                                         "the start of upload batch", "the end of upload batch",
                                         "ASTC decode chunk", "the start of present",
-                                        "the end of present"};
+                                        "the end of present", "pipeline bind"};
     unsigned k = code >> 28;
     if (!code) snprintf(o, size, "nothing yet");
     else if (k < sizeof kinds / sizeof *kinds) snprintf(o, size, "%s %u", kinds[k], code & 0x0fffffff);
@@ -440,4 +466,23 @@ void vk_crumbs_report(void) {
     describe(words[0], reached, sizeof reached);
     describe(words[1], finished, sizeof finished);
     rt_log("vk: GPU breadcrumbs: the GPU last reached %s; everything before %s had finished", reached, finished);
+    if (!bind_on) return;
+    describe(words[2], reached, sizeof reached);
+    describe(words[3], finished, sizeof finished);
+    rt_log("vk: GPU bind breadcrumbs: the GPU last reached %s; everything before %s had finished", reached, finished);
+    // Recording runs ahead of the GPU, so the binds in question are looked up by number: the one reached, the one
+    // finished, and the 3 before each. A slot another bind has reused since is skipped.
+    uint32_t reach = words[2] & 0x0fffffff, fin = words[3] & 0x0fffffff;
+    (void)__atomic_load_n(&bind_n, __ATOMIC_RELAXED);
+    for (int w = 0; w < 2; w++) {
+        uint32_t at = w ? fin : reach;
+        for (uint32_t k = 0; k < 4; k++) {
+            uint32_t s = (at - k) & 0x0fffffff, i = s & (BIND_RING - 1);
+            if (__atomic_load_n(&bind_ring[i].seq, __ATOMIC_ACQUIRE) != (s | BIND_VALID)) continue;
+            rt_log("vk: %s bind %u: pipeline %p, NVN 2 stages %016llx %016llx %016llx (vertex or compute, geometry, fragment)",
+                   k ? (w ? "before finished" : "before reached") : (w ? "finished" : "reached"), s, (void *)bind_ring[i].pipe,
+                   (unsigned long long)bind_ring[i].stage[0], (unsigned long long)bind_ring[i].stage[1],
+                   (unsigned long long)bind_ring[i].stage[2]);
+        }
+    }
 }

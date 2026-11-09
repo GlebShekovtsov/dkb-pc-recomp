@@ -1047,19 +1047,21 @@ static void state_op(VkExec *ex, uint32_t op, const void *a) {
     }
 }
 
-// ---- parallel passes (DKB_REPLAY_THREADS, docs/parallel-replay.md)
-// A render pass whose targets drew at least PAR_MIN_DRAWS draws the last time is recorded in slices: from its first
-// draw the walk collects the pass's state, bind and draw ops instead of replaying them, applying only the state and bind
-// ops to X and keeping a copy of X every PAR_SLICE_DRAWS draws. When an op that is none of those comes (or the
-// submission ends), each slice is replayed from its copy into a secondary command buffer, and the primary executes them
-// in order inside the pass, which began with VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT; the pass then ends.
-// Stage A of the plan: the slices are recorded one after another on the replaying thread, to check that slicing keeps
-// the frame the same before workers record them at once. A slice that would end or restart the pass, or record a full
-// barrier (a feedback target learned, an inline texture command) is a hazard: the call is dropped, and the targets are
-// not sliced again.
+// ---- parallel passes (DKB_REPLAY_THREADS=N, off by default; docs/parallel-replay.md)
+// A render pass whose targets drew at least PAR_MIN_DRAWS draws the last time is recorded in slices. From its first
+// direct draw the walk collects the pass's state, bind and draw ops instead of replaying them: it applies the state and
+// bind ops to X and starts a slice with a copy of X every PAR_SLICE_DRAWS draws. A complete slice is published to the
+// workers, which replay its ops from its copy into a secondary command buffer while the walk collects on. At the first
+// op of another kind (or the end of the submission) the submitting thread records the slices still untaken, waits for
+// the others, and the primary executes all of them in order inside the pass, which began with
+// VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT; the pass then ends.
+// A slice that would end, begin or restart the pass, or record an inline texture command, drops the call and marks a
+// hazard: a target set is left unsliced after PAR_BAN_AFTER of those, and at once after a draw that stores into a
+// buffer, whose bookkeeping follows the draw order (vk_exec_par_order_hazard).
 int vk_exec_par_slice(void) { return par_slice; }
 static int par_collecting(void) { return PC.on; }
-void vk_exec_par_hazard(void) { par_hazard = 1; }
+void vk_exec_par_hazard(void) { if (!par_hazard) par_hazard = 1; }
+void vk_exec_par_order_hazard(void) { par_hazard = 2; }
 
 static void par_done(void *arg) {   // completion thread: the secondaries of a finished submission can be reused
     ParDone *d = arg;
@@ -1133,6 +1135,7 @@ static int par_start(VkExec *ex) {
     // again below. One look per pass. Disabled rendering does not matter: the slices skip their draws as the walk would.
     if (!par_mode || ex != &X || (ex->in_pass && pass_tried)) return 0;
     pass_tried = 1, pass_why = PAR_WHY_NONE;
+    if (vk_dlss_wanted()) return 0;   // vk_dlss.c notes the scene pass from its draws, on the replaying thread
     if (vk_dump_armed) {   // the dump follows draws one by one, on one thread
         static int told;
         if (!told++) rt_log("vk: TOTK_DUMP is set: no pass is sliced in this run (TOTK_REPLAY_THREADS has no effect)");
@@ -1358,7 +1361,7 @@ static void par_flush(VkExec *ex) {
         cbs[i] = o->cb.cb;
         ex->fb_dirty |= o->fb_dirty;
         ex->recorded += o->recorded;
-        hazard |= o->hazard;
+        if (o->hazard > hazard) hazard = o->hazard;
         for (int k = 0; k < o->nviews; k++) {   // the slice's views go with the submission like the primary's
             if (ex->nviews == ex->cap_views) ex->views = par_grow(ex->views, &ex->cap_views, sizeof(ViewEnt));
             ((ViewEnt *)ex->views)[ex->nviews++] = o->views[k];
@@ -1378,7 +1381,12 @@ static void par_flush(VkExec *ex) {
         // A feedback target learned inside a slice is one: its pass restart was dropped, and the next pass attaches
         // the target in the feedback layout, so a few hazards are expected; a set that keeps having them is left alone.
         par_no[3]++;
-        if (e->banned < 255 && ++e->banned == PAR_BAN_AFTER)
+        if (hazard == 2 && e->banned < PAR_BAN_AFTER) {
+            // A draw of a slice stored into a buffer: the uniform snapshot's drops and the mirror's written ranges
+            // follow the draw order, which slices recorded at once do not keep. This frame may have bound a stale copy.
+            e->banned = PAR_BAN_AFTER;
+            rt_log("vk: a draw of a sliced pass writes a storage buffer: those targets are not sliced again");
+        } else if (e->banned < 255 && ++e->banned == PAR_BAN_AFTER)
             rt_log("vk: a sliced pass needed a pass or barrier change inside a slice %d times: those targets are not sliced again",
                    PAR_BAN_AFTER);
     }

@@ -108,6 +108,18 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_COLOR_SATURATION_DESC] = "Colour strength against grey; 100 % leaves it.",
     [UI_MENU_COLOR_GAMMA] = "Gamma",
     [UI_MENU_COLOR_GAMMA_DESC] = "Below 1 brightens dark and middle tones, above 1 darkens them; 1 leaves them.",
+    [UI_MENU_HDR_GROUP] = "HDR (experimental)",
+    [UI_MENU_HDR] = "HDR output",
+    [UI_MENU_HDR_DESC] = "Experimental: the game's SDR picture with its highlights lifted on an HDR display. Needs HDR turned on in Windows (\"Use HDR\") or in a "
+                         "Wayland compositor with colour management; without it the picture stays SDR. Applies after a "
+                         "restart.",
+    [UI_MENU_HDR_PEAK] = "Peak brightness",
+    [UI_MENU_HDR_PEAK_DESC] = "Your display's peak in nits; the brightest highlights stop there.",
+    [UI_MENU_HDR_GAME] = "Game brightness",
+    [UI_MENU_HDR_GAME_DESC] = "Nits of the picture's white (paper white). 203 is the HDR reference; raise it in a "
+                              "bright room.",
+    [UI_MENU_HDR_UI] = "Menu brightness",
+    [UI_MENU_HDR_UI_DESC] = "Nits of this menu's white. The game's HUD is part of the picture and follows Game brightness.",
 
     [UI_MENU_FPS_LIMIT] = "Frame rate limit",
     [UI_MENU_DKB_FPS_LIMIT_DESC] = "With Game speed follows the clock enabled, changes apply immediately. Above 60 "
@@ -406,6 +418,18 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_COLOR_SATURATION_DESC] = "Сила цвета относительно серого; 100 % — без изменений.",
     [UI_MENU_COLOR_GAMMA] = "Гамма",
     [UI_MENU_COLOR_GAMMA_DESC] = "Ниже 1 осветляет тёмные и средние тона, выше 1 затемняет их; 1 — без изменений.",
+    [UI_MENU_HDR_GROUP] = "HDR (экспериментально)",
+    [UI_MENU_HDR] = "Вывод HDR",
+    [UI_MENU_HDR_DESC] = "Экспериментально: SDR-картинка игры с поднятыми бликами на HDR-дисплее. Нужен включённый HDR в Windows («Использовать HDR») или "
+                         "Wayland-композитор с управлением цветом; без него картинка остаётся SDR. Применяется после "
+                         "перезапуска.",
+    [UI_MENU_HDR_PEAK] = "Пиковая яркость",
+    [UI_MENU_HDR_PEAK_DESC] = "Пик вашего дисплея в нитах; самые яркие блики останавливаются на нём.",
+    [UI_MENU_HDR_GAME] = "Яркость игры",
+    [UI_MENU_HDR_GAME_DESC] = "Ниты белого цвета картинки (paper white). 203 — эталон HDR; в светлой комнате "
+                              "поднимите.",
+    [UI_MENU_HDR_UI] = "Яркость меню",
+    [UI_MENU_HDR_UI_DESC] = "Ниты белого цвета этого меню. Интерфейс игры — часть картинки и следует яркости игры.",
 
     [UI_MENU_FPS_LIMIT] = "Ограничение частоты кадров",
     [UI_MENU_DKB_FPS_LIMIT_DESC] = "При включённой настройке «Скорость игры по часам» изменения применяются сразу. "

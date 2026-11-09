@@ -143,6 +143,9 @@
 # render_scale = game
 # Scaling to the window when it is larger than the game resolution: fsr (AMD FSR 1) or bilinear, and FSR's sharpening
 # from 0 (off) to 100. Changes while the game runs take effect at once.
+# upscaler = dlss (experimental, NVIDIA RTX only, read at start) also replaces the game's own upscaler with NVIDIA DLSS
+# and keeps FSR for the window; it needs nvngx_dlss.dll next to dkb.exe (docs/dkb-dlss.md) and falls back to the
+# game's upscaler, with a "dlss:" line in the log, when anything is missing.
 # upscaler = fsr
 # sharpness = 80
 # SMAA 1x anti-aliasing of the final picture: off (the default), low, medium or high. It runs after the picture is scaled to
@@ -166,6 +169,17 @@
 # color_contrast = 100
 # color_saturation = 100
 # color_gamma = 1
+
+# HDR output (experimental): hdr = 1 sends the picture as HDR10 (needs HDR on in Windows, "Use HDR", or a Wayland
+# compositor with colour management; without it the picture stays SDR). The game's SDR picture is lifted in a last
+# pass: highlights above a knee are stretched towards hdr_peak_nits (your display's peak) with their hue kept;
+# hdr_game_nits is the picture's white (paper white, 203 is the HDR reference; the game's HUD follows it) and
+# hdr_ui_nits the in-game menu's white.
+# hdr is read at start, the nits at once.
+# hdr = 0
+# hdr_peak_nits = 1000
+# hdr_game_nits = 203
+# hdr_ui_nits = 203
 
 [language]
 # Language: a Windows locale such as de-DE, or a Switch code (en-US, ja, zh-Hant, ...). Default: the Windows locale.

@@ -455,10 +455,16 @@ def run_tool(ctx, step, command, env=None, cwd=None, name=None):
     log.parent.mkdir(parents=True, exist_ok=True)
     ctx.reporter.progress(step, 'dkb_run', force=True)
     with log.open('w', encoding='utf-8') as out:
-        proc = subprocess.Popen(list(map(str, command)), cwd=cwd or ctx.layout.root, stdin=subprocess.DEVNULL,
-                                stdout=out, stderr=subprocess.STDOUT,
-                                env=dict(os.environ, PYTHONUNBUFFERED='1', PYTHONIOENCODING='utf-8', **(env or {})),
-                                start_new_session=os.name != 'nt')
+        try:
+            proc = subprocess.Popen(list(map(str, command)), cwd=cwd or ctx.layout.root, stdin=subprocess.DEVNULL,
+                                    stdout=out, stderr=subprocess.STDOUT,
+                                    env=dict(os.environ, PYTHONUNBUFFERED='1', PYTHONIOENCODING='utf-8', **(env or {})),
+                                    start_new_session=os.name != 'nt')
+        except OSError as e:
+            if getattr(e, 'winerror', None) != 740:   # ERROR_ELEVATION_REQUIRED
+                raise
+            ctx.reporter.log(f'{step}: Windows requires elevation to start {command[0]}')
+            raise InstallError('dkb.elevation_required', exe=Path(str(command[0])).name) from None
         try:
             code = proc.wait()
         except BaseException:

@@ -4,12 +4,14 @@ DKB Recomp 0.2.0: a static recompilation of *Donkey Kong Bananza* (Switch 2) to 
 
 ## What is new since 0.1.0
 
-- **Update 3.2.0 (title version 458752).** The installer takes a `.nup` file, picks the package and builds the game from it. A 3.2.0 build installs, boots and held 60 fps for 150 s at the start on an RTX 5060 Ti; it has not been played further. It carries no code patches, so the output resolution, ultrawide and real-time frame settings do nothing there (the log says so).
+- **Update 3.2.0 (title version 458752).** The installer takes a `.nup` file, picks the package and builds the game from it. A 3.2.0 build installs, boots and held 60 fps for 150 s at the start on an RTX 5060 Ti; it has not been played further. Its patch table is ported from the 1.0.0 one (`tools/port_patches.py`), so the output resolution, ultrawide and real-time frame settings are meant to work there too; only a short run has been checked. When a game version has no real-time frame-rate support, the log now says so plainly (#137).
 - **Add-on content (DLC) reader.** Checked on synthetic packs and on a real one; not tried in the game yet.
 - **AMD.** The map's long cyan wedges are gone on an RX 9070 XT (reported by the contributor who fixed it, not tested elsewhere). A NaN guard on fragment outputs stops a NaN texel from being spread by the bloom into glowing bands (`DKB_NAN_GUARD`, on by default).
 - **Sound.** The left channel was silent at the start; fixed.
 - **Installer.** It warns when the Windows commit limit is below 24 GiB, and keeps the newer driver when the loader lists the same GPU twice.
 - **Performance and shaders.** Fewer texture re-uploads, more translated shader forms (1D image atomics, packed halves), and the NVN 2 mode calls the game uses are handled instead of ignored.
+- **Display and sound.** `window_mode` (windowed, borderless, fullscreen; F11), an optional SMAA pass after the upscale (`smaa` off, low, medium, high; off by default), `audio_channels` (auto, stereo, 5.1), a clean exit with no hang on close, and the guide button opens the menu.
+- **Crash guard (1.0.0 only).** The layer-change pool loop is guarded against stale entries (`DKB_FIX_POOL_GUARD`, #126/#135). It is a workaround; the cause of the stale entries is not known.
 - **Linux (preview, untested guesses).** The shader translator is made executable if an archive lost the bit, and the sound asks for a 240-frame period by default. Under RADV the feedback loops default to the pass-restart path.
 
 ## Download

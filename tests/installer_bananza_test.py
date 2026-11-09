@@ -339,6 +339,16 @@ assert '--full-build' in a and pathlib.Path(a[a.index('--expected')+1]).name=='e
             child.assert_not_called()
         self.assertEqual(list(outside.iterdir()), [])
 
+    def test_elevation_required_is_a_friendly_error(self):
+        ctx = SimpleNamespace(temp=Path(self.work.name)/'elev', dest=self.dest, layout=self.layout, reporter=Reporter(out=io.StringIO()))
+        ctx.temp.mkdir()
+        denied = OSError(0, 'The requested operation requires elevation')
+        denied.winerror = 740
+        with patch.object(b.subprocess, 'Popen', side_effect=denied):
+            with self.assertRaises(b.InstallError) as error:
+                b.run_tool(ctx, 'compile', [str(Path('x')/'dkb.exe'), '--selftest'])
+        self.assertEqual((error.exception.id, error.exception.params), ('dkb.elevation_required', {'exe': 'dkb.exe'}))
+
     def test_native_directory_junction_is_rejected_without_following_it(self):
         workspace = self.cancelled_workspace()
         outside = Path(self.work.name)/'outside-junction'

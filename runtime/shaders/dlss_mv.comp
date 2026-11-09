@@ -1,0 +1,32 @@
+#version 450
+// Camera motion vectors for DLSS (runtime/vk_dlss.c, upscaler = dlss): every pixel of the scene depth is taken back to
+// clip space and through m, last frame's view-projection times the inverse of this frame's, to where it was on screen
+// a frame ago. The result is that position minus this one, in render pixels, the way NGX reads it with MV scale 1.
+// Camera motion only: what moves on its own (characters, effects) gets the vectors of the surface it covers.
+// The game's projection is OpenGL-style (clip z from -w to w, depth = z/w * 0.5 + 0.5) and the host flips y with a
+// negative viewport height, so pixel row 0 is the top of clip space (y = +1). The far plane (depth 1, the sky) is at a
+// finite distance with this projection, so it is reprojected like the rest and follows the camera's turns.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D depth;
+layout(binding = 1) uniform writeonly image2D mv;   // R16G16_SFLOAT
+layout(push_constant) uniform P {
+    mat4 m;     // this frame's clip space -> last frame's
+    vec4 dim;   // width, height, jitter x, jitter y (pixels, the viewport offset of this frame's scene draws)
+} pc;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, ivec2(pc.dim.xy)))) return;
+    float d = texelFetch(depth, p, 0).r;
+    // The surface a jittered pixel shows sits at its centre minus the jitter; both ends of the vector are taken without
+    // jitter, as DLSS wants.
+    vec2 cur = vec2(p) + 0.5 - pc.dim.zw;
+    vec4 ndc = vec4(cur.x / pc.dim.x * 2.0 - 1.0, 1.0 - cur.y / pc.dim.y * 2.0, d * 2.0 - 1.0, 1.0);
+    vec4 prev = pc.m * ndc;
+    vec2 v = vec2(0.0);
+    if (prev.w > 1e-6) {
+        vec2 n = prev.xy / prev.w;
+        v = vec2((n.x + 1.0) * 0.5 * pc.dim.x, (1.0 - n.y) * 0.5 * pc.dim.y) - cur;
+    }
+    imageStore(mv, p, vec4(v, 0.0, 0.0));
+}

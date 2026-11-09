@@ -16,6 +16,7 @@
 #include "host.h"
 #include "input.h"
 #include "input_map.h"
+#include "input_script.h"
 #include "input_wsys.h"
 #include "nvn_api.h"
 #include "ui/menu.h"
@@ -56,16 +57,11 @@ static const SDL_GamepadButton pad_sdl[PAD_COUNT] = {
 // and its hold are milliseconds of the world clock (frame_step_world_us, game time since the loaded save's first
 // frame), so it lands at the same game time at any frame rate and load length. A timed event shorter than a frame is
 // applied once. In a script with timed lines (a recording) the untimed ones belong before the world clock: they stop
-// when it starts, as the load ends at another tick in each run.
-// at, hold: ticks, or microseconds of the world clock when timed.
-typedef struct { uint64_t at, hold; int bit, stick, timed; int32_t x, y; int logged; char text[48]; } ScriptEv;
-static const struct { const char *name; int bit; } script_buttons[] = {
-    {"A", B_A}, {"B", B_B}, {"X", B_X}, {"Y", B_Y}, {"LCLICK", B_STICK_L}, {"RCLICK", B_STICK_R}, {"L", B_L}, {"R", B_R},
-    {"ZL", B_ZL}, {"ZR", B_ZR}, {"PLUS", B_PLUS}, {"MINUS", B_MINUS}, {"LEFT", B_LEFT}, {"UP", B_UP}, {"RIGHT", B_RIGHT}, {"DOWN", B_DOWN},
-};
+// when it starts, as the load ends at another tick in each run. Parser and scheduler: input_script.c.
 static ScriptEv *script_ev;
 static int script_n, script_state;   // 0 not loaded, 1 loaded
 static int script_mixed;             // the script has timed lines: its untimed ones end where the world clock starts
+static int script_done;              // the summary line is out: no event can land any more
 
 static void script_load(void) {
     script_state = 1;
@@ -77,37 +73,18 @@ static void script_load(void) {
     int cap = 0, ln = 0;
     while (fgets(line, sizeof line, f)) {
         ln++;
-        char *h = strchr(line, '#');
-        if (h) *h = 0;
-        char name[32];
-        double at;
-        int off = 0, timed = line[0] == '@';
-        if (sscanf(line + timed, "%lf %31s%n", &at, name, &off) < 2 || at < 0) continue;
-        off += timed;
-        double unit = timed ? 1000.0 : 1.0;   // ms to us, or presents
-        ScriptEv e = {.at = (uint64_t)(at * unit + 0.5), .hold = timed ? 66667 : 4, .bit = -1, .timed = timed};
-        long a, b;
-        double c;
-        if (!strcmp(name, "LSTICK") || !strcmp(name, "RSTICK")) {
-            int n = sscanf(line + off, "%ld %ld %lf", &a, &b, &c);
-            if (n < 2) { rt_log("input: script line %d: %s needs x y [hold]", ln, name); continue; }
-            e.stick = name[0] == 'L' ? 1 : 2; e.x = (int32_t)a; e.y = (int32_t)b;
-            if (n >= 3 && c > 0) e.hold = (uint64_t)(c * unit + 0.5);
-            snprintf(e.text, sizeof e.text, "%s %d %d", name, e.x, e.y);
-        } else {
-            for (size_t i = 0; i < sizeof script_buttons / sizeof *script_buttons; i++)
-                if (!strcmp(name, script_buttons[i].name)) e.bit = script_buttons[i].bit;
-            if (e.bit < 0) { rt_log("input: script line %d: unknown button %s", ln, name); continue; }
-            if (sscanf(line + off, "%lf", &c) == 1 && c > 0) e.hold = (uint64_t)(c * unit + 0.5);
-            snprintf(e.text, sizeof e.text, "%s", name);
-        }
+        ScriptEv e;
+        char err[64];
+        int r = script_parse_line(line, &e, err, sizeof err);
+        if (r < 0) rt_log("input: script line %d: %s", ln, err);
+        if (r <= 0) continue;
         if (script_n == cap) {
             cap = cap ? cap * 2 : 32;
             script_ev = realloc(script_ev, (size_t)cap * sizeof *script_ev);
             if (!script_ev) { script_n = 0; fclose(f); return; }
         }
         script_ev[script_n++] = e;
-        script_mixed |= timed;
+        script_mixed |= e.timed;
     }
     fclose(f);
     rt_log("input: script %s, %d events", path, script_n);
@@ -153,17 +130,24 @@ static void script_apply(uint64_t *b, int32_t sl[2], int32_t sr[2]) {
     int64_t w = frame_step_world_us();
     for (int i = 0; i < script_n; i++) {
         ScriptEv *e = &script_ev[i];
-        if (e->timed ? w < 0 : script_mixed && w >= 0) continue;
-        uint64_t now = e->timed ? (uint64_t)w : tick;
-        if (now < e->at || (now >= e->at + e->hold && (e->logged || !e->timed))) continue;
-        if (!e->logged) {
-            e->logged = 1;
-            if (e->timed) rt_log("input: script frame %llu at %.1f ms: %s", (unsigned long long)fr, w / 1000.0, e->text);
-            else rt_log("input: script frame %llu tick %llu: %s", (unsigned long long)fr, (unsigned long long)tick, e->text);
-        }
+        int due = script_due(e, tick, w, script_mixed);
+        if (!due) continue;
+        // The landing log: the clock reading against the time asked, so two replays can be compared line by line.
+        if (due == 2 && e->timed)
+            rt_log("input: script frame %llu at %.1f ms (asked %.1f): %s", (unsigned long long)fr, w / 1000.0,
+                   e->at / 1000.0, e->text);
+        else if (due == 2)
+            rt_log("input: script frame %llu tick %llu (asked %llu): %s", (unsigned long long)fr, (unsigned long long)tick,
+                   (unsigned long long)e->at, e->text);
         if (e->stick) { int32_t *s = e->stick == 1 ? sl : sr; s[0] = e->x; s[1] = e->y; }
         else *b |= 1ull << e->bit;
     }
+    if (script_done) return;
+    ScriptSummary s = script_summary(script_ev, script_n, tick, w, script_mixed);
+    if (s.pending) return;
+    script_done = 1;
+    rt_log("input: script done at frame %llu: %d of %d events landed, latest %llu ticks and %.1f ms after the time asked",
+           (unsigned long long)fr, s.landed, s.total, (unsigned long long)s.max_late_ticks, s.max_late_ms);
 }
 
 // TOTK_INPUT_RECORD=<file>: writes the merged input as TOTK_INPUT_SCRIPT lines, one per button press and per stick

@@ -18,6 +18,7 @@ from pathlib import Path
 
 from . import layout as layouts
 from . import state as statefile
+from . import update
 from .events import Reporter
 from .runner import Context, run_steps
 
@@ -71,7 +72,15 @@ def main(argv=None):
     ap.add_argument('--translator', type=Path, help='prebuilt translator, with matching .id beside it')
     ap.add_argument('--dotnet', type=Path, help='portable .NET 10 dotnet executable, when building the translator')
     ap.add_argument('--jobs', type=int, default=6, help='Bananza worker limit (default 6)')
+    ap.add_argument('--no-update-check', action='store_true',
+                    help='do not ask GitHub for a newer release (also DKB_NO_UPDATE_CHECK=1)')
     args = ap.parse_args(argv)
+
+    # Only for a person at a terminal: the window checks by itself, and its CLI subprocess and the tests are not a tty.
+    if sys.stdout.isatty() and not update.disabled(args.no_update_check):
+        found = update.newer_release(layouts.find(args.root).release)
+        if found:
+            Reporter().warning('warn.update_available', tag=found[0], url=found[1])
 
     if (args.game == 'bananza' or args.nup or args.nup_package or args.exefs or args.romfs or
             (args.game is None and (args.dest / 'dkb-install.json').is_file())):

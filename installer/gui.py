@@ -12,7 +12,9 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import tkinter as tk
+import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -23,6 +25,7 @@ except ImportError:
 
 from . import ini
 from . import layout as layouts
+from . import update
 from .guilogic import (DKB_STEP_ORDER, DONE, FAILED, PENDING, RUNNING, SKIPPED, UI_LANGUAGES, Catalog, Form, Model, Process,
                        amount, default_game_language, describe_event, parse_line, windows_ui_language)
 
@@ -131,7 +134,7 @@ def fix_dpi_awareness():
 
 
 class App:
-    def __init__(self, root, ui_lang, layout, run_args=None, game='totk'):
+    def __init__(self, root, ui_lang, layout, run_args=None, game='totk', check_updates=False):
         self.root, self.layout = root, layout
         self.game = game
         self.cat = Catalog(ui_lang, game)
@@ -186,6 +189,24 @@ class App:
         self.vars['lang'].set(self.lang_label(self.lang_code))
         self.vars['dest'].trace_add('write', lambda *_: self.refresh_form())
         self.show('form')
+        if check_updates:
+            self.update_label = ttk.Label(self.body, style='Warn.TLabel', cursor='hand2')
+            threading.Thread(target=self.check_update, daemon=True).start()
+
+    def check_update(self):
+        """Background lookup of a newer release; the label appears only when there is one (never blocks the window)."""
+        found = update.newer_release(self.layout.release)
+        if found and not self.closing:
+            try:
+                self.root.after(0, self.show_update, *found)
+            except RuntimeError:   # Tk is already gone
+                pass
+
+    def show_update(self, tag, url):
+        self.bind_text(self.update_label, 'text', 'ui.update_available', tag=tag)
+        self.update_label.bind('<Button-1>', lambda _e: webbrowser.open(url))
+        self.update_label.pack(before=self.body.winfo_children()[0], anchor='w', pady=(0, 8))
+        self.fit()
 
     # ---- text -----------------------------------------------------------------------------------------------------
 
@@ -767,6 +788,7 @@ def main(argv=None):
     for name in ('package', 'toolchain', 'deps', 'ninja', 'dll-dir', 'translator', 'dotnet'):
         ap.add_argument('--' + name, type=Path)
     ap.add_argument('--jobs', type=int, default=6)
+    ap.add_argument('--no-update-check', action='store_true', help='do not look for a newer release (or DKB_NO_UPDATE_CHECK=1)')
     args = ap.parse_args(argv)
     layout = layouts.find(args.root)
     if args.selftest:
@@ -775,7 +797,8 @@ def main(argv=None):
     fix_dpi_awareness()
     root = tk.Tk()
     tools = {name: getattr(args, name) for name in ('toolchain', 'deps', 'ninja', 'dll_dir', 'translator', 'dotnet', 'jobs')}
-    app = App(root, args.lang or windows_ui_language(), layout, run_args={'tools': tools}, game=args.game)
+    app = App(root, args.lang or windows_ui_language(), layout, run_args={'tools': tools}, game=args.game,
+              check_updates=not update.disabled(args.no_update_check))
     if args.package:
         app.vars['package'].set(str(args.package))
     root.mainloop()
