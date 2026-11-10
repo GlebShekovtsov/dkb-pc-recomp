@@ -294,13 +294,22 @@ int vk_usnap_find(uint64_t addr, uint64_t n, uint64_t align, VkDescriptorBufferI
 }
 
 // Parallel passes (vk_exec.c par_flush) record slices on several threads: drops are made under drop_lock. A drop
-// belongs to a place in the draw order, which slices recorded at once do not keep (a slice ahead in the pass may be
-// recorded after the drop and bind memory where the walk would have bound the copy), so a slice that drops marks its
-// pass's targets and they are not sliced again (vk_exec_par_order_hazard).
+// that takes a copy away belongs to a place in the draw order, which slices recorded at once do not keep (a slice ahead
+// in the pass may be recorded after it and bind memory where the walk would have bound the copy), so a slice whose
+// stored range overlaps a copy (vk_usnap_covers) marks its pass's targets and they are not sliced again
+// (vk_exec_par_order_hazard). A stored range no copy overlaps changes no binding: only the list of writes grows.
 static PlatMutex drop_lock = PLAT_MUTEX_INIT;
 const void *vk_usnap_bytes(uint64_t addr, uint64_t n) {
     VkDescriptorBufferInfo b;
     return vk_usnap_find(addr, n, 1, &b) ? U.arena->map + b.offset : NULL;
+}
+
+// 1 when a copy made for this submission overlaps [addr, addr+n): only then does a drop of that range change what a
+// later binding gets, and with it depend on the draw order. Reads what vk_usnap_begin set up; any recording thread.
+int vk_usnap_covers(uint64_t addr, uint64_t n) {
+    if (!U.on || !n) return 0;
+    int i = first_above(addr);
+    return i < U.nreg && U.reg[i].lo < addr + n;
 }
 
 void vk_usnap_drop(uint64_t addr, uint64_t n) {

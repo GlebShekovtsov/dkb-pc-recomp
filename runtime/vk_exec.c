@@ -1056,8 +1056,8 @@ static void state_op(VkExec *ex, uint32_t op, const void *a) {
 // the others, and the primary executes all of them in order inside the pass, which began with
 // VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT; the pass then ends.
 // A slice that would end, begin or restart the pass, or record an inline texture command, drops the call and marks a
-// hazard: a target set is left unsliced after PAR_BAN_AFTER of those, and at once after a draw that stores into a
-// buffer, whose bookkeeping follows the draw order (vk_exec_par_order_hazard).
+// hazard: a target set is left unsliced after PAR_BAN_AFTER of those, and at once after a draw that stores over a
+// uniform snapshot copy, which makes later bindings depend on the draw order (vk_exec_par_order_hazard).
 int vk_exec_par_slice(void) { return par_slice; }
 static int par_collecting(void) { return PC.on; }
 void vk_exec_par_hazard(void) { if (!par_hazard) par_hazard = 1; }
@@ -1382,10 +1382,10 @@ static void par_flush(VkExec *ex) {
         // the target in the feedback layout, so a few hazards are expected; a set that keeps having them is left alone.
         par_no[3]++;
         if (hazard == 2 && e->banned < PAR_BAN_AFTER) {
-            // A draw of a slice stored into a buffer: the uniform snapshot's drops and the mirror's written ranges
-            // follow the draw order, which slices recorded at once do not keep. This frame may have bound a stale copy.
+            // A draw of a slice stored into a range a uniform snapshot copy covers: which later bindings take the copy
+            // follows the draw order, which slices recorded at once do not keep.
             e->banned = PAR_BAN_AFTER;
-            rt_log("vk: a draw of a sliced pass writes a storage buffer: those targets are not sliced again");
+            rt_log("vk: a draw of a sliced pass stores over a uniform snapshot copy: those targets are not sliced again");
         } else if (e->banned < 255 && ++e->banned == PAR_BAN_AFTER)
             rt_log("vk: a sliced pass needed a pass or barrier change inside a slice %d times: those targets are not sliced again",
                    PAR_BAN_AFTER);

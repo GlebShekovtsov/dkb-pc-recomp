@@ -1078,8 +1078,9 @@ static int bind_range(VkExec *ex, uint64_t addr, uint64_t size, uint64_t align, 
         VK_MEM_USE(sp);
         *out = (VkDescriptorBufferInfo){sp.buffer, sp.offset, n};
         if (written) {
+            // In a slice, a store over a uniform snapshot copy depends on the draw order (vk_usnap.c vk_usnap_drop).
+            if (vk_exec_par_slice() && vk_usnap_covers(addr, n)) vk_exec_par_order_hazard();
             vk_mem_gpu_wrote(&sp, n), vk_usnap_drop(addr, n);
-            if (vk_exec_par_slice()) vk_exec_par_order_hazard();   // order-dependent: vk_exec.c par_flush
         }
         count_use(sp.cls, use, n);
         VK_MEM_BOUND(sp);
