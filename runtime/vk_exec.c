@@ -47,7 +47,8 @@ static _Thread_local int x_here;   // this thread is inside vk_exec_record (vk_e
 // Parallel passes: the state shared with the pass handlers (the rest is at the op loop).
 #define PAR_MIN_DRAWS 256
 #define PAR_SLICE_DRAWS 1024   // the largest slice
-#define PAR_SLICE_MIN 128      // the smallest: below it a slice's fixed costs (a copy of X, cold memos) weigh too much
+#define PAR_SLICE_MIN 48       // the smallest: below it a slice's fixed costs (a copy of X, cold memos) weigh too much
+#define PAR_EXPECT 1024        // draws of each piece of a target set the last time (par_expect)
 #define PAR_HIST 256
 enum { PAR_WHY_UNSEEN, PAR_WHY_NONE, PAR_WHY_NEW, PAR_WHY_SMALL, PAR_WHY_BANNED, PAR_WHY_NOATT, PAR_WHY_QUERY };
 #define PAR_BAN_AFTER 8   // hazards after which a target set is not sliced again
@@ -82,6 +83,7 @@ static struct {
     int start[PAR_MAX_SLICES], end[PAR_MAX_SLICES];   // each slice's ops; end is set when the slice is published
     int nslices;
     int draws, slice_draws, slice_size;
+    int expect;                                  // draws this piece of the pass took the last time (par_expect)
     int oq;                                      // an occlusion query spans the pass: the slices inherit it
     VkQueryControlFlags oq_flags;
 } PC;
@@ -125,6 +127,34 @@ static uint64_t par_sig(const VkExec *ex) {
 // with the fewest draws. Two of the busy area's big target sets fell on one slot of the first, direct-mapped table (their
 // signatures differed in the high bits only) and evicted each other every frame, so neither was ever sliced.
 static uint32_t par_slot(uint64_t sig) { return (uint32_t)((sig ^ sig >> 29) * 0x9E3779B97F4A7C15ull >> 56) % PAR_HIST; }
+
+// The draws a pass will take, for sizing its slices: a target set's passes in one submission are pieces (a counter op
+// or a barrier ends one, the next opens the same targets again) of different sizes, so each piece by its place among
+// the set's pieces in the submission keeps the draws it took the last time. par_hist keeps the largest piece only.
+static struct { uint64_t key; uint32_t draws; } par_exp[PAR_EXPECT];
+static struct { uint64_t sig; uint32_t n; } par_piece[64];   // pieces of each target set in this submission
+static int npiece;
+
+static uint64_t par_piece_key(uint64_t sig, int next) {   // next: count this piece (at its end)
+    int i = 0;
+    while (i < npiece && par_piece[i].sig != sig) i++;
+    if (i == npiece) {
+        if (npiece == 64) return sig;
+        par_piece[npiece++] = (typeof(par_piece[0])){sig, 0};
+    }
+    uint64_t key = (sig ^ (uint64_t)par_piece[i].n * 0x9E3779B97F4A7C15ull) | 1;
+    if (next) par_piece[i].n++;
+    return key;
+}
+
+static uint32_t *par_expect(uint64_t key, int add) {
+    typeof(par_exp[0]) *x = &par_exp[(key * 0x9E3779B97F4A7C15ull) >> 54];   // 10 bits: PAR_EXPECT
+    if (x->key != key) {
+        if (!add) return NULL;
+        x->key = key, x->draws = 0;
+    }
+    return &x->draws;
+}
 
 static ParHist *par_find(uint64_t sig, int add) {
     uint32_t i0 = par_slot(sig);
@@ -743,6 +773,8 @@ void vk_exec_pass_end(VkExec *ex) {
             par_unsliced[pass_draws < 64 ? 0 : pass_draws < 256 ? 1 : pass_draws < 1024 ? 2 : 3] += pass_draws;
         ParHist *e = par_find(sig, pass_draws >= PAR_MIN_DRAWS);
         if (e) e->draws = pass_draws >= e->draws ? pass_draws : e->draws - e->draws / 8;
+        uint32_t *x = par_expect(par_piece_key(sig, 1), pass_draws >= PAR_MIN_DRAWS);
+        if (x) *x = pass_draws;
     }
     vk_exec_oq_pass_end(ex);
     vkCmdEndRendering(ex->cb);
@@ -1059,7 +1091,7 @@ static void state_op(VkExec *ex, uint32_t op, const void *a) {
 // ---- parallel passes (DKB_REPLAY_THREADS=N, off by default; docs/parallel-replay.md)
 // A render pass whose targets drew at least PAR_MIN_DRAWS draws the last time is recorded in slices. From its first
 // direct draw the walk collects the pass's state, bind and draw ops instead of replaying them: it applies the state and
-// bind ops to X and starts a slice with a copy of X every PC.slice_size draws (128-1024, a share of the pass per thread). A complete slice is published to the
+// bind ops to X and starts a slice with a copy of X every PC.slice_size draws (48-1024, shrinking towards the pass's expected end: par_size). A complete slice is published to the
 // workers, which replay its ops from its copy into a secondary command buffer while the walk collects on. At the first
 // op of another kind (or the end of the submission) the submitting thread records the slices still untaken, waits for
 // the others, and the primary executes all of them in order inside the pass, which began with
@@ -1129,6 +1161,7 @@ static void par_begin_secondary(const VkExec *ex, VkCommandBuffer cb) {
 
 static void resolve_rt(VkExec *ex);
 static void par_publish(void);
+static int par_size(void);
 static void par_start_workers(void);
 static void par_wake_workers(void);
 
@@ -1178,12 +1211,10 @@ static int par_start(VkExec *ex) {
         if (!PC.ops || !PC.snap) rt_fatal("vk: out of memory");
     }
     if (par_mode > 1) par_start_workers();
-    // Slices of about a third of the pass per thread, so that every thread gets a few: with 1024 draws a slice, the
-    // busy area's sliced passes (13 a frame, 1,600 draws on average) made 2.4 slices each, and the submitting thread
-    // spent as long waiting for the workers as recording its own share.
-    int size = par_mode > 1 ? (int)(e->draws / (uint32_t)(3 * par_mode)) : PAR_SLICE_DRAWS;
-    size = size < PAR_SLICE_MIN ? PAR_SLICE_MIN : size > PAR_SLICE_DRAWS ? PAR_SLICE_DRAWS : size;
-    PC.on = 1, PC.sig = sig, PC.nops = 0, PC.nslices = 0, PC.draws = 0, PC.slice_size = size, PC.slice_draws = size;
+    uint32_t *x = par_expect(par_piece_key(sig, 0), 0);
+    PC.expect = (int)(x && *x ? *x : e->draws);
+    PC.on = 1, PC.sig = sig, PC.nops = 0, PC.nslices = 0, PC.draws = 0;
+    PC.slice_size = PC.slice_draws = par_size();   // the first draw starts a slice
     par_t0 = kern_now_ns();
     par_wake_workers();   // they spin while the pass is collected
     return 1;
@@ -1202,6 +1233,16 @@ static void par_op(VkExec *ex, uint32_t op, const void *a) {   // replay of one 
 
 // The op h while collecting: 1 when it was taken (state and bind ops applied to ex, draws only kept), 0 when it ends
 // the collection.
+// The size of the slice that starts now: a share of the draws the pass has left by its expected count, so the slices
+// shrink towards the end and the last one, which the submitting thread records after the collection while the workers
+// finish theirs, is short. With slices of a third of the pass per thread, the submitting thread recorded the last slice
+// of each of the busy area's 13 sliced passes a frame, 4.6 ms a frame, and waited 1.4 ms more for the workers.
+static int par_size(void) {
+    if (par_mode <= 1) return PAR_SLICE_DRAWS;
+    int size = (PC.expect - PC.draws) / par_mode;
+    return size < PAR_SLICE_MIN ? PAR_SLICE_MIN : size > PAR_SLICE_DRAWS ? PAR_SLICE_DRAWS : size;
+}
+
 static int par_take(VkExec *ex, const op_hdr *h, const void *a) {
     if (PC.nops == PAR_MAX_OPS) return 0;
     switch (h->op) {
@@ -1225,6 +1266,7 @@ static int par_take(VkExec *ex, const op_hdr *h, const void *a) {
             PC.snap[PC.nslices] = *ex;
             PC.start[PC.nslices++] = PC.nops;
             PC.slice_draws = 0;
+            PC.slice_size = par_size();
         }
         PC.slice_draws++, PC.draws++;
         vk_exec_frame.draws_seen++;
@@ -1546,6 +1588,7 @@ static int record_impl(VkCommandBuffer cb, const uint64_t *handles, int n, uint6
     vk_exec_frame.submits++;
     split_draws = part_start = 0;
     part_t0 = kern_now_ns();
+    npiece = 0;   // par_piece_key counts the pieces of each target set per submission
     x_here = 1;
     int memory = n || work;
     if (memory) vk_mem_mirror_begin(), vk_usnap_begin(handles, n, fence);
