@@ -263,6 +263,15 @@ wait for the recorder (a drain, a full ring, a split) while it holds a lock a wo
 that worker. It was reverted. A recorder that waits for other threads needs the submitting thread to hold no lock they
 take whenever it waits for the recorder.
 
+### Slices that shrink towards the end of a pass: 35-36 fps (fd9782e)
+
+Six threads, the hills, about 19,000 frames without a hang: 35.8-36.3 fps (27.6-27.9 ms a frame) where 830e509 gave
+32-34, replay 15.1-15.3 ms for 26,600 draws, waiting for the workers 1.1 ms a frame (1.4 before). The submitting
+thread still records about 3,100 sliced draws a frame (20 short slices), because by the end of a pass the workers are
+busy too: 1.3 million sliced draws a minute at 1.55-1.65 us a draw make about 34 ms of recording a frame for six
+threads. The cost per draw in a slice is now the limit, against about 1 us on the single-thread path, where the
+recorder thread makes the driver calls; a slice makes its own.
+
 ## Plan
 
 1. **Measure and remove the cheap waste** (done here).
