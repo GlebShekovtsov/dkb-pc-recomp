@@ -323,6 +323,15 @@ NVN 2 origin with the stage memo. Merged here with this branch's per-thread stat
 stage memo are per recording thread (`DRAW_CTX_OBJS`), a slice still reads a texture memo hit without the texture
 lock, and `tex_info_hit` uses the memo's new index.
 
+### Profile at 1ae8384: the submitting thread's remaining costs
+
+Eight threads, the hills. Of the submitting thread's replay: collecting a sliced pass (`par_take`) is about 15%, half of
+it the copy of `VkExec` (25 KiB) at every slice start; `token_of` waited for the texture lock in 4% (the per-thread
+token memo covered slices only), `vk_exec_reset_indirect` takes 5% with a read back of the pointer list
+(`vk_exec_read_buffer` waits for the GPU on the prefix) and a `qsort`, and the command buffer splits 2.5%. A second
+game thread waits for `sub_lock` about as long as the main submission replays. The next commit keeps the slot tokens
+per thread on every thread and sorts the reset targets with the inlined sort.
+
 ## Plan
 
 1. **Measure and remove the cheap waste** (done here).

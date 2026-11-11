@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include "cfg.h"
+#include "msort.h"
 #include "host.h"
 #include "nvn_api.h"
 #include "nvn_hmap.h"
@@ -409,10 +410,8 @@ static int reset_mapped(void *context, uint64_t addr, uint32_t size) {
     return vk_mem_resolve(addr, size, &span);
 }
 
-static int cmp_u64(const void *a, const void *b) {
-    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
-    return (x > y) - (x < y);
-}
+#define U64_LESS(x, y) (*(x) < *(y))
+MSORT_DEFINE(sort_u64, uint64_t, U64_LESS)   // without a call per comparison (msort.h)
 
 // Whether two nonnull targets share a byte (duplicates included). Their copies then need a barrier between them to
 // keep the input order; disjoint targets can all be copied after one barrier.
@@ -422,7 +421,9 @@ static int reset_targets_overlap(const uint64_t *pointers, uint32_t count) {
     uint32_t n = 0;
     for (uint32_t i = 0; i < count; i++)
         if (pointers[i]) sorted[n++] = pointers[i];
-    qsort(sorted, n, sizeof *sorted, cmp_u64);
+    static uint64_t *sbuf;   // the submitting thread's
+    static size_t scap;
+    sort_u64(sorted, n, &sbuf, &scap);
     int overlap = 0;
     for (uint32_t i = 1; i < n && !overlap; i++) overlap = sorted[i] - sorted[i - 1] < NVN_INDIRECT_RESET_RECORD_BYTES;
     free(sorted);
@@ -894,13 +895,12 @@ static _Thread_local __typeof__(AC_m) *AC_tp = &AC_m;
 static uint64_t _Thread_local descriptor_serial = 1;
 
 // vk_texture_slot_token of the slot a texture or image handle names; an empty handle always resolves to nothing.
-// In a slice of a parallel pass the thread keeps the tokens while the slot and memory generations stay: a token
-// changes only with a registration or an entry change, which bump vk_texture_slots_gen, or with a remapped pool
-// (vk_mem_gen). A profile on eight threads had 7% of the slices' recording waiting for the texture lock here.
+// Each thread keeps the tokens while the slot and memory generations stay: a token changes only with a registration or
+// an entry change, which bump vk_texture_slots_gen, or with a remapped pool (vk_mem_gen). A profile on eight threads
+// had 7% of the slices' recording, and then 4% of the submitting thread's replay, waiting for the texture lock here.
 static uint64_t token_of(const VkExec *ex, uint64_t h) {
     if (!h) return 1;
     int id = (int)(h & 0xfffff);
-    if (!vk_exec_par_slice()) return vk_texture_slot_token(&ex->tex_pool, id);
     static _Thread_local struct { uint64_t pool, mg, tok; uint32_t id, sg; } tk[256];
     uint32_t sg = vk_texture_slots_gen();
     uint64_t mg = vk_mem_gen();
