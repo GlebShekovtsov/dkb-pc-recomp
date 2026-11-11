@@ -727,7 +727,12 @@ static volatile int64_t traffic[VK_MCLS_N][VK_MUSE_N];
 
 // Every caller is the replay (vk_exec*, under vk_sync_submit's lock), about ten adds per draw: one writer at a time, so
 // a plain add, not a locked one. An add racing the census's reset may be lost.
+static _Thread_local int count_quiet;   // a slice of a parallel pass: several threads would fight over the counters' lines
+
+void vk_mem_count_quiet(int on) { count_quiet = on; }
+
 void vk_mem_count(int cls, int use, uint64_t bytes) {
+    if (count_quiet) return;
     if ((unsigned)cls < VK_MCLS_N && (unsigned)use < VK_MUSE_N)
         __atomic_store_n(&traffic[cls][use], __atomic_load_n(&traffic[cls][use], __ATOMIC_RELAXED) + (int64_t)bytes,
                          __ATOMIC_RELAXED);
@@ -1064,14 +1069,19 @@ static int dc_class(const PoolRec *r) {
     return c == VK_MCLS_HOST_CACHED ? DC_CACHED : c == VK_MCLS_HOST_UNC ? DC_UNC : DC_OTHER;
 }
 
-void vk_mem_bound_note(void *pool) {
+void vk_mem_bound_note(void *pool) {   // TOTK_TRACE=perf; parallel slices call it too (dirty_lock)
     PoolRec *r = pool;
-    if (r->bound_sub == dirty_sub) return;
-    r->bound_sub = dirty_sub;
-    if (r->bufbound) return;
-    r->bufbound = 1, r->synced_gen = DIRTY_UNSYNCED;
-    int k = dc_class(r);
-    ever_n[k]++, ever_bytes[k] += r->size, first_pending[k] += r->size;
+    if (__atomic_load_n(&r->bound_sub, __ATOMIC_RELAXED) == dirty_sub) return;
+    plat_mutex_lock(&dirty_lock);
+    if (r->bound_sub != dirty_sub) {
+        r->bound_sub = dirty_sub;
+        if (!r->bufbound) {
+            r->bufbound = 1, r->synced_gen = DIRTY_UNSYNCED;
+            int k = dc_class(r);
+            ever_n[k]++, ever_bytes[k] += r->size, first_pending[k] += r->size;
+        }
+    }
+    plat_mutex_unlock(&dirty_lock);
 }
 
 static uint64_t page_lo(const PoolRec *r) { return r->lo & ~0xfffull; }
@@ -1469,8 +1479,9 @@ static PlatMutex mirror_lock = PLAT_MUTEX_INIT;
 // Takes mirror_lock only while helper threads exist, so with TOTK_REPLAY_PAR=0 (the default) the replay thread works
 // the mirrors alone and takes no lock, as before the helpers. Returns whether it took the lock, for mirror_unlock:
 // vk_spec_count is set once, by the replay thread, so a caller reads it once and pairs the two on that reading.
+static int mem_workers;   // vk_mem_threads: the workers of sliced passes (vk_exec.c) bind mirrors too
 static int mirror_lock_if_shared(void) {
-    if (!vk_spec_count()) return 0;
+    if (!vk_spec_count() && !__atomic_load_n(&mem_workers, __ATOMIC_ACQUIRE)) return 0;
     plat_mutex_lock(&mirror_lock);
     return 1;
 }
@@ -1726,15 +1737,17 @@ static void mirror_sync(PoolRec *r) {
     mirror_unlock(locked);
 }
 
+
 void vk_mem_use(VkMemSpan *sp) {
     PoolRec *r = sp->pool;
     int state = ms_get(r);
     if (state == MS_NONE) {
         // A new mirror changes what every later bind of the pool resolves to: the helper leaves it to the replay
-        // thread, and a part that ran while one was made is dropped (vk_mem_mirror_gen).
+        // thread, and a part that ran while one was made is dropped (vk_mem_mirror_gen). The workers of sliced passes
+        // make it under mirror_lock, and the first of them to get the lock does.
         if (vk_spec_helper()) { vk_spec_fail(VK_SPEC_MIRROR); return; }
         int locked = mirror_lock_if_shared();
-        mirror_create(r);
+        if (ms_get(r) == MS_NONE) mirror_create(r);
         mirror_unlock(locked);
         state = ms_get(r);
     }
@@ -1750,6 +1763,9 @@ void vk_mem_pick(VkMemSpan *sp) {
     sp->buffer = r->mbuf;
 }
 
+// vk_exec.c par_start_workers, before any worker records: from here on the mirrors are shared, so mirror_lock is taken.
+void vk_mem_threads(void) { __atomic_store_n(&mem_workers, 1, __ATOMIC_RELEASE); }
+
 uint64_t vk_mem_mirror_gen(void) { return __atomic_load_n(&mirror_gen, __ATOMIC_ACQUIRE); }
 int vk_mem_shadow_on(void) { return shadow_on; }
 
@@ -1761,11 +1777,22 @@ int vk_mem_mirror_probe(uint64_t addr) {
     return ms_get(sp.pool) == MS_ON;
 }
 
+// A range already added in this submission adds nothing (copy_ranges merges overlaps): each thread remembers the
+// ranges it added, so the same storage buffer bound by draw after draw takes mirror_lock once. A profile on eight
+// threads had 6% of the parallel slices' recording waiting for the lock here, and the busy area adds about 7,600
+// write-back ranges a frame that vk_mem_mirror_end sorts.
 void vk_mem_gpu_wrote(const VkMemSpan *sp, uint64_t size) {
     vk_spec_event();   // a bind the GPU writes through: never the helper thread's
     PoolRec *r = sp->pool;
     if (!r || ms_get(r) != MS_ON || sp->buffer != r->mbuf || !size) return;
+    static _Thread_local struct { const PoolRec *r; uint64_t off, size; uint32_t sub; } seen[128];
+    __typeof__(seen[0]) *k = &seen[((uintptr_t)r >> 6 ^ sp->offset >> 4) & 127];
+    uint32_t sub = __atomic_load_n(&msub, __ATOMIC_RELAXED);
+    if (k->r == r && k->sub == sub && k->off == sp->offset && k->size >= size) return;
+    int locked = mirror_lock_if_shared();
     range_add(&wbl, &nwbl, &cwbl, r, sp->offset, size);
+    mirror_unlock(locked);
+    *k = (__typeof__(*k)){r, sp->offset, size, sub};
 }
 
 void nvn_pool_flushed(const pool_t *p, uint64_t off, uint64_t size) {

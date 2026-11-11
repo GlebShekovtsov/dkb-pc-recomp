@@ -65,6 +65,7 @@ uint64_t vk_usnap_gen(void) { return 1; }
 uint32_t vk_texture_slots_gen(void) { return slots_generation; }
 uint32_t vk_texture_epoch(void) { return texture_epoch; }
 uint32_t vk_sampler_gen(void) { return sampler_generation; }
+int vk_exec_par_slice(void) { return 0; }
 void vk_texture_lock(void) { if (locked++) abort(); }
 void vk_texture_unlock(void) { if (!locked--) abort(); }
 uint64_t vk_texture_slot_token(const dpool_ref *pool,int id) {

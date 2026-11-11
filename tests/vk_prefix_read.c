@@ -70,6 +70,7 @@ void vk_exec_pass_end(VkExec *ex) { NEED(ex == &X); ex->in_pass = 0; }
 static void par_flush(VkExec *ex) { (void)ex; }
 static int par_mode;
 static int par_threads(void) { return par_mode; }
+static int npiece;
 static int par_collecting(void) { return 0; }
 static uint64_t par_end_op[OP_COUNT_ + 1];
 static void walk(VkExec *ex, const op_hdr *h, int depth) {

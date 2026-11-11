@@ -287,6 +287,10 @@ static int first_above(uint64_t a) {
     return lo;
 }
 
+static _Thread_local int find_quiet;
+
+void vk_usnap_quiet(int on) { find_quiet = on; }
+
 int vk_usnap_find(uint64_t addr, uint64_t n, uint64_t align, VkDescriptorBufferInfo *out) {
     if (!U.on || !n) return 0;
     int i = first_above(addr);
@@ -296,22 +300,38 @@ int vk_usnap_find(uint64_t addr, uint64_t n, uint64_t align, VkDescriptorBufferI
     uint64_t off = r->off + (addr - r->lo);
     if (off % align) return 0;
     *out = (VkDescriptorBufferInfo){U.arena->buf, off, n};
-    if (!vk_spec_helper()) U.hits++;   // the replay thread's count; the helper only reads the table
+    if (!vk_spec_helper() && !find_quiet) U.hits++;   // the replay thread's count: helpers and slices only read the table
     return 1;
 }
 
+// Parallel passes (vk_exec.c par_flush) record slices on several threads: drops are made under drop_lock. A drop
+// that takes a copy away belongs to a place in the draw order, which slices recorded at once do not keep (a slice ahead
+// in the pass may be recorded after it and bind memory where the walk would have bound the copy), so a slice whose
+// stored range overlaps a copy (vk_usnap_covers) marks its pass's targets and they are not sliced again
+// (vk_exec_par_order_hazard). A stored range no copy overlaps changes no binding: only the list of writes grows.
+static PlatMutex drop_lock = PLAT_MUTEX_INIT;
 const void *vk_usnap_bytes(uint64_t addr, uint64_t n) {
     VkDescriptorBufferInfo b;
     return vk_usnap_find(addr, n, 1, &b) ? U.arena->map + b.offset : NULL;
 }
 
+// 1 when a copy made for this submission overlaps [addr, addr+n): only then does a drop of that range change what a
+// later binding gets, and with it depend on the draw order. Reads what vk_usnap_begin set up; any recording thread.
+int vk_usnap_covers(uint64_t addr, uint64_t n) {
+    if (!U.on || !n) return 0;
+    int i = first_above(addr);
+    return i < U.nreg && U.reg[i].lo < addr + n;
+}
+
 void vk_usnap_drop(uint64_t addr, uint64_t n) {
     if (!U.mode || !n) return;
+    plat_mutex_lock(&drop_lock);
     if (U.nwr == U.cwr) U.wr = grow(U.wr, &U.cwr, sizeof *U.wr);
     U.wr[U.nwr++] = (Wrote){addr, addr + n, U.fence};
-    if (!U.on) return;
-    for (int i = first_above(addr); i < U.nreg && U.reg[i].lo < addr + n; i++)
-        if (!U.reg[i].dropped) __atomic_store_n(&U.reg[i].dropped, 1, __ATOMIC_RELEASE), U.drops++, gen_bump();
+    if (U.on)
+        for (int i = first_above(addr); i < U.nreg && U.reg[i].lo < addr + n; i++)
+            if (!U.reg[i].dropped) __atomic_store_n(&U.reg[i].dropped, 1, __ATOMIC_RELEASE), U.drops++, gen_bump();
+    plat_mutex_unlock(&drop_lock);
 }
 
 uint64_t vk_usnap_gen(void) { return __atomic_load_n(&U.gen, __ATOMIC_ACQUIRE); }

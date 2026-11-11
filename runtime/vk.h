@@ -283,12 +283,18 @@ void vk_mem_pick(VkMemSpan *sp);
 void vk_mem_gpu_wrote(const VkMemSpan *sp, uint64_t size);
 uint64_t vk_mem_mirror_gen(void);   // changes whenever a mirror is made or dropped, and with every submission
 int vk_mem_shadow_on(void);         // shadow storage is in use (TOTK_SHADOW)
+void vk_mem_threads(void);         // the workers of sliced passes bind mirrors too (vk_exec.c), from now on
+// The calling thread's vk_mem_count calls count nothing while on (the slices of a parallel pass, vk_exec.c par_record:
+// the census is single-writer).
+void vk_mem_count_quiet(int on);
 // Uniform blocks as of the submit call (vk_usnap.c): vk_exec_record copies the uniform ranges a submission binds before
 // it records, ubo bindings take the copy (0: not copied, bind memory), GPU writes of the replay drop the copies they touch.
 void vk_usnap_begin(const uint64_t *handles, int n, uint64_t fence);
 void vk_usnap_end(uint64_t fence);
 int vk_usnap_find(uint64_t addr, uint64_t n, uint64_t align, VkDescriptorBufferInfo *out);
+void vk_usnap_quiet(int on);   // the calling thread's finds are not counted while on (slices of a parallel pass)
 const void *vk_usnap_bytes(uint64_t addr, uint64_t n);   // the copy's bytes for the CPU; NULL: not copied or dropped
+int vk_usnap_covers(uint64_t addr, uint64_t n);   // a copy of this submission overlaps the range
 void vk_usnap_drop(uint64_t addr, uint64_t n);   // the replay makes the GPU write [addr, addr+n) of guest memory
 uint64_t vk_usnap_arena_bytes(void);                 // arenas created so far (all kept until shutdown)
 uint64_t vk_usnap_gen(void);                      // changes whenever a binding may resolve differently
