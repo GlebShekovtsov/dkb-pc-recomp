@@ -145,6 +145,7 @@ void vk_exec_draw_slice_begin(void);
 // nothing), and the worker's switch to it (on the worker).
 void *vk_exec_draw_ctx_new(void);
 void vk_exec_draw_ctx_use(void *ctx);
+void vk_exec_draw_spare_threads(int threads);   // spare descriptor pools for this many recording threads
 int vk_exec_par_slice(void);
 void vk_exec_par_hazard(void);
 // As vk_exec_par_hazard for a draw whose effect depends on the order of draws across slices (a storage buffer write):

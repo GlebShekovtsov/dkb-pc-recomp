@@ -227,6 +227,20 @@ slices and 4.9 ms waiting for the workers: with 1024 draws a slice, a pass gave 
 Unsliced passes kept only a few hundred draws a frame. The slice size is now a third of the pass's draw count per thread,
 between 128 and 1024 draws.
 
+### Workers asleep, and pools for every thread
+
+The smaller slices (ea688fe) did not change the replay (18.5-19 ms): the submitting thread recorded 7.8 ms of slices a
+frame itself. A `TOTK_PROFILE_CHAINS` profile on six threads showed why: the five workers were asleep on their condition
+variable 83% of the time. A pass is collected in about 0.1 ms, less than it takes the OS to wake a thread, so the
+submitting thread took most slices before the workers ran. Of the workers' busy time, 17% went to kernel calls under
+`vkAllocateDescriptorSets`: each recording thread takes descriptor pools of its own per submission, and with 16 spares
+they were created in the frame.
+
+The workers are now woken when a collection starts and spin while it lasts (`pw_active`), and the spare pools grow by 8
+per recording thread, up to 64. On the submitting thread, the uniform snapshot and the mirror bookkeeping of each
+submission (`vk_usnap_begin`, `copy_ranges`, `plat_mem_written`) take about 3.5 ms a frame, which slicing does not
+touch.
+
 ## Plan
 
 1. **Measure and remove the cheap waste** (done here).

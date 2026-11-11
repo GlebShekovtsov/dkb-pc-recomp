@@ -107,10 +107,15 @@ static _Thread_local __typeof__(cur_fence_m) *cur_fence_tp = &cur_fence_m;
 // of being destroyed and created again for the next one: each creation is a driver memory allocation (on Windows an
 // allocation, a map and a paging-fence wait on the CPU), about ten of them per frame inside the replay.
 // A pool holds 1024 sets, so 16 spares keep the driver memory they pin (about 150 MB with 64) small.
+// Every thread that records slices of parallel passes takes pools of its own for each submission, so the spares grow by 8
+// a recording thread (vk_exec_draw_spare_threads), up to SPARE_POOLS_MAX: with six threads and 16 spares the workers
+// created pools in the frame, a profile put 17% of their time in kernel calls under vkAllocateDescriptorSets.
 #define SPARE_POOLS 16
+#define SPARE_POOLS_MAX 64
 #define SPARE_CHUNKS 16
 static PlatMutex spare_lock = PLAT_MUTEX_INIT;
-static VkDescriptorPool spare_pool[SPARE_POOLS];
+static VkDescriptorPool spare_pool[SPARE_POOLS_MAX];
+static int spare_pools = SPARE_POOLS;   // the spares kept (spare_lock)
 static uint64_t pools_created, pools_taken;   // replay thread: pools created, and pools a command buffer took (spare or new)
 static Chunk spare_chunk[SPARE_CHUNKS];
 static int nspare_pool, nspare_chunk;
@@ -228,7 +233,7 @@ static void cb_done(void *arg) {   // completion thread
     for (int i = 0; i < r->npools; i++) {
         vkResetDescriptorPool(c->device, r->pools[i], 0);
         plat_mutex_lock(&spare_lock);
-        int kept = nspare_pool < SPARE_POOLS;
+        int kept = nspare_pool < spare_pools;
         if (kept) spare_pool[nspare_pool++] = r->pools[i];
         plat_mutex_unlock(&spare_lock);
         if (!kept) vkDestroyDescriptorPool(c->device, r->pools[i], NULL);
@@ -3594,4 +3599,11 @@ void vk_exec_draw_ctx_use(void *ctx) {
 #define X(n) n##_tp = c->p_##n;
     DRAW_CTX_OBJS(X)
 #undef X
+}
+
+void vk_exec_draw_spare_threads(int threads) {   // vk_exec.c par_start_workers: threads recording slices
+    int n = SPARE_POOLS + 8 * (threads > 1 ? threads - 1 : 0);
+    plat_mutex_lock(&spare_lock);
+    spare_pools = n > SPARE_POOLS_MAX ? SPARE_POOLS_MAX : n;
+    plat_mutex_unlock(&spare_lock);
 }

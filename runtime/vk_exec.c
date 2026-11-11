@@ -185,6 +185,7 @@ WEAK void vk_exec_op_draw(VkExec *ex, uint32_t op, const void *payload) {
 }
 
 WEAK void vk_exec_draw_slice_begin(void) {}
+WEAK void vk_exec_draw_spare_threads(int threads) { (void)threads; }
 WEAK int vk_exec_oq_counting(void) { return 0; }
 WEAK int vk_exec_oq_begin_outside(VkExec *ex, VkQueryControlFlags *flags, int *open) { return (void)ex, (void)flags, *open = 0, 0; }
 WEAK void vk_exec_oq_pass_ended(VkExec *ex) { (void)ex; }
@@ -1127,6 +1128,7 @@ static void par_begin_secondary(const VkExec *ex, VkCommandBuffer cb) {
 static void resolve_rt(VkExec *ex);
 static void par_publish(void);
 static void par_start_workers(void);
+static void par_wake_workers(void);
 
 // At a draw outside a pass: 1 when the pass it opens is sliced (the pass is then open, with secondary contents).
 static int par_start(VkExec *ex) {
@@ -1181,6 +1183,7 @@ static int par_start(VkExec *ex) {
     size = size < PAR_SLICE_MIN ? PAR_SLICE_MIN : size > PAR_SLICE_DRAWS ? PAR_SLICE_DRAWS : size;
     PC.on = 1, PC.sig = sig, PC.nops = 0, PC.nslices = 0, PC.draws = 0, PC.slice_size = size, PC.slice_draws = size;
     par_t0 = kern_now_ns();
+    par_wake_workers();   // they spin while the pass is collected
     return 1;
 }
 
@@ -1278,6 +1281,10 @@ static PlatMutex pw_lock = PLAT_MUTEX_INIT;
 static PlatCond pw_go, pw_idle;
 static int pw_conds;
 static int pw_pub, pw_next, pw_done;
+// A collection is under way (par_start to the end of par_flush): idle workers spin instead of sleeping on pw_go. A
+// profile on six threads had the workers asleep 83% of the time: a pass is collected in about 0.1 ms, quicker than a
+// sleeping thread wakes up, so the submitting thread had taken most slices itself by the time they ran.
+static volatile int pw_active;
 static ParPool par_main_pool;
 static VkExec par_main_w;
 
@@ -1289,12 +1296,30 @@ static void par_publish(void) {   // the last slice made is complete
     plat_mutex_unlock(&pw_lock);
 }
 
+static void par_wake_workers(void) {
+    if (!par_nworkers) return;
+    plat_mutex_lock(&pw_lock);
+    __atomic_store_n(&pw_active, 1, __ATOMIC_RELEASE);
+    plat_cond_broadcast(&pw_go);
+    plat_mutex_unlock(&pw_lock);
+}
+
 static void par_worker(void *arg) {
     ParWorker *pw = arg;
     vk_exec_draw_ctx_use(pw->dctx);
     plat_mutex_lock(&pw_lock);
     for (;;) {
-        while (pw_next >= pw_pub) plat_cond_wait(&pw_go, &pw_lock);
+        while (pw_next >= pw_pub) {
+            if (!__atomic_load_n(&pw_active, __ATOMIC_ACQUIRE)) {
+                plat_cond_wait(&pw_go, &pw_lock);
+                continue;
+            }
+            plat_mutex_unlock(&pw_lock);
+            while (__atomic_load_n(&pw_active, __ATOMIC_ACQUIRE) &&
+                   __atomic_load_n(&pw_next, __ATOMIC_RELAXED) >= __atomic_load_n(&pw_pub, __ATOMIC_RELAXED))
+                plat_pause();
+            plat_mutex_lock(&pw_lock);
+        }
         int i = pw_next++;
         plat_mutex_unlock(&pw_lock);
         par_record(i, &pw->pp, &pw->w);
@@ -1320,6 +1345,7 @@ static void par_start_workers(void) {
         }
         par_workers[par_nworkers++] = pw;
     }
+    vk_exec_draw_spare_threads(par_nworkers + 1);
     rt_log("vk: %d replay slice workers started", par_nworkers);
 }
 
@@ -1374,6 +1400,7 @@ static void par_flush(VkExec *ex) {
     uint64_t t3 = kern_now_ns();
     par_t_own += t2 - t1, par_t_wait += t3 - t2;
     pw_pub = pw_next = pw_done = 0;
+    __atomic_store_n(&pw_active, 0, __ATOMIC_RELEASE);
     plat_mutex_unlock(&pw_lock);
     ParDone *done = malloc(sizeof *done + sizeof(ParCb) * (size_t)PC.nslices);
     VkCommandBuffer *cbs = malloc(sizeof *cbs * (size_t)(PC.nslices ? PC.nslices : 1));
