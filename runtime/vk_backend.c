@@ -65,6 +65,14 @@ static int present_hold(void) {
     return on;
 }
 
+// Whether a present job waits (vk_fg_show gives up its wait for it).
+static int job_pending(void) {
+    plat_mutex_lock(&pl);
+    int p = pending;
+    plat_mutex_unlock(&pl);
+    return p;
+}
+
 static void present_main(void *arg) {
     (void)arg;
     uint64_t last = 0, last_queued = 0;
@@ -76,8 +84,13 @@ static void present_main(void *arg) {
         busy = 1;
         plat_cond_broadcast(&pcv);
         plat_mutex_unlock(&pl);
-        if (flight_on) vk_thumbs_frame(j.frame);
-        vk_present_blit(j.image, VK_IMAGE_LAYOUT_GENERAL, j.format, j.w, j.h, j.has_crop ? j.crop : NULL);
+        // Frame generation (TOTK_FRAME_GEN, vk_framegen.c): its command buffer is the only reader of the game's texture, so
+        // `made` replaces the blit below, and busy goes down as soon as that buffer is submitted
+        int made = vk_fg_record(j.image, j.format, j.w, j.h, j.has_crop ? j.crop : NULL);
+        if (!made) {
+            if (flight_on) vk_thumbs_frame(j.frame);
+            vk_present_blit(j.image, VK_IMAGE_LAYOUT_GENERAL, j.format, j.w, j.h, j.has_crop ? j.crop : NULL);
+        }
         uint64_t f = vk_sync_submit(NULL, 0, 0); // no guest reports; this value only covers the blit
         if (j.value && f != j.value)
             rt_fatal("vk: the present of frame %llu signalled %llu, queued as %llu", (unsigned long long)j.frame,
@@ -87,9 +100,10 @@ static void present_main(void *arg) {
         plat_cond_broadcast(&pcv);
         plat_mutex_unlock(&pl);
         uint64_t t0 = kern_now_ns();
-        if (present_hold()) wait_until(j.at);
+        if (made) vk_fg_show(job_pending, flight_on ? j.frame : 0);   // paces and flips itself, and never waits on a new job
+        else if (present_hold()) wait_until(j.at);
         uint64_t t1 = kern_now_ns();
-        vk_present_flip();
+        if (!made) vk_present_flip();
         // TOTK_TRACE=present: one line per present: the host present's interval, the interval of the game's present
         // calls (when the host present went out before back-edge pacing), the wait and how far past its target it went
         if (rt_trace & RT_TRACE_PRESENT)
@@ -597,6 +611,33 @@ static void vk_be_cpu_synced(uint64_t fence) {
     vk_texture_write_back_small(fence);
 }
 
+// ---- host side of GfxBackend
+static int vk_be_shader_tool(int tool) {
+    return tool == GFX_TOOL_PREPARE_SHADERS ? vk_pipeline_prepare_shaders()
+         : tool == GFX_TOOL_TRANSLATE_SHADERS ? vk_pipeline_translate_shaders() : vk_pipeline_warm_shaders();
+}
+
+static const GfxExecFrame *vk_be_exec_frame(void) { return &vk_exec_frame; }
+
+// The system info's GPU and driver lines (sysinfo.c); 0 before vk_init.
+static int vk_be_device_text(char *buf, size_t n) {
+    VkCtx *c = vk_ctx();
+    if (!c || !n) return 0;
+    VkPhysicalDeviceDriverProperties dp = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+    VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &dp};
+    vkGetPhysicalDeviceProperties2(c->phys, &p2);
+    const VkPhysicalDeviceProperties *p = &p2.properties;
+    uint64_t vram = 0;
+    for (uint32_t h = 0; h < c->mem_props.memoryHeapCount; h++)
+        if (c->mem_props.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) vram += c->mem_props.memoryHeaps[h].size;
+    int k = snprintf(buf, n, "GPU: %s (vendor 0x%04x, device 0x%04x), %.1f GB device-local memory\n"
+                             "Driver: %s %s, driver version 0x%08x, Vulkan %u.%u.%u\n",
+                     p->deviceName, p->vendorID, p->deviceID, vram / 1073741824.0, dp.driverName, dp.driverInfo,
+                     p->driverVersion, VK_API_VERSION_MAJOR(p->apiVersion), VK_API_VERSION_MINOR(p->apiVersion),
+                     VK_API_VERSION_PATCH(p->apiVersion));
+    return k < 0 ? 0 : (size_t)k < n ? k : (int)n - 1;
+}
+
 const GfxBackend gfx_vulkan_backend = {
     .name = "vulkan",
     .pool_init = vk_be_pool_init,
@@ -616,6 +657,21 @@ const GfxBackend gfx_vulkan_backend = {
     .guest_written = vk_be_guest_written,
     .guest_read = vk_be_guest_read,
     .cpu_synced = vk_be_cpu_synced,
+    .window_start = vk_present_window_start,
+    .window_resize = vk_present_window_resize,
+    .present_mode = vk_present_mode,
+    .window_hdr10 = vk_present_hdr10,
+    .boot_async = vk_pipeline_async_enable,
+    .boot_prewarm = vk_pipeline_prewarm,
+    .save = vk_pipeline_save,
+    .exit_wait = vk_present_exit_wait,
+    .exit_release = vk_present_exit_release,
+    .shader_tool = vk_be_shader_tool,
+    .thumbs_enable = vk_thumbs_enable,
+    .thumbs_read = vk_thumbs_read,
+    .exec_frame = vk_be_exec_frame,
+    .device_text = vk_be_device_text,
+    .dump_request = vk_dump_request,
 };
 
 void vk_backend_shutdown(void) {

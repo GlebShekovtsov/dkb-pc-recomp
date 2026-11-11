@@ -154,6 +154,12 @@
 # the window (FSR or bilinear) and before the menu is drawn, so the game's HUD is smoothed as well. Changes while the game
 # runs take effect at once.
 # smaa = off
+# Frame generation (experimental, Donkey Kong Bananza only): off (the default) or 2x. At 2x a frame is made between each two of the game's, from their
+# motion, and shown first, then the game's own frame half a frame later, so a game at 30 fps is shown at 60. The menu
+# overlay is drawn on every shown frame and is never interpolated. No frame is made after a gap of over 100 ms, when the
+# picture's size changes, for the game's own HDR picture, when the display's refresh is below the doubled rate, or unless
+# vk_present is mailbox or immediate. Changes while the game runs take effect at once.
+# frame_gen = off
 # Picture shape when the window's shape differs from the game resolution's (a 16:9 picture in a 21:9 fullscreen
 # window): fit, the default, keeps the shape, with black bars at the sides or above and below, so a 16:9 game in a wider
 # window is no longer stretched as it used to be; stretch fills the window. Changes while the game runs take effect at

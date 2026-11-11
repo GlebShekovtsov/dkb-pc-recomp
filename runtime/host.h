@@ -69,7 +69,7 @@ extern void (*perf_gpu_stats)(PerfGpu *out);
 void perf_set_overlay(int mode);
 int perf_gpu_timing(void);                      // GPU timestamps wanted: TOTK_TRACE=perf or the full overlay
 void perf_gpu_busy(uint64_t ns);                // GPU busy time of a timed submission part (vk_sync.c, any thread)
-void perf_present_gpu(uint64_t ns);             // GPU time of one present submission (gfx_present.c), for the perf line
+void perf_present_gpu(uint64_t ns);             // GPU time of one present submission (vk_present.c), for the perf line
 uint64_t perf_gpu_busy_total(void);             // its running total (the overlay's GPU time per frame)
 #define RT_RESULT(module, desc) ((uint32_t)(module) | ((uint32_t)(desc) << 9))
 void rt_sha256(const void *p, size_t n, uint8_t out[32]);   // BCrypt; fatal if the provider fails
@@ -173,6 +173,7 @@ int mem_frozen(uint64_t a);                                // the 2 MiB region o
                                                            // since its freeze
 void mem_thaw(uint64_t a, uint64_t n);                     // makes the frozen regions over [a, a+n) writable again;
                                                            // before a kernel write (file read) into guest memory
+void mem_commit_report(const char *when);                  // logs where the process's commit goes (TOTK_MEM_REPORT)
 void mem_freeze_stats(uint64_t *frozen, uint64_t *freezes, uint64_t *fault_thaws, uint64_t *other_thaws);
                                                            // regions frozen now; freezes and thaws since the last call
 void mem_kernel_free(void *p, uint64_t size);              // TLR/TLS reuse after thread exit
@@ -325,6 +326,8 @@ typedef struct { const char *exefs, *romfs, *profile; int boot; double seconds; 
                                                            // frames: --frames N (0 = no limit); shot: --shot
                                                            // PATH; gpu: TOTK_GPU
 const RtConfig *rt_config(void);
+// 8-bit RGBA PNG with stored deflate blocks (boot.c); stops with rt_fatal when the file cannot be written.
+void rt_write_png(const char *path, const uint8_t *rgba, uint32_t w, uint32_t h);
 void rt_boot_event(const char *what, Cpu *c, const char *detail);   // checkpoint log; "nvn" ends --boot
 void rt_boot(void);                                        // boot.c
 // Modes of totk.exe. main.c has run mem_init and parsed the paths; each mode calls ldr_load itself if it needs the

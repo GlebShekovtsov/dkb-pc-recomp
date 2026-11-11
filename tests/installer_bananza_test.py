@@ -158,7 +158,8 @@ assert '--full-build' in a and pathlib.Path(a[a.index('--expected')+1]).name=='e
 
     def test_unowned_temp_is_preserved(self):
         tag = b.hashlib.sha256(str(self.dest).lower().encode()).hexdigest()[:12]
-        target = self.temp / f'dkb-{self.dest.name}-{tag}'
+        safe = ''.join(c if c.isascii() and (c.isalnum() or c in '._-') else '_' for c in self.dest.name)
+        target = self.temp / f'dkb-{safe}-{tag}'
         target.mkdir(parents=True)
         (target / 'keep.txt').write_text('untouched')
         self.assertEqual(self.run_install()[0], 1)

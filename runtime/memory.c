@@ -294,6 +294,40 @@ void mem_init(void) {
 
 const RtGuestLayout *mem_layout(void) { return &L; }
 
+// ---- commit report (TOTK_MEM_REPORT=N, and once at exit from perf_summary_flush in perf.c)
+// Says where the process's commit goes: one plat_mem_walk, each committed run added to the bucket of the address range
+// it starts in. The bounds are the ones mem_init set (L, mods_lo, mods_hi never change afterwards), so no lock is
+// taken; the walk itself takes none either, so a game thread holding frz_lock or lock cannot block it.
+enum { B_LOW, B_ALIAS, B_MODS, B_KERNEL, B_PRIVATE, B_MAPPED, B_IMAGE, B_N };
+static void report_run(uint64_t base, uint64_t size, int kind, void *arg) {
+    uint64_t *sum = arg;
+    int b = kind == 2 ? B_IMAGE : kind == 1 ? B_MAPPED
+          : base >= L.aslr.base && base - L.aslr.base < LOW_SIZE ? B_LOW
+          : base >= L.alias.base && base - L.alias.base < L.alias.size ? B_ALIAS
+          : base >= mods_lo && base < mods_hi ? B_MODS
+          : base >= L.kernel.base && base - L.kernel.base < L.kernel.size ? B_KERNEL : B_PRIVATE;
+    sum[b] += size;
+}
+
+// The GPU side (vk_memory.c) overrides this; builds without the Vulkan back end add nothing.
+__attribute__((weak)) void vk_mem_gpu_summary(char *out, size_t n) { if (n) *out = 0; }
+
+void mem_commit_report(const char *when) {
+    if (!L.pool) return;
+    uint64_t s[B_N] = {0};
+    plat_mem_walk(report_run, s);
+    // How much of the committed heap+stack the game has touched: the same range the B_LOW bucket counts.
+    uint64_t resident = plat_mem_resident(L.aslr.base, LOW_SIZE);
+    double proc, used, limit, M = 1048576.0;
+    plat_commit_info(&proc, &used, &limit);
+    char gpu[256];
+    vk_mem_gpu_summary(gpu, sizeof gpu);
+    rt_log("mem: commit %s: guest heap+stack %.0f MiB, alias %.0f, modules %.0f, kernel %.0f, other private %.0f, mapped "
+           "%.0f, image %.0f; process commit %.0f MiB (limit %.0f), guest heap+stack resident %.0f MiB%s", when, s[B_LOW] / M,
+           s[B_ALIAS] / M, s[B_MODS] / M, s[B_KERNEL] / M, s[B_PRIVATE] / M, s[B_MAPPED] / M, s[B_IMAGE] / M, proc, limit,
+           resident / M, gpu);
+}
+
 // A range inside one watched reservation (stack and heap block, or alias region) only.
 static uint64_t written_pages(uint64_t addr, uint64_t size, uint64_t *pages, uint64_t max, int reset) {
     if (!max || !size) return 0;

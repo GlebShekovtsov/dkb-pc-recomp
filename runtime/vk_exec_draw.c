@@ -41,7 +41,7 @@ static const uint32_t (*c0_push)[NVN2_ROOT_WORDS];
 #define MAX_DESC 1024
 #define CHUNK_BYTES (4u << 20)
 #define ZERO_BYTES 65536u
-#define SUPPORT_BYTES 1408u   // Ryujinx SupportBuffer (std140): alpha_test, is_bgra[8], viewport_inverse, viewport_size, ...
+#define SUPPORT_BYTES GFX_SUPPORT_BYTES
 #define NVN_STAGE_VS 0
 #define NVN_STAGE_FS 1
 #define NVN_STAGE_GS 2
@@ -133,7 +133,7 @@ static struct {
     uint64_t vgen;
     int vb_valid;
     uint8_t support[SUPPORT_BYTES];      // last support buffer and where it lives
-    float sup_in[3];                     // the support_fill arguments it was filled from
+    float sup_in[3];                     // the gfx_support_fill arguments it was filled from
     VkBuffer sup_buf;
     VkDeviceSize sup_off;
     int sup_valid;
@@ -1123,41 +1123,12 @@ static int bind_range(VkExec *ex, uint64_t addr, uint64_t size, uint64_t align, 
     return 1;
 }
 
-static void c0_table(uint8_t *at, const p_bind_buf b[16]) {
-    for (int r = 0; r < 16; r++) {
-        uint64_t a = b[r].addr;
-        uint32_t n = (uint32_t)b[r].size;
-        memcpy(at + 16 * r, &a, 8);
-        memcpy(at + 16 * r + 8, &n, 4);
-    }
-}
-
-// The driver constant bank c0 as GLSLC-compiled shaders read it. Storage-buffer tables {u64 address, u32 size} every
-// 16 bytes at 0x110 (vertex), 0x510 (fragment), 0x310 (compute): Ryujinx's GlobalToStorage fallback loads each
-// candidate base from here and compares the global pointer against it. Compute: dispatch size at 0x200, the uniform
-// buffer table at 0x210 + 16 r. Graphics: the largest point size (Maxwell's limit, GLSLC clamps gl_PointSize to it) at
-// 0x610, the base instance at 0x644. Other stages: zeros. Unbound slots read zero, since the replay keeps them zero.
-// Layout: nxnative dm/gfx/nvn/nvn_mtl.m (MIT).
+// c0 of one stage for the Vulkan replay: gfx_c0.c fills it, here with the NVN 2 parameter layout and root words of the
+// program being dispatched (c0_lay, c0_push; NULL for an NVN 1 program).
 void vk_c0_fill(uint8_t bank[VK_C0_BYTES], int stage, const p_bind_buf ssbo[16], const p_bind_buf ubo[16],
                 const uint32_t dispatch[3], uint32_t base_instance) {
-    if (stage == NVN_STAGE_CS && c0_lay) {
-        if (!nvn2_c0_pack(bank, VK_C0_BYTES, c0_lay, c0_push, ssbo, ubo))
-            rt_fatal("vk: invalid NVN 2 compute parameter-block layout");
-        return;
-    }
-    memset(bank, 0, VK_C0_BYTES);
-    int base =stage == NVN_STAGE_VS ? 0x110 : stage == NVN_STAGE_FS ? 0x510 : stage == NVN_STAGE_CS ? 0x310 :
-              stage == NVN_STAGE_GS ? 0x410 : -1;   // geometry (DKB_NATIVE_GS): the table ssbo_slot expects
-    if (base < 0) return;
-    c0_table(bank + base, ssbo);
-    if (stage == NVN_STAGE_CS) {
-        memcpy(bank + 0x200, dispatch, 12);
-        c0_table(bank + 0x210, ubo);
-        return;
-    }
-    const float max_point = 2047.0f;
-    memcpy(bank + 0x610, &max_point, 4);
-    memcpy(bank + 0x644, &base_instance, 4);
+    if (!gfx_c0_fill(bank, stage, ssbo, ubo, dispatch, base_instance, c0_lay, c0_push))
+        rt_fatal("vk: invalid NVN 2 compute parameter-block layout");
 }
 
 static int c0_on(void) {   // TOTK_FIX_C0=0: c0 reads zeros instead of the driver constants
@@ -1888,20 +1859,10 @@ static VkDescriptorSet alloc_set(VkExec *ex, VkDescriptorSetLayout layout) {
     return VK_NULL_HANDLE;
 }
 
-static void support_in(const VkExec *ex, float in[3]) {   // what support_fill reads: viewport size, point size
+static void support_in(const VkExec *ex, float in[3]) {   // what gfx_support_fill reads: viewport size, point size
     in[0] = ex->in_pass && ex->has_vp ? ex->vp[0][2] : (float)ex->pass_w;
     in[1] = ex->in_pass && ex->has_vp ? ex->vp[0][3] : (float)ex->pass_h;
     in[2] = ex->point_size > 0 ? ex->point_size : 1.0f;
-}
-
-static void support_fill(uint8_t *b, float w, float h, float point_size) {
-    memset(b, 0, SUPPORT_BYTES);
-    float inv[4] = {w > 0 ? 2.0f / w : 0, h > 0 ? 2.0f / h : 0, 0, 0}, size[4] = {w, h, 0, 0};
-    memcpy(b + 144, inv, 16);
-    memcpy(b + 160, size, 16);
-    const float one = 1.0f;
-    memcpy(b + 1392, &point_size, 4);   // point_size (translator patch 0008): vertex shaders that write none output it
-    for (int i = 0; i < 73; i++) memcpy(b + 192 + 16 * i, &one, 4);   // render scale 1: the host renders at guest size
 }
 
 // TOTK_BIND_STATS=1: bindings and descriptors per draw of each stage (Task 2.2's choice of the pushed stage), and how
@@ -2178,9 +2139,9 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
         if (b->kind == VK_PIPE_SUPPORT) {
             float in[3];
             support_in(ex, in);
-            if (!B.sup_valid || memcmp(in, B.sup_in, sizeof in)) {   // support_fill reads only these
+            if (!B.sup_valid || memcmp(in, B.sup_in, sizeof in)) {   // gfx_support_fill reads only these
                 uint8_t tmp[SUPPORT_BYTES];
-                support_fill(tmp, in[0], in[1], in[2]);
+                gfx_support_fill(tmp, in[0], in[1], in[2]);
                 memcpy(B.sup_in, in, sizeof in);
                 if (!B.sup_valid || memcmp(tmp, B.support, SUPPORT_BYTES)) {   // a new buffer only when the contents changed
                     VkBuffer sb;

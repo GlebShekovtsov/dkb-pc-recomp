@@ -1,5 +1,5 @@
-// Between gfx_present.c (swapchain, present, vsync) and the window system's back end (gfx_window_win.c with Win32,
-// gfx_window_sdl.c with SDL). Host threads only.
+// Between the chosen back end's window side (vk_present.c on Vulkan: surface, swapchain, present) and the window
+// system's back end (gfx_window_win.c with Win32, gfx_window_sdl.c with SDL). Host threads only.
 #pragma once
 #include "vk.h"
 
@@ -16,7 +16,7 @@ void wsys_probe_escape(void);              // Esc pressed
 // 0 when the window system has no such event (then the caller skips that check).
 int wsys_probe_click(int where);
 
-// ---- what gfx_present.c provides the back end
+// ---- what the back end's window side provides the window system
 void gfx_window_mark_dirty(void);          // the window changed size: the next present rebuilds the swapchain
 void gfx_window_focus_changed(int in);     // the window gained (1) or lost (0) the focus
 void gfx_window_closed(void);              // the player closed the window: saves, then ends the process

@@ -1,0 +1,38 @@
+#version 450
+// From Hookshot gpu/vk/shaders/fg_synth.comp, https://github.com/NotRexed/Hookshot @ fab8cb37641714bd839ae83c2a7bc582bedc4d70, GPL-3.0
+// an in-between frame at time t. Where the two frames agree the pixel stands still: their plain blend, so that nothing
+// static (the HUD, a wall) is ever moved and flat haze, whose blocks match anywhere, does not swim. Elsewhere each pixel
+// takes the last frame back along t of its motion and the new frame forward along 1 - t; only when those two agree: a
+// vector that is wrong for this pixel (Link's edge against the bright haze, what the block did not hold) brought in
+// unrelated light, seen as white flashes and flicker between the game's frames, so there too it is the plain blend.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D fa;
+layout(binding = 1) uniform sampler2D fb;
+layout(binding = 2) uniform sampler2D flow;
+layout(binding = 3, rgba8) uniform writeonly image2D dst;
+layout(push_constant) uniform P { float t; } pc;
+vec2 fl(ivec2 q) { return texelFetch(flow, clamp(q, ivec2(0), textureSize(flow, 0) - 1), 0).xy; }
+float gap(vec3 x, vec3 y) { const vec3 d = abs(x - y); return max(d.r, max(d.g, d.b)); }
+void main() {
+    const ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 d = imageSize(dst);
+    if (any(greaterThanEqual(g, d))) return;
+    const float t = pc.t;
+    const vec3 a0 = texelFetch(fa, g, 0).rgb, b0 = texelFetch(fb, g, 0).rgb;
+    const vec3 still = mix(a0, b0, t);
+    const float moved = smoothstep(0.03, 0.09, gap(a0, b0));
+    if (moved <= 0.0) { imageStore(dst, g, vec4(still, 1.0)); return; }
+    const vec2 p = vec2(g) + 0.5;
+    const vec2 fp = p / 16.0 - 0.5;
+    const ivec2 i = ivec2(floor(fp));
+    const vec2 w = fp - floor(fp);
+    const vec2 v = mix(mix(fl(i), fl(i + ivec2(1, 0)), w.x), mix(fl(i + ivec2(0, 1)), fl(i + ivec2(1, 1)), w.x), w.y);
+    const vec2 size = vec2(d);
+    const vec3 a = textureLod(fa, (p - t * v) / size, 0.0).rgb;
+    const vec3 b = textureLod(fb, (p + (1.0 - t) * v) / size, 0.0).rgb;
+    const float agree = 1.0 - smoothstep(0.05, 0.16, gap(a, b));
+    // (where no vector explains the change, the nearer of the two frames as it is: a blend there was a double image, and
+    // over a camera cut or a fade a picture that neither frame shows)
+    const vec3 near = t <= 0.5 ? a0 : b0;
+    imageStore(dst, g, vec4(mix(mix(still, near, moved), mix(a, b, t), moved * agree), 1.0));
+}

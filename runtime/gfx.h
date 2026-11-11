@@ -17,8 +17,20 @@ const OvNvState *ov_nv_state(void);                        // ov_gfx.c
 #define RT_GPU_VA_BASE 0x8000000000ull                     // 2^39, never mapped on the host
 #define RT_GPU_VA_SIZE (64ull << 30)
 
-// ---- window, vsync, focus (gfx_present.c and the window back end, gfx_wsys.h; vk_device.c). Host threads only; never run guest code.
-void gfx_window_start(void);                               // window thread, Vulkan device, swapchain; idempotent
+// ---- window, vsync, focus (gfx_window.c, the window back end gfx_wsys.h and the chosen back end). Host threads only;
+// never run guest code.
+// Before plat_exit, after the saves: the back end's queued present goes out (exit_wait, outside the start lock: the
+// thread presenting it may be waiting for that lock), then the device's hold on the window is released (exit_release,
+// under it); parks if another exit is under way.
+void gfx_exit_release(void);
+void gfx_window_start(void);                               // the back end's device, window and swapchain; idempotent
+void gfx_window_resize(int client_w, int client_h);        // programmatic resize; returns once the back end followed it
+int gfx_window_exiting(void);                              // an exit released the device: present and start drop out
+int gfx_window_closing(void);                              // the exit has started: the swapchain and the present passes are being freed
+int gfx_window_dirty(void);                                // the window changed size since the last take; leaves the mark
+int gfx_window_take_dirty(void);                           // the window changed size since the last call; clears the mark
+// The rectangle {x, y, w, h} a cw x ch picture is presented in inside a dw x dh image (TOTK_ASPECT); the rest is black.
+void gfx_fit_rect(int cw, int ch, int dw, int dh, int out[4]);
 #ifdef __APPLE__
 // macOS runs SDL's video calls (and AppKit's) on the process's main thread, so that thread runs the window's event
 // loop and the game boots on a thread of its own (boot.c rt_boot). Called on the main thread; does not return.
@@ -29,7 +41,8 @@ uint64_t gfx_vsync_ticks(void);                            // ticks since start
 uint64_t gfx_vsync_time_ns(uint64_t tick);                 // kern_now_ns() time of a tick (pacing)
 double gfx_window_refresh_hz(void);                        // refresh rate of the window's monitor; 0 unknown
 int gfx_window_hdr10(void);                                // the swapchain is HDR10 now; 0 before one and on SDR
-int gfx_window_focused(void);
+int gfx_window_focused(void);                              // the window has the focus (nn::oe's focus state follows it)
+unsigned gfx_window_focus_messages(void);                  // OE_MSG_FOCUS_STATE_CHANGED pushes made by the window thread
 
 // ---- shader service client (gfx_shader.c)
 enum { GFX_STAGE_VS, GFX_STAGE_TCS, GFX_STAGE_TES, GFX_STAGE_GS, GFX_STAGE_FS, GFX_STAGE_CS };
@@ -130,9 +143,18 @@ uint32_t gfx_shader_inputs(const GfxShader *s, GfxShaderIo io[32]);    // Input 
 uint32_t gfx_shader_outputs(const GfxShader *s, GfxShaderIo io[32]);   // Output Locations (VS varyings, FS colour targets)
 void gfx_shader_local_size(const GfxShader *s, uint32_t local[3]);     // CS: the LocalSize execution mode; 1, 1, 1 otherwise
 
-// ---- back end (gfx_null.c, vk_*.c). Called by the NVN front end (nvn_api_*.c, nvn_ext.c) on guest threads.
+// ---- back end (gfx_null.c, vk_*.c).
+// TOTK_TRACE=gfx and the flight recorder: replay counters of the current frame, as the back end counts them.
+typedef struct {
+    uint64_t passes, draws_seen, draws, clears, copies, dispatches, submits;
+    uint64_t fb_draws, fb_barriers, fb_restarts, fb_layouts;   // feedback loops: draws sampling a written target of
+                                                               // their pass, in-pass barriers, pass restarts, layout
+                                                               // transitions
+} GfxExecFrame;
+enum { GFX_TOOL_PREPARE_SHADERS, GFX_TOOL_TRANSLATE_SHADERS, GFX_TOOL_WARM_SHADERS };   // GfxBackend.shader_tool
 typedef struct {
     const char *name;
+    // ---- guest side: called by the NVN front end (nvn_api_*.c, nvn_ext.c) on guest threads.
     int  (*pool_init)(pool_t *p);                          // 0 fails MemoryPoolInitialize
     void (*pool_fini)(pool_t *p);
     int  (*pool_map_virtual)(pool_t *v, int n, const void *requests);   // NVNmappingRequest[n], 0x28 bytes each
@@ -155,9 +177,34 @@ typedef struct {
     // The CPU waited for fence: small render targets written by work up to it go to their storage (vk_texture.c
     // vk_texture_write_back_small).
     void (*cpu_synced)(uint64_t fence);
+    // ---- host side: boot, the exit paths, the command-line tools, the window and diagnostics. Host threads, never
+    // guest code. A back end without a device (null) does nothing in each.
+    // gfx_window_start: the device, the window, its surface and the swapchain or drawable; idempotent.
+    void (*window_start)(void);
+    void (*window_resize)(void);    // gfx_window_resize: the window has its new size; the swapchain or drawable follows
+    const char *(*present_mode)(void);   // gfx_window_present_mode: the mode the swapchain got; "" before one, "none" without
+    int  (*window_hdr10)(void);     // gfx_window_hdr10: the swapchain is HDR10 now; any thread, guest threads included
+    void (*boot_async)(void);       // boot, before the prewarm: pipelines may be built in the background (not with --shot)
+    void (*boot_prewarm)(void);     // boot: what earlier runs recorded is made ready; the guest starts after it returns
+    void (*save)(void);             // every exit path, with the saves: the back end's caches and records go to disk
+    // gfx_exit_release, before the process ends. exit_wait runs before gfx_window.c's start lock: the present queued
+    // last goes out, and the thread that presents it may be waiting for that lock (gfx_window_start). exit_release
+    // runs under the lock: the device lets go of the window (swapchain, surface, present objects).
+    void (*exit_wait)(void);
+    void (*exit_release)(void);
+    int  (*shader_tool)(int tool);  // --prepare-shaders and the like: GFX_TOOL_*; returns the process's exit code
+    // TOTK_FLIGHT thumbnails (flight.h): each present also keeps a FLIGHT_THUMB_W x FLIGHT_THUMB_H copy in a ring
+    // of n. thumbs_enable before the first present. thumbs_read copies frame's as RGBA when the ring still holds it
+    // complete; 0 when it was never written, is still in flight or was overwritten. Any thread.
+    void (*thumbs_enable)(int n);
+    int  (*thumbs_read)(uint64_t frame, uint8_t *rgba);
+    const GfxExecFrame *(*exec_frame)(void);   // the replay counters; they grow until the back end's frame log resets them
+    int  (*device_text)(char *buf, size_t n);  // the system info's GPU and driver lines; 0 while there is no device
+    void (*dump_request)(void);     // F9 in the game window: the frame dump of TOTK_DUMP=key
 } GfxBackend;
 extern const GfxBackend gfx_null_backend, gfx_vulkan_backend;
 const GfxBackend *gfx_backend(void);                       // TOTK_GPU=null|vulkan (default vulkan)
+int gfx_shader_tool(int tool);                             // the chosen back end's shader_tool; main.c's --*-shaders modes
 
 // ---- NVN front end (nvn_procs.c)
 void nvn_procs_register(void);                             // hostfn_register every proc; before hostfn_seal (ov_gfx.c)

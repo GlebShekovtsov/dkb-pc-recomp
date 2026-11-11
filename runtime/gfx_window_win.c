@@ -1,6 +1,6 @@
 // The Win32 back end of the window (gfx_wsys.h): the window and its message loop on a thread of their own, F11
 // fullscreen, the settings TOTK_WINDOW_SIZE and TOTK_FULLSCREEN, the monitor's refresh rate, focus, the Vulkan surface.
-// The swapchain and the present are gfx_present.c's. The in-game menu's keyboard and mouse come from the window
+// The swapchain and the present are vk_present.c's. The in-game menu's keyboard and mouse come from the window
 // procedure (ui/menu_win.cpp), and so do the game's (input_win.c).
 //
 // The process is per-monitor DPI aware (totk.manifest): every size here is physical pixels, TOTK_WINDOW_SIZE included,
@@ -217,7 +217,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (menu_window_msg(h, m, w, l, &input_res)) return input_res;
     switch (m) {
     case WM_KEYDOWN:
-        if (w == VK_F9 && !(l & (1 << 30))) vk_dump_request();   // TOTK_DUMP=key; F10 is the system menu key
+        if (w == VK_F9 && !(l & (1 << 30))) gfx_backend()->dump_request();   // TOTK_DUMP=key; F10 is the system menu key
         if (w == VK_F11 && !(l & (1 << 30))) {   // bit 30: auto-repeat
             // the real window decides, so a mode forced by the environment cannot stick F11
             int cur = is_fullscreen(h) ? (g_applied_mode ? g_applied_mode : 1) : 0, mode = cur ? 0 : last_fs;

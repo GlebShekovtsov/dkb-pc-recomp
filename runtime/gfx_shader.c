@@ -1794,7 +1794,7 @@ static const GfxShader *get_one(const Req *r, int stage, const uint8_t *control,
 // origin, little-endian). An origin is known only where the stage's code was lowered in this process (nvn2_origin),
 // and the boot prewarm builds pipelines from the shader cache without lowering anything: the table carries each
 // origin, met while the game or --translate-shaders lowered the stage, over to later runs. Fixes keyed by origin
-// (vk_pipeline.c screen_uv_stage) need it there. An input id does not depend on the translator, so a new translator
+// (gfx_spirv.c screen_uv_stage) need it there. An input id does not depend on the translator, so a new translator
 // keeps the table. A torn last record (a crash while appending) is ignored, and the next append overwrites it, so
 // records stay on 40-byte boundaries. note_origin records the origin of every stage it meets (the lowered code pointer
 // is only known there) in the shader and, for an input id not in the table yet, in the file: a shader shared by two

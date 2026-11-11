@@ -8,10 +8,10 @@
 #endif
 
 #include "cfg.h"
+#include "gfx.h"
 #include "host.h"
 #include "platform/platform.h"
 #include "sysinfo.h"
-#include "vk.h"
 
 void sysinfo_cpu_name(char *out, size_t n) {
     out[0] = 0;
@@ -68,23 +68,9 @@ int sysinfo_text(char *buf, size_t n) {
     float used, total, proc;
     plat_mem_info(&used, &total, &proc);
     if (total > 0) put(&o, "RAM: %.1f GB, %.1f GB in use, the game %.1f GB\n", total / 1024, used / 1024, proc / 1024);
-    VkCtx *c = vk_ctx();
-    if (c) {
-        VkPhysicalDeviceDriverProperties dp = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
-        VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &dp};
-        vkGetPhysicalDeviceProperties2(c->phys, &p2);
-        const VkPhysicalDeviceProperties *p = &p2.properties;
-        uint64_t vram = 0;
-        for (uint32_t h = 0; h < c->mem_props.memoryHeapCount; h++)
-            if (c->mem_props.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) vram += c->mem_props.memoryHeaps[h].size;
-        put(&o, "GPU: %s (vendor 0x%04x, device 0x%04x), %.1f GB device-local memory\n", p->deviceName, p->vendorID,
-            p->deviceID, vram / 1073741824.0);
-        put(&o, "Driver: %s %s, driver version 0x%08x, Vulkan %u.%u.%u\n", dp.driverName, dp.driverInfo,
-            p->driverVersion, VK_API_VERSION_MAJOR(p->apiVersion), VK_API_VERSION_MINOR(p->apiVersion),
-            VK_API_VERSION_PATCH(p->apiVersion));
-    } else {
-        put(&o, "GPU: no Vulkan device yet\n");
-    }
+    char gpu[1024];   // the back end names its device and driver
+    if (gfx_backend()->device_text(gpu, sizeof gpu)) put(&o, "%s", gpu);
+    else put(&o, "GPU: no graphics device yet\n");
     put(&o, "Settings with a value:\n");
     size_t before = o.at;
     cfg_each_active(put_setting, &o);

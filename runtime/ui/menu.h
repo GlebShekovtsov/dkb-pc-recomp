@@ -1,6 +1,6 @@
 // The in-game menu (ui/menu.cpp, Dear ImGui) and its seams to the platform side: the window and its input (ui/menu_win.cpp
 // on Windows, ui/menu_sdl.cpp with SDL), the gamepad (input_pad_read, input.h) and the present path
-// (gfx_present.c). The menu core calls no window system: events come in through menu_event_*, the drawing happens in the
+// (vk_present.c). The menu core calls no window system: events come in through menu_event_*, the drawing happens in the
 // present path's command buffer.
 //
 // F1 or Esc on the keyboard and Minus and Plus held together (consumed in poll_merged, input_menu_gate in input.h) open it;
@@ -34,7 +34,7 @@ void menu_event_mouse_button(int button, int down);   // 0 left, 1 right, 2 midd
 void menu_event_wheel(float dx, float dy);
 void menu_event_focus(int focused);
 
-// ---- the overlay, drawn into the swapchain image after the game image (gfx_present.c, present lock held)
+// ---- the overlay, drawn into the swapchain image after the game image (vk_present.c, present lock held)
 typedef struct {
     VkInstance instance;
     VkPhysicalDevice phys;
@@ -52,7 +52,7 @@ typedef struct {
 int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const char **shot);
 // Records the frame menu_overlay_frame laid out into cb, which is inside dynamic rendering on the image.
 void menu_overlay_draw(VkCommandBuffer cb);
-void menu_vk_release(void);               // before the device goes away (gfx_window_release_vk)
+void menu_vk_release(void);               // before the device goes away (vk_present_release)
 // The check the font atlas runs on a system font, on the embedded font and damaged copies of it: 1 when it takes the
 // whole font and refuses a cut-off one, one without a character map and one with an unknown tag (--probe-window).
 int menu_font_check(void);

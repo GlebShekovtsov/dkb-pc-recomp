@@ -1,4 +1,4 @@
-// AMD FidelityFX Super Resolution 1 on the present path (gfx_present.c present_image): when the window is larger than
+// AMD FidelityFX Super Resolution 1 on the present path (vk_present.c present_image): when the window is larger than
 // the game's output, EASU scales the game's crop rectangle to the swapchain size and RCAS sharpens it, in place of the
 // bilinear vkCmdBlitImage. TOTK_UPSCALER=fsr|bilinear picks it (dlss counts as fsr), TOTK_SHARPNESS (0..100, 0 = no RCAS pass) sets RCAS;
 // both apply at the next frame.

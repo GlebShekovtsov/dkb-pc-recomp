@@ -1,6 +1,6 @@
 // SMAA 1x on the present (TOTK_SMAA = low|medium|high; off by default): Jimenez et al.'s morphological anti-aliasing
 // on the finished picture at the swapchain size, after FSR or the bilinear blit has scaled it and before the menu overlay
-// is drawn, so the HUD of the game is smoothed and the overlay is not. gfx_present.c present_image calls it with the
+// is drawn, so the HUD of the game is smoothed and the overlay is not. vk_present.c present_image calls it with the
 // swapchain image in TRANSFER_DST. The picture's rectangle is copied into an RGBA16F image and runs through the three
 // passes of runtime/shaders/smaa_*.comp (colour edge detection, blending weights from the area and search lookup
 // textures, neighbourhood blending) as compute shaders; the result is blitted back 1:1. The quality picks the preset

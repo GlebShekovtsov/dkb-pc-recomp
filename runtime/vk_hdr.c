@@ -85,7 +85,7 @@ int vk_hdr_surface_format(const VkSurfaceFormatKHR *f, uint32_t n, VkSurfaceForm
     return 0;
 }
 
-// The content's peak and the picture's white for sc, sent again when either changes (gfx_present.c calls it on every
+// The content's peak and the picture's white for sc, sent again when either changes (vk_present.c calls it on every
 // present to an HDR10 swapchain, with new = 1 for a new swapchain). The lifted SDR picture reaches hdr_peak_nits. With
 // native HDR the game grades to its own peak, the display's capped by the game's limit for the mode (ov_gfx.c
 // hdr_game_content_peak: 1400 nits in 3.2.0 gameplay with any higher hdr_peak_nits); a display told hdr_peak_nits

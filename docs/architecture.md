@@ -114,7 +114,7 @@ Every guest thread is a host thread. TotK assumes Horizon's scheduler: three app
 - Native HDR, Bananza 3.2.0 (`hdr_native = 1` with `hdr = 1`). `ov_gfx.c` answers the game's
   `nn::vi::QueryDisplayHdrStatus` with "on" and `hdr_peak_nits`, and `QueryDisplayHdrPaperWhite` with
   `hdr_game_nits`. The game then switches to its own HDR mode: its window texture becomes A2B10G10R10 holding
-  Rec. 2020 PQ, which `gfx_present.c` `present_image` copies onto the HDR10 swapchain as it is (no colour adjustment,
+  Rec. 2020 PQ, which `vk_present.c` `present_image` copies onto the HDR10 swapchain as it is (no colour adjustment,
   FSR or SMAA, which expect an SDR picture). The game's tonemap stops its highlights at about 1.36 times paper white,
   whatever peak it is told; `spirv_hdr_shoulder.c` (`DKB_HDR_SHOULDER=0` turns it off) rewrites its composite stage
   so they reach the peak, leaving everything below the shoulder's knee as the game grades it. Findings and

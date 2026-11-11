@@ -408,6 +408,13 @@ void plat_commit_info(double *proc_mb, double *used_mb, double *limit_mb);
 // This process's memory in bytes: resident (the working set) and private (Windows: committed private bytes; Linux: the
 // resident anonymous pages). 0 when unknown.
 void plat_process_memory(uint64_t *resident, uint64_t *private_bytes);
+// Calls fn(base, size, kind, arg) for every run of committed pages in the user address space (mem_commit_report):
+// kind 0 private (malloc, thread stacks, driver memory, our reservations), 1 mapped file or section, 2 image. Windows
+// only (VirtualQuery); the other hosts call nothing.
+void plat_mem_walk(void (*fn)(uint64_t base, uint64_t size, int kind, void *arg), void *arg);
+// Bytes of [base, base+size) that are in the process working set (resident). Windows only (QueryWorkingSetEx); the
+// other hosts return 0.
+uint64_t plat_mem_resident(uint64_t base, uint64_t size);
 
 // ---- child processes: a program with stdin and stdout piped to us (stderr discarded), no console window.
 typedef struct PlatChild PlatChild;

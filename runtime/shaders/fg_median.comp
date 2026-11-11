@@ -1,0 +1,24 @@
+#version 450
+// From Hookshot gpu/vk/shaders/fg_median.comp, https://github.com/NotRexed/Hookshot @ fab8cb37641714bd839ae83c2a7bc582bedc4d70, GPL-3.0
+// a 3x3 median of the vectors
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D src;
+layout(binding = 1, rgba16f) uniform writeonly image2D dst;
+float med9(float v[9]) {
+    for (int i = 0; i < 5; i++)   // (the 5 smallest in order: the 5th is the median)
+        for (int j = i + 1; j < 9; j++)
+            if (v[j] < v[i]) { const float t = v[i]; v[i] = v[j]; v[j] = t; }
+    return v[4];
+}
+void main() {
+    const ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 d = imageSize(dst);
+    if (any(greaterThanEqual(g, d))) return;
+    float xs[9], ys[9];
+    float e = 0.0;
+    for (int i = 0; i < 9; i++) {
+        const vec4 f = texelFetch(src, clamp(g + ivec2(i % 3 - 1, i / 3 - 1), ivec2(0), d - 1), 0);
+        xs[i] = f.x, ys[i] = f.y, e = max(e, f.z);
+    }
+    imageStore(dst, g, vec4(med9(xs), med9(ys), e, 1.0));
+}

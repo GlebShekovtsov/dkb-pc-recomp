@@ -4,6 +4,7 @@
 // ticks, counter 0), buffer-to-buffer copies and uniform updates.
 // It is the CPU-side gate for the NVN front end. Also the back-end choice (gfx_backend) and the statistics (gfx_stats).
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "gfx.h"
@@ -34,6 +35,8 @@ const GfxBackend *gfx_backend(void) {
     __atomic_store_n(&chosen, b, __ATOMIC_RELEASE);
     return b;
 }
+
+int gfx_shader_tool(int tool) { return gfx_backend()->shader_tool(tool); }
 
 static uint64_t fence;
 
@@ -136,6 +139,27 @@ static void null_guest_written(uint64_t addr, uint64_t size) { (void)addr, (void
 static void null_guest_read(uint64_t addr, uint64_t size) { (void)addr, (void)size; }
 static void null_cpu_synced(uint64_t fence) { (void)fence; }
 
+// The host side: no device, so nothing to warm, save or release, no thumbnails, no counters to grow and no driver to
+// name.
+static void null_nothing(void) {}
+static int null_zero(void) { return 0; }
+static int null_shader_tool(int tool) {
+    (void)tool;
+    rt_logf("the shader tools need a graphics device: TOTK_GPU=null has none\n");
+    return 1;
+}
+static void null_thumbs_enable(int n) { (void)n; }
+static int null_thumbs_read(uint64_t frame, uint8_t *rgba) { (void)frame, (void)rgba; return 0; }
+static const char *null_present_mode(void) { return "none"; }
+static const GfxExecFrame *null_exec_frame(void) {
+    static const GfxExecFrame none;
+    return &none;
+}
+static int null_device_text(char *buf, size_t n) {
+    int k = snprintf(buf, n, "GPU: none (TOTK_GPU=null has no device)\n");
+    return k > 0 && (size_t)k < n;
+}
+
 const GfxBackend gfx_null_backend = {
     .name = "null",
     .pool_init = null_pool_init,
@@ -155,4 +179,19 @@ const GfxBackend gfx_null_backend = {
     .guest_written = null_guest_written,
     .guest_read = null_guest_read,
     .cpu_synced = null_cpu_synced,
+    .window_start = null_nothing,
+    .window_resize = null_nothing,
+    .present_mode = null_present_mode,
+    .window_hdr10 = null_zero,
+    .boot_async = null_nothing,
+    .boot_prewarm = null_nothing,
+    .save = null_nothing,
+    .exit_wait = null_nothing,
+    .exit_release = null_nothing,
+    .shader_tool = null_shader_tool,
+    .thumbs_enable = null_thumbs_enable,
+    .thumbs_read = null_thumbs_read,
+    .exec_frame = null_exec_frame,
+    .device_text = null_device_text,
+    .dump_request = null_nothing,
 };

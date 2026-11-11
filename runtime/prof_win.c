@@ -4,7 +4,8 @@
 //   totk-prof 1 / base <hex> / period_us / samples N / thread <tid> <samples> <in-exe samples> / module <base> <size> <path> /
 //   rip <hex> <count> (the top PROF_TOP Rips) / stack <count> <rip> <caller> ... (TOTK_PROFILE_RENDER or
 //   TOTK_PROFILE_CHAINS only, the top PROF_STACKS call chains)
-// With TOTK_PROFILE_RENDER (the render thread) or TOTK_PROFILE_CHAINS=1 (every thread, chains of all threads summed: for
+// With TOTK_PROFILE_RENDER (the render thread), TOTK_PROFILE_REPLAY (the async replay thread that records), or
+// TOTK_PROFILE_CHAINS=1 (every thread, chains of all threads summed: for
 // short frame ranges, as each sample copies a stack) the sampler also copies up to STK_COPY bytes of the suspended
 // thread's stack and, after
 // ResumeThread, unwinds the copy with the .pdata tables (RtlVirtualUnwind), so it takes no lock while the thread is
@@ -61,7 +62,8 @@ static volatile LONG stop, written;
 static uintptr_t exe_lo, exe_hi;
 static int only_render;             // TOTK_PROFILE_RENDER=1: sample the render thread only
 static int only_main;               // TOTK_PROFILE_MAIN=1: sample the guest main thread only
-static int chains;                  // call chains are kept: TOTK_PROFILE_RENDER or TOTK_PROFILE_CHAINS
+static int only_replay;             // TOTK_PROFILE_REPLAY=1: sample the replay thread only (the one that records)
+static int chains;                  // call chains are kept: TOTK_PROFILE_RENDER, TOTK_PROFILE_REPLAY or TOTK_PROFILE_CHAINS
 static volatile uint64_t cur_frame; // last presented frame
 static uint64_t frame_lo, frame_hi; // TOTK_PROFILE_FRAMES=<lo>-<hi>: sample only while presents lo..hi-1 are pending
 static int64_t world_lo, world_hi;  // TOTK_PROFILE_FRAMES=w<lo>-<hi>: only while the world clock is in [lo, hi) s (us)
@@ -240,7 +242,9 @@ static DWORD WINAPI sampler_main(void *arg) {
         uint64_t now = slow_ns ? kern_now_ns() : 0;
         for (int i = 0; i < n_threads; i++) {
             ThreadSlot *t = &threads[i];
-            if ((only_render && t->tid != render_tid) || (only_main && t->tid != main_tid)) continue;
+            if ((only_render && t->tid != render_tid) || (only_main && t->tid != main_tid) ||
+                (only_replay && t->tid != replay_tid))
+                continue;
             uint64_t cyc = 0;
             if (slow_ns && t->depth && QueryThreadCycleTime(t->h, &cyc) && cyc == t->cycles) {   // still waiting
                 Sample *s = &ring[ring_n++ & (SLOW_RING - 1)];
@@ -343,10 +347,11 @@ int prof_sampler_start(void) {
     }
     only_render = cfg_get("TOTK_PROFILE_RENDER") != NULL;
     only_main = !only_render && cfg_get("TOTK_PROFILE_MAIN") != NULL;
+    only_replay = !only_render && !only_main && cfg_get("TOTK_PROFILE_REPLAY") != NULL;
     const char *ch = cfg_get("TOTK_PROFILE_CHAINS");
     const char *sl = cfg_get("TOTK_PROFILE_SLOW");
     slow_ns = sl && atoi(sl) > 0 ? (uint64_t)atoi(sl) * 1000000ull : 0;
-    chains = only_render || only_main || slow_ns || (ch && *ch && strcmp(ch, "0"));
+    chains = only_render || only_main || only_replay || slow_ns || (ch && *ch && strcmp(ch, "0"));
     const char *fr = cfg_get("TOTK_PROFILE_FRAMES");
     double wl, wh;
     if (fr && fr[0] == 'w' && sscanf(fr + 1, "%lf-%lf", &wl, &wh) == 2 && wl >= 0 && wl < wh)

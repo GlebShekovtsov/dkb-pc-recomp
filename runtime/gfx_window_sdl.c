@@ -1,7 +1,7 @@
 // The SDL3 back end of the window (gfx_wsys.h), for hosts without Win32: the window on a thread of its own that also
 // runs SDL's event loop, F11 fullscreen (borderless, the desktop's mode), the settings TOTK_WINDOW_SIZE and
 // TOTK_FULLSCREEN, the display's refresh rate, focus, the Vulkan surface. The swapchain and the present are
-// gfx_present.c's. Keyboard and mouse events go to input_sdl.c and to the menu (ui/menu_sdl.cpp).
+// vk_present.c's. Keyboard and mouse events go to input_sdl.c and to the menu (ui/menu_sdl.cpp).
 //
 // SDL wants its video calls on the thread that initialised video, so this thread does them all: the others hand it
 // work through run_on_window (a user event and a wait) or post a user event. Video is initialised before the window
@@ -186,7 +186,7 @@ static void handle(const SDL_Event *e) {
     menu_sdl_event(e);
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN:
-        if (e->key.scancode == SDL_SCANCODE_F9 && !e->key.repeat) vk_dump_request();   // TOTK_DUMP=key
+        if (e->key.scancode == SDL_SCANCODE_F9 && !e->key.repeat) gfx_backend()->dump_request();   // TOTK_DUMP=key
         if (e->key.scancode == SDL_SCANCODE_F11 && !e->key.repeat) {
             // the real window decides, so a mode forced by the environment cannot stick F11
             int cur = is_fullscreen() ? (g_applied_mode ? g_applied_mode : 1) : 0, mode = cur ? 0 : last_fs;

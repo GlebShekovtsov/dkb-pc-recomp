@@ -1,6 +1,6 @@
 """Original fragment modules through the real spirv_alpha_test, checked with spirv-val. No Vulkan, GPU or game runs.
 
-The function is cut out of runtime/vk_pipeline.c and compiled alone, so the test follows the source. It checks that each
+The function is cut out of runtime/spirv_rewrite.c and compiled alone, so the test follows the source. It checks that each
 NVN alpha function gives a valid module with one OpKill per return of the entry point, that a helper's return is left
 alone, and that a module without a float vec4 output at Location 0 is refused. It does not execute the shaders.
 """
@@ -65,9 +65,10 @@ class AlphaTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         args.out.mkdir(parents=True, exist_ok=False)
-        source = (ROOT / 'runtime/vk_pipeline.c').read_text(encoding='utf-8')
-        enum = re.search(r'enum \{ SPV_OP_ENTRY_POINT.*?\};', source, re.S).group(0)
-        start = source.index('static uint32_t *spirv_alpha_test(')
+        source = (ROOT / 'runtime/spirv_rewrite.c').read_text(encoding='utf-8')
+        header = (ROOT / 'runtime/spirv_rewrite.h').read_text(encoding='utf-8')
+        enum = re.search(r'enum \{ SPV_OP_ENTRY_POINT.*?\};', header, re.S).group(0)
+        start = source.index('uint32_t *spirv_alpha_test(')
         function = source[start:source.index('\n}\n', start) + 3]
         harness = args.out / 'harness.c'
         harness.write_text('#include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n' + enum + '\n' +

@@ -160,6 +160,7 @@ void perf_summary_flush(void) {   // at exit (prof_write)
     if (summary_t0) {
         ft_report(kern_now_ns(), "exit");
         gfx_exit_log();
+        mem_commit_report("exit");
     }
     summary_t0 = 0;
 }

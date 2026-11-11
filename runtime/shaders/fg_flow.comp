@@ -1,0 +1,28 @@
+#version 450
+// From Hookshot gpu/vk/shaders/fg_flow.comp, https://github.com/NotRexed/Hookshot @ fab8cb37641714bd839ae83c2a7bc582bedc4d70, GPL-3.0
+// block matching: one vector per 4x4 quarter-size texels (16x16 pixels), +-RADIUS quarter texels searched
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(constant_id = 0) const int RADIUS = 8;
+layout(binding = 0) uniform sampler2D la;
+layout(binding = 1) uniform sampler2D lb;
+layout(binding = 2, rgba16f) uniform writeonly image2D flow;
+void main() {
+    const ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(g, imageSize(flow)))) return;
+    const ivec2 lm = textureSize(la, 0) - 1;
+    const ivec2 c = g * 4 + 2;
+    float pa[64];
+    for (int i = 0; i < 64; i++) pa[i] = texelFetch(la, clamp(c + ivec2(i % 8 - 4, i / 8 - 4), ivec2(0), lm), 0).r;
+    float best = 1e9;
+    ivec2 bv = ivec2(0);
+    for (int dy = -RADIUS; dy <= RADIUS; dy++)
+        for (int dx = -RADIUS; dx <= RADIUS; dx++) {
+            float sad = 0.0;
+            for (int i = 0; i < 64; i++)
+                sad += abs(pa[i] - texelFetch(lb, clamp(c + ivec2(i % 8 - 4 + dx, i / 8 - 4 + dy), ivec2(0), lm), 0).r);
+            // (a vector must earn its length: flat haze and sky match anywhere, and any one chosen there swims)
+            const float cost = sad + 0.12 * float(abs(dx) + abs(dy)) + (dx != 0 || dy != 0 ? 0.6 : 0.0);
+            if (cost < best) best = cost, bv = ivec2(dx, dy);
+        }
+    imageStore(flow, g, vec4(vec2(bv) * 4.0, best / 64.0, 1.0));
+}

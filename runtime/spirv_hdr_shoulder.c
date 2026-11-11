@@ -1,4 +1,4 @@
-// Bananza's HDR highlights brought up to the display's peak (vk_pipeline.c make_module_linked; DKB_HDR_SHOULDER=0
+// Bananza's HDR highlights brought up to the display's peak (gfx_spirv.c gfx_spirv_final; DKB_HDR_SHOULDER=0
 // turns it off).
 //
 // In its HDR mode (DKB_HDR_NATIVE, ov_gfx.c) the game's composite fragment stage tonemaps the scene in two steps. A

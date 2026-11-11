@@ -78,11 +78,13 @@ def pipeline_source():
     prefix += '''
 static void vertex_input(const VkPipeState *s,VtxInput *v) { (void)s;(void)v;abort(); }
 static uint32_t vs_outs(const GfxShader *v,const GfxShader *f,GfxShaderIo io[32]) {(void)v;(void)f;(void)io;abort();}
-// make_module_linked's optional rewrites (screen UV, FMZ, NaN guard, dump, override) are off here: this fixture
+// gfx_spirv_final's optional rewrites (screen UV, FMZ, HDR shoulder, NaN guard, dump, override) are off here: this fixture
 // checks the geometry-chain module path only.
 VkPipelineCreateFlags vk_pipeline_capture_flags(void) {return 0;}
 static int screen_uv_stage(const GfxShader *src) {(void)src;return 0;}
-static uint32_t *spirv_fmz(const uint32_t *w,uint64_t n,int vertex_only,uint64_t *out_n,unsigned *nm,unsigned *nf) {(void)w;(void)n;(void)vertex_only;(void)out_n;(void)nm;(void)nf;return NULL;}
+uint32_t *spirv_screen_uv(const uint32_t *w,uint64_t n,uint64_t *out_n);
+uint32_t *spirv_fmz(const uint32_t *w,uint64_t n,int vertex_only,uint64_t *out_n,unsigned *nm,unsigned *nf) {(void)w;(void)n;(void)vertex_only;(void)out_n;(void)nm;(void)nf;return NULL;}
+static uint32_t *hdr_shoulder(const GfxShader *src,const uint32_t *w,uint64_t words,uint64_t *out_n) {(void)src;(void)w;(void)words;(void)out_n;return NULL;}
 static uint32_t *nan_guard(const GfxShader *src,const uint32_t *w,uint64_t words,uint64_t *out_n) {(void)src;(void)w;(void)words;(void)out_n;return NULL;}
 static void spv_dump(const uint32_t *w,uint64_t words,const GfxShader *src) {(void)w;(void)words;(void)src;}
 static uint32_t *spv_override(const uint32_t *w,uint64_t words,uint64_t *out_n) {(void)w;(void)words;(void)out_n;return NULL;}
@@ -91,10 +93,15 @@ static uint32_t *spv_override(const uint32_t *w,uint64_t words,uint64_t *out_n) 
              'static VkPolygonMode polygon_mode(', 'VkPrimitiveTopology vk_pipeline_topology(',
              'uint8_t vk_geometry_input(', 'static int topology_class(', 'static int format_type(',
              'static VkFormatFeatureFlags format_features(', 'static VkFormat target_format(',
-             'static uint32_t *spirv_rebind(', 'static uint32_t *spirv_set(',
-             'static uint32_t *spirv_dual_source(', 'static uint32_t *spirv_alpha_test(', 'static uint32_t *spirv_add_outputs(',
-             'static uint32_t *spirv_fixup_linked(', 'static uint32_t *spirv_fixup(', 'static int uses_subgroup_ops(',
+             'static uint32_t clip_cull_limit(',
              'static void pin_subgroup32(', 'static VkShaderModule make_module_linked(', 'static VkShaderModule make_module(']
+    # The rewrites are spirv_rewrite.c's and the module chain is gfx_spirv.c's; both are cut out like the rest.
+    rewrite = (ROOT / 'runtime/spirv_rewrite.c').read_text()
+    rewrites = ['uint32_t *spirv_rebind(', 'uint32_t *spirv_set(', 'uint32_t *spirv_dual_source(',
+                'uint32_t *spirv_alpha_test(', 'uint32_t *spirv_add_outputs(', 'uint32_t *spirv_fixup_linked(',
+                'uint32_t *spirv_fixup(', 'int spirv_uses_subgroup_ops(']
+    prefix += '\n'.join(interface.function(rewrite, name) for name in rewrites) + '\n'
+    prefix += interface.function((ROOT / 'runtime/gfx_spirv.c').read_text(), 'uint32_t *gfx_spirv_final(') + '\n'
     prefix += '\n'.join(interface.function(source, name) for name in names)
     # Contiguous original definitions: geometry IDs/validation and descriptor merge.
     start = source.index('typedef struct {', source.index('static VkShaderModule make_module('))

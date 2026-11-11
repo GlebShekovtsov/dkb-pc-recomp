@@ -1,12 +1,12 @@
 // TOTK_FLIGHT=1 flight recorder: a ring of the last TOTK_FLIGHT_FRAMES (600) presents, one record each (interval,
-// render-thread blocked time per perf kind, event counts) and a 320x180 thumbnail each (gfx_present.c, blitted on the
+// render-thread blocked time per perf kind, event counts) and a 320x180 thumbnail each (the back end's present, blitted on the
 // GPU by the present thread). A dump goes to <dir>/<YYYYMMDD-HHMMSS>-f<frame>/: frames.tsv and f<frame>.png per
 // thumbnail, written by a background thread. Triggers: F8 while the game window has focus, a frame interval over
 // TOTK_FLIGHT_SPIKE_MS (100; 0 off; at most one dump per 10 s), and TOTK_FLIGHT_AT=<frame>[,<frame>...]. A dump holds
 // the frames up to FLIGHT_POST presents after the trigger, so the aftermath is in it too. tools/flight_view.py reads it.
 //
 // Records come from perf_present (prof_win.c) on the render thread; the counts are differences of the TOTK_TRACE=perf
-// running totals and of vk_exec_frame. Off, the only cost is the flight_on branch in perf_present and vk_backend.c.
+// running totals and of the back end's replay counters (GfxBackend.exec_frame). Off, the only cost is the flight_on branch in perf_present and vk_backend.c.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,8 +16,6 @@
 #include "gfx.h"
 #include "host.h"
 #include "input.h"
-#include "vk.h"
-#include "vk_exec.h"
 #include "platform/platform.h"
 
 #define FLIGHT_POST 30                 // presents recorded after the trigger before the dump starts
@@ -57,7 +55,7 @@ static uint64_t at_frames[16];
 static int n_at;
 static char base_dir[PLAT_PATH_MAX];
 static uint64_t prev_cnt[PERF_CNT_N], prev_xlated;
-static VkExecFrame prev_exec;
+static GfxExecFrame prev_exec;
 static volatile uint64_t cost_ns, cost_max_ns;   // render-thread time in flight_frame, for the dump log line
 
 static unsigned env_u(const char *name, unsigned def) {
@@ -89,7 +87,7 @@ void flight_init(void) {
     }
     if (!plat_full_path(tmp, base_dir, sizeof base_dir)) snprintf(base_dir, sizeof base_dir, "%s", tmp);
     thumbs_on = env_u("TOTK_FLIGHT_THUMBS", 1) != 0;
-    if (thumbs_on) vk_thumbs_enable(ring_n);
+    if (thumbs_on) gfx_backend()->thumbs_enable(ring_n);
     flight_on = 1;
     rt_log("flight: on: last %d frames, %s; dump on F8, on a frame over %llu ms (one per 10 s)%s, to %s", ring_n,
            thumbs_on ? "thumbnails 320x180" : "no thumbnails", (unsigned long long)(spike_ns / 1000000),
@@ -252,7 +250,7 @@ static void dump_main(void *arg) {
         for (int pass = 0; pass < 2 && pb.raw && pb.z && pb.head && px; pass++) {
             if (pass) plat_sleep_ms(200);
             for (int i = pass ? (j->n > 8 ? j->n - 8 : 0) : 0; i < j->n; i++) {
-                if (have[i] || !vk_thumbs_read(j->r[i].frame, px)) continue;
+                if (have[i] || !gfx_backend()->thumbs_read(j->r[i].frame, px)) continue;
                 char path[PLAT_PATH_MAX + 32];
                 snprintf(path, sizeof path, "%s/f%06llu.png", j->dir, (unsigned long long)j->r[i].frame);
                 if (write_png(path, px, &pb)) have[i] = 1, n_thumbs++;
@@ -326,8 +324,8 @@ void flight_frame(uint64_t frame, uint64_t now_ns, uint64_t interval_ns, const u
     r->t_ns = now_ns - t0_ns;
     r->interval_us = (uint32_t)(interval_ns / 1000);
     for (int k = 0; k < PERF_N; k++) r->blocked_us[k] = (uint32_t)(blocked_ns[k] / 1000);
-    // vk_exec_frame grows until vk_exec_frame_log resets it, which TOTK_TRACE=gfx does right after this call
-    const VkExecFrame *x = &vk_exec_frame;
+    // the counters grow until the back end's frame log resets them, which TOTK_TRACE=gfx does right after this call
+    const GfxExecFrame *x = gfx_backend()->exec_frame();
     int reset = (rt_trace & RT_TRACE_GFX) != 0;
     r->n[C_SUBMITS] = (uint32_t)(x->submits - (reset ? 0 : prev_exec.submits));
     r->n[C_PASSES] = (uint32_t)(x->passes - (reset ? 0 : prev_exec.passes));

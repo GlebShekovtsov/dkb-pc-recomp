@@ -1,4 +1,4 @@
-// NaN kept out of the colour targets (vk_pipeline.c make_module_linked, DKB_NAN_GUARD).
+// NaN kept out of the colour targets (gfx_spirv.c gfx_spirv_final, DKB_NAN_GUARD).
 //
 // A NaN written to a float render target does not stay one pixel: Bananza's bloom filters the HDR scene through a mip
 // chain with linear sampling, every tap that touches the NaN texel turns NaN, and the composite (the fragment stage of

@@ -47,6 +47,9 @@ static int layer_present(const char *name) {
     return found;
 }
 
+// An instance extension the loader offers. Enabling one it does not offer fails vkCreateInstance outright, so
+// create_instance asks first: for the HDR10 colour-space extension, for what DLSS wants, and on macOS for the
+// portability enumeration extension.
 static int instance_ext_present(const char *name) {
     uint32_t n = 0;
     vkEnumerateInstanceExtensionProperties(NULL, &n, NULL);
@@ -70,20 +73,6 @@ static void mesa_cache_beside_exe(void) {
     strcpy(cut + 1, "mesa-cache");
     plat_setenv("MESA_SHADER_CACHE_DIR", dir);
 }
-
-#ifdef __APPLE__
-// An instance extension the loader offers. Enabling one it does not offer fails vkCreateInstance outright, so the
-// portability enumeration extension below is checked first (macOS only, create_instance).
-static int instance_ext_present(const char *name) {
-    uint32_t n = 0;
-    vkEnumerateInstanceExtensionProperties(NULL, &n, NULL);
-    VkExtensionProperties *e = calloc(n ? n : 1, sizeof *e);
-    vkEnumerateInstanceExtensionProperties(NULL, &n, e);
-    int found = has_ext(e, n, name);
-    free(e);
-    return found;
-}
-#endif
 
 static int create_instance(void) {
     mesa_cache_beside_exe();
@@ -320,7 +309,7 @@ static int create_device(void) {
     OPTIONAL_EXT(has_provoking_vertex, VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME, pv, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROVOKING_VERTEX_FEATURES_EXT);
     OPTIONAL_EXT(has_robustness2, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME, rob2, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT);
     OPTIONAL_EXT(has_device_fault, VK_EXT_DEVICE_FAULT_EXTENSION_NAME, fault, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT);
-    // Ryujinx's SPIR-V declares fragment shader interlock whenever the host reports it (vk_pipeline.c spirv_fixup).
+    // Ryujinx's SPIR-V declares fragment shader interlock whenever the host reports it (spirv_rewrite.c spirv_fixup_linked).
     OPTIONAL_EXT(has_fragment_shader_interlock, VK_EXT_FRAGMENT_SHADER_INTERLOCK_EXTENSION_NAME, fsi,
                  VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_INTERLOCK_FEATURES_EXT);
     // Maxwell applies primitive restart to list draws too (docs/maxwell.md 5.2); core Vulkan only to strips and fans.
@@ -478,7 +467,7 @@ static int create_device(void) {
 static long g_errors_total;     // outlives the device so the probe can print it after vk_shutdown
 
 static void destroy_all(void) {
-    gfx_window_release_vk();
+    vk_present_release();
     if (g_vk.device) vkDeviceWaitIdle(g_vk.device);
     if (g_vk.device) vk_clear_shutdown(g_vk.device);
     if (g_vk.device) vk_dlss_release();

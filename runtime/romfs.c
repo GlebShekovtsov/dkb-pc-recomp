@@ -651,12 +651,30 @@ static int handle_source(uint64_t h, PlatFile **f, uint64_t *base, uint64_t *siz
     return 1;
 }
 
+// Writes the index entry of an open handle into buf ("?" when it has none) and returns buf, for the slow-read report
+// below: a read that takes tens of milliseconds blocks the guest thread that asked for it, which is what a stalled
+// frame looks like from inside the port. The caller owns buf, because several guest threads read at once.
+static const char *read_name(uint64_t h, char *buf, size_t cap) {
+    uint64_t off = 0, sz = 0;
+    const char *p = NULL;
+    if (romfs_handle(h)) {
+        size_t j = (size_t)(h - ROMFS_HANDLE_BASE);
+        plat_mutex_lock_shared(&lock);
+        uint64_t i = handles[j];
+        plat_mutex_unlock_shared(&lock);
+        if (i) p = romfs_entry(i, &off, &sz);
+    }
+    snprintf(buf, cap, "%s", p ? p : "?");
+    return buf;
+}
+
 uint32_t romfs_read(uint64_t *out, uint64_t h, int64_t offset, void *buffer, uint64_t size) {
     PlatFile *f;
     uint64_t base, fsize;
     if (!out || offset < 0 || !handle_source(h, &f, &base, &fsize)) return FS_R_INVALID;
     if ((uint64_t)offset > fsize || (!buffer && size)) return FS_R_INVALID;
     uint64_t n = size < fsize - (uint64_t)offset ? size : fsize - (uint64_t)offset, done = 0;
+    uint64_t t0 = kern_now_ns();
     if (f == image && image_map) {
         memcpy(buffer, image_map + base + (uint64_t)offset, (size_t)n);
         done = n;
@@ -666,6 +684,12 @@ uint32_t romfs_read(uint64_t *out, uint64_t h, int64_t offset, void *buffer, uin
         int64_t r = read_at(f, (uint8_t *)buffer + done, chunk, base + (uint64_t)offset + done);
         if (r <= 0) rt_fatal("RomFS read failure at %#llx", (unsigned long long)(base + offset + done));
         done += (uint64_t)r;
+    }
+    uint64_t dt = kern_now_ns() - t0;
+    if (dt >= 50000000ull) {   // 50 ms: long enough to be the whole frame
+        char name[160];
+        rt_log("romfs: slow read %s: %llu KiB in %.1f ms%s", read_name(h, name, sizeof name),
+               (unsigned long long)(n / 1024), dt / 1e6, f == image && image_map ? ", from the mapping" : "");
     }
     *out = done;
     return 0;

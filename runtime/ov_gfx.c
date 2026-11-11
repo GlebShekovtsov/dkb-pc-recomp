@@ -154,7 +154,7 @@ void hdr_trace_dump(const char *name, const void *p) {
 // ---- Switch 2 vi calls (Donkey Kong Bananza): the host presents SDR with a fixed swap interval and no VRR.
 // DKB_HDR_NATIVE=1 (cfg HDR_NATIVE, docs/hdr-native-plan.md) reports an HDR display instead, so the game
 // switches to its own HDR output: the 3.2.0 display object (main+0x203728) stores the answer, the peak caps its content
-// luminance and the paper white scales its HUD and SDR content. gfx_present.c present_image then copies the game's
+// luminance and the paper white scales its HUD and SDR content. vk_present.c present_image then copies the game's
 // HDR10 window texture onto the HDR10 swapchain. Only on 3.2.0 (dkb458752) with hdr = 1: 1.0.0 imports the same calls
 // by name, but its HDR mode has never been run, so it keeps the SDR answer.
 int hdr_native_on(void) {

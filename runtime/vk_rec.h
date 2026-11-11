@@ -1,5 +1,5 @@
 // The recorder thread (vk_rec.c): the Vulkan calls the replay makes into its command buffer are made by a thread of
-// their own. vk_sync.c brackets each part of a submission with rec_begin (after vkBeginCommandBuffer) and rec_end
+// their own. vk_sync.c brackets each part of a submission with rec_begin (after vkBeginCommandBuffer, unless TOTK_REC_BEGIN=1: rec_begin_part) and rec_end
 // (before vkEndCommandBuffer). In between, every vkCmd* on that command buffer copies its arguments into a packet of a
 // ring, in call order, and the recorder makes the real call in that order; calls into any other command buffer (uploads,
 // the window, probes) are made at once. A call the ring has no packet for (a structure with a pNext chain) waits for
@@ -16,6 +16,10 @@
 #pragma once
 
 void rec_begin(VkCommandBuffer cb);   // the submitting thread, sub_lock held
+// TOTK_REC_BEGIN=1: begins part cb (vkBeginCommandBuffer, the submit crumb, the start timestamp of query pair ts_pair
+// of ts_pool, -1 none) on the recorder, or here when there is no recorder, and calls rec_begin (1). Off: does nothing (0)
+// and the caller begins cb and calls rec_begin itself.
+int rec_begin_part(VkCommandBuffer cb, uint64_t fence, int ts_pair, VkQueryPool ts_pool);
 void rec_end(void);                   // waits for the recorder; no-op when rec_begin did not start it
 // The end of part cb: the breadcrumb crumb (0: none, vk_crumbs.c), then vkEndCommandBuffer, both made by the recorder
 // when it records cb, and the wait for it (1); otherwise rec_end and the breadcrumb, and the caller ends cb (0).

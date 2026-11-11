@@ -1,4 +1,4 @@
-// Screen-space varyings rebuilt from the fragment's own position (vk_pipeline.c make_module_linked).
+// Screen-space varyings rebuilt from the fragment's own position (gfx_spirv.c gfx_spirv_final).
 //
 // Some fragment stages read their own screen position as varyings the vertex stage computed after its perspective
 // divide and passed down NoPerspective. Bananza's map mask (NVN 2 fragment stage 81f30a4006e64d83, pass "R8 mask"

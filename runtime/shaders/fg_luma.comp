@@ -1,0 +1,16 @@
+#version 450
+// From Hookshot gpu/vk/shaders/fg_luma.comp, https://github.com/NotRexed/Hookshot @ fab8cb37641714bd839ae83c2a7bc582bedc4d70, GPL-3.0
+// quarter-size luma of a frame (each texel the mean of 4x4 pixels)
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D src;
+layout(binding = 1, r16f) uniform writeonly image2D dst;
+void main() {
+    const ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(g, imageSize(dst)))) return;
+    const ivec2 s = textureSize(src, 0) - 1;
+    float sum = 0.0;
+    for (int y = 0; y < 4; y++)
+        for (int x = 0; x < 4; x++)
+            sum += dot(texelFetch(src, min(g * 4 + ivec2(x, y), s), 0).rgb, vec3(0.299, 0.587, 0.114));
+    imageStore(dst, g, vec4(sum / 16.0));
+}

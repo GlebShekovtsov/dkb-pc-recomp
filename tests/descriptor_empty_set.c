@@ -40,7 +40,7 @@ static int push_skip_on(void) { return 0; } // exercise every push
 static int bind_sig(const VkExec *ex,const VkPipeInfo *info) { (void)ex; (void)info; abort(); }
 void vk_mem_count(int cls,int use,uint64_t bytes) { (void)cls; (void)use; (void)bytes; abort(); }
 static void support_in(const VkExec *ex,float in[3]) { (void)ex; (void)in; abort(); }
-static void support_fill(uint8_t *out,float x,float y,float z) { (void)out; (void)x; (void)y; (void)z; abort(); }
+void gfx_support_fill(uint8_t *out,float x,float y,float z) { (void)out; (void)x; (void)y; (void)z; abort(); }
 static void *scratch(VkExec *ex,uint32_t n,VkBuffer *buffer,VkDeviceSize *offset) {
     (void)ex; (void)n; (void)buffer; (void)offset; abort();
 }

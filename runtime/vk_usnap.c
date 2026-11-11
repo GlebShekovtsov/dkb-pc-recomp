@@ -68,6 +68,8 @@ static void *grow(void *p, int *cap, size_t elem) {
     return q;
 }
 
+static volatile uint64_t arena_total;   // bytes of every arena created; arenas are only freed at shutdown
+
 static Arena *arena_get(uint64_t need) {
     plat_mutex_lock(&free_lock);
     Arena **pp = &free_arenas, *a = NULL;
@@ -96,6 +98,7 @@ static Arena *arena_get(uint64_t need) {
         return NULL;
     }
     a->map = info.pMappedData;
+    __atomic_fetch_add(&arena_total, a->size, __ATOMIC_RELAXED);
     rt_log("vk_usnap: new arena of %.1f MiB", a->size / 1048576.0);
     return a;
 }
@@ -325,11 +328,13 @@ void vk_usnap_drop(uint64_t addr, uint64_t n) {
 }
 
 uint64_t vk_usnap_gen(void) { return U.gen; }
+uint64_t vk_usnap_arena_bytes(void) { return __atomic_load_n(&arena_total, __ATOMIC_RELAXED); }
 
 // The arenas back on the free list (vk_exec_draw_shutdown: the device is idle, every completion ran).
 void vk_usnap_shutdown(void) {
     plat_mutex_lock(&free_lock);
     for (Arena *a = free_arenas, *next; a; a = next) next = a->next, vmaDestroyBuffer(vk_ctx()->vma, a->buf, a->alloc), free(a);
     free_arenas = NULL;
+    __atomic_store_n(&arena_total, 0, __ATOMIC_RELAXED);
     plat_mutex_unlock(&free_lock);
 }

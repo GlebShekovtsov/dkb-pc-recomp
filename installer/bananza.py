@@ -826,7 +826,11 @@ def main(options):
         ensure_plain(raw_base)
         base = raw_base.resolve()
         tag = hashlib.sha256(str(dest).lower().encode()).hexdigest()[:12]
-        temp = base / f'dkb-{dest.name}-{tag}'
+        # The work folder's name goes onto compiler and MSBuild command lines that split on spaces (issue 134): keep
+        # only characters that need no quoting. The tag already tells two destinations apart; a name that was safe
+        # keeps its folder, so an interrupted setup still resumes.
+        safe = ''.join(ch if ch.isascii() and (ch.isalnum() or ch in '._-') else '_' for ch in dest.name)
+        temp = base / f'dkb-{safe}-{tag}'
         info = preflight(layout, options, dest, temp, rep)
         # All read-only validation succeeded. Logs and owned output may now be created.
         temp.mkdir(parents=True, exist_ok=True)

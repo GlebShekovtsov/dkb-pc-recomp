@@ -6,10 +6,11 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "cfg.h"
 #include "fs.h"
+#include "gfx.h"
 #include "host.h"
 #include "kernel.h"
-#include "vk.h"
 #include "platform/platform.h"
 
 #define R_OK 0u
@@ -136,12 +137,34 @@ static void get_info(Cpu *c, uint64_t pc) {
     c->x[1] = v;
 }
 
+// TOTK_SVC_SLOW=1 (the environment or totk.ini): time every guest service call and report the ones that block for 100 ms or more, with the guest address
+// that asked for it. A call this slow stalls the whole guest (and leaves the GPU idle while it runs), which is what the
+// once-per-run hitch looks like; the sampler cannot name it because the wait happens across a kernel transition.
+static int svc_slow_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = cfg_get("TOTK_SVC_SLOW");
+        on = e && *e && strcmp(e, "0");
+    }
+    return on;
+}
+
+static void svc_slow_note(uint32_t imm, uint64_t pc, uint64_t t0) {
+    uint64_t dt = kern_now_ns() - t0;
+    if (dt < 100000000ull) return;
+    char at[160];
+    rt_log("svc: %#x blocked for %.1f ms at %.1f s tid %u, called from %s", imm, dt / 1e6, (kern_now_ns() - rt_guest_start_ns) / 1e9, (unsigned)plat_thread_id(), ldr_describe(pc, at, sizeof at));
+}
+
 static void svc_body(Cpu *c, uint32_t imm, uint64_t pc);
 
 void rt_svc(Cpu *c, uint32_t imm, uint64_t pc) {
     kern_checkpoint();
+    int tm = svc_slow_on();
+    uint64_t t0 = tm ? kern_now_ns() : 0;
     if (__builtin_expect(!kern_host_track || !c->thread, 1)) {
         svc_body(c, imm, pc);
+        if (tm) svc_slow_note(imm, pc, t0);
         return;
     }
     void *t = c->thread;   // kern_host_track: the SVC counted in the thread's host depth (hostfn.c hostfn_tracked)
@@ -151,6 +174,7 @@ void rt_svc(Cpu *c, uint32_t imm, uint64_t pc) {
     int n = *d - 1;
     __atomic_store_n(d, n, __ATOMIC_RELAXED);
     if (!n && kern_preempt_pending(t)) kern_host_left(t);
+    if (tm) svc_slow_note(imm, pc, t0);
 }
 
 static void svc_body(Cpu *c, uint32_t imm, uint64_t pc) {
@@ -219,7 +243,7 @@ static void svc_body(Cpu *c, uint32_t imm, uint64_t pc) {
         char at[160];
         rt_log("guest ExitProcess at %s; exiting", ldr_describe(pc, at, sizeof at));
         fs_save_flush();
-        vk_pipeline_save();
+        gfx_backend()->save();
         prof_write();
         fflush(NULL);
         if (svc_test_exit_hook) return svc_test_exit_hook(0);

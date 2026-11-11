@@ -43,7 +43,7 @@ enum {
     R_SetDepthWriteEnable, R_SetFrontFace, R_SetPrimitiveRestartEnable, R_SetPrimitiveTopology,
     R_SetRasterizerDiscardEnable, R_SetScissorWithCount, R_SetStencilCompareMask, R_SetStencilOp, R_SetStencilReference,
     R_SetStencilTestEnable, R_SetStencilWriteMask, R_SetViewportWithCount, R_WriteTimestamp, R_WriteTimestamp2,
-    R_PushTpl, R_Push, R_VertexInput, R_Bool, R_PolygonMode, R_BlendEnable, R_BlendEquation, R_WriteMask, R_EndCb, R_Crumb, R_Checkpoint,
+    R_PushTpl, R_Push, R_VertexInput, R_Bool, R_PolygonMode, R_BlendEnable, R_BlendEquation, R_WriteMask, R_EndCb, R_Crumb, R_Checkpoint, R_BeginCb,
 };
 
 static uint64_t now_ns(void) { return plat_now_ns(); }
@@ -202,6 +202,41 @@ int rec_end_cb(VkCommandBuffer cb, int crumb, uint64_t n) {
     pub();
     rec_drain();
     rec_live = 0;
+    return 1;
+}
+
+// TOTK_REC_BEGIN (default 0): the thread that records a part also begins it: vkBeginCommandBuffer, the submission crumb
+// and the start timestamp pair go into the ring ahead of the part's commands, so on the AMD proprietary driver on
+// Windows no call into the buffer is made by the submitting thread (the same class as TOTK_REC_END, issue #5).
+// The timestamp pair (ts_pair, -1 none) is picked by the submitting thread, which owns that state.
+typedef struct { uint64_t fence; VkQueryPool pool; int pair; } A_BeginCb;
+static void begin_cb(VkCommandBuffer cb, const A_BeginCb *a) {
+    VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                   .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+    vkBeginCommandBuffer(cb, &bi);
+    vk_crumb(cb, VK_CRUMB_SUBMIT, a->fence);
+    if (a->pair < 0) return;
+    vkCmdResetQueryPool(cb, a->pool, 2 * (uint32_t)a->pair, 2);
+    vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, a->pool, 2 * (uint32_t)a->pair);
+}
+
+int rec_begin_part(VkCommandBuffer cb, uint64_t fence, int ts_pair, VkQueryPool ts_pool) {
+    static int mode = -1;
+    if (mode < 0) {
+        mode = rt_knob("REC_BEGIN", "0");
+        rt_log("vk_rec: a part the recorder records is begun by %s (TOTK_REC_BEGIN=%d)",
+               mode ? "the recorder" : "the submitting thread", mode);
+    }
+    if (!mode) return 0;
+    A_BeginCb a = {fence, ts_pool, ts_pair};
+    rec_begin(cb);
+    if (!rec_live) {   // no recorder: begin it here, in the same order
+        begin_cb(cb, &a);
+        return 1;
+    }
+    A_BeginCb *p = put(R_BeginCb, sizeof *p);
+    *p = a;
+    pub();
     return 1;
 }
 
@@ -676,6 +711,7 @@ static void exec_packet(uint32_t op, void *p) {
     case R_WriteMask: { A_Targets *a = p; ((PFN_vkCmdSetColorWriteMaskEXT)a->fn)(cb, a->first, a->n, a->v); break; }
     case R_Checkpoint: { A_Checkpoint *a = p; vk_checkpoint(cb, a->marker); break; }
     case R_Crumb: { A_Crumb *a = p; vk_crumb(cb, a->kind, a->n); break; }
+    case R_BeginCb: begin_cb(cb, p); break;
     case R_EndCb: {
         A_EndCb *a = p;
         if (a->kind) vk_crumb(cb, a->kind, a->n);

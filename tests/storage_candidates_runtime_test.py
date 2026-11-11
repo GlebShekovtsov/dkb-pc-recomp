@@ -89,7 +89,7 @@ int vk_mem_resolve(uint64_t addr, uint64_t n, VkMemSpan *span) {
     updates = draw[draw.index('#define UPD_N '):draw.index('static void upd_note(')]
     pieces = [function(draw, start) for start in (
         'static VkDescriptorBufferInfo zero_info(', 'static int bind_range(',
-        'static void c0_table(', 'void vk_c0_fill(', 'static int find_stage_scan(',
+        'void vk_c0_fill(', 'static int find_stage_scan(',
         'static int ssbo_slot(', 'static int ubo_ptr_res(')]
     pieces += [updates, function(draw, 'static void upd_note('), function(draw, 'static int upd_read('),
                function(draw, 'static uint64_t ubo_ptr('),
@@ -275,7 +275,8 @@ def main():
     for opt in ('-O0', '-O2'):
         exe = out / ('runtime' + opt + '.exe')
         command = [args.cc, opt, '-Wall', '-Wextra', '-Werror', '-I', str(ROOT / 'runtime'),
-                   '-I', str(args.deps / 'include'), '-I', str(args.deps / 'include/vma'), str(src), '-o', str(exe)]
+                   '-I', str(args.deps / 'include'), '-I', str(args.deps / 'include/vma'), str(src),
+                   str(ROOT / 'runtime/gfx_c0.c'), '-o', str(exe)]   # vk_c0_fill's bank is gfx_c0_fill's
         run = subprocess.run(command, capture_output=True, text=True)
         (out / (opt + '-compile.log')).write_text(run.stdout + run.stderr)
         if run.returncode:
