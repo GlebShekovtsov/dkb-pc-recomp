@@ -63,6 +63,10 @@ static void descriptor_state(VkExec *ex) { (void)ex; }
 uint32_t vk_texture_slots_gen(void) { return 0; }
 uint32_t vk_texture_epoch(void) { return 0; }
 uint32_t vk_sampler_gen(void) { return 0; }
+int vk_exec_par_slice(void) { return 0; }
+static int tex_info_hit(VkExec *ex,const GfxShaderRes *r,uint64_t h,int separate,VkDescriptorImageInfo *out) {
+    (void)ex; (void)r; (void)h; (void)separate; (void)out; abort();
+}
 
 // Bounded malloc storage supplies alignment without imposing an array's declared
 // effective type. The real producers decide packet sizes and copy every payload.

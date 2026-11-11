@@ -166,8 +166,20 @@ extern "C" int nvn2_lower(const uint8_t *control, const uint8_t *code, const uin
 
 // The dump name (gfx_shader_nvn2_hash) of the NVN 2 stage a lowered code buffer came from, or 0. Lowered buffers live
 // for the process, so their addresses never name another stage.
+// Each thread keeps its answers, the empty ones too: draws ask for every stage (note_origin in gfx_shader.c for stages
+// with no origin), and with parallel replay slices (vk_exec.c) the lock was taken by up to eight threads per draw. An
+// answer cannot change: a lowered buffer is registered before its address is handed out, and a code address that is
+// not one never becomes one, since lowered buffers are never freed.
 extern "C" uint64_t nvn2_origin(const uint8_t *code) {
-    std::lock_guard<std::mutex> g(lock);
-    auto it = origins.find(code);
-    return it == origins.end() ? 0 : it->second;
+    static thread_local struct { const uint8_t *code; uint64_t origin; } memo[256];
+    auto &m = memo[(reinterpret_cast<uintptr_t>(code) >> 4 ^ reinterpret_cast<uintptr_t>(code) >> 12) & 255];
+    if (code && m.code == code) return m.origin;
+    uint64_t o;
+    {
+        std::lock_guard<std::mutex> g(lock);
+        auto it = origins.find(code);
+        o = it == origins.end() ? 0 : it->second;
+    }
+    m.code = code, m.origin = o;
+    return o;
 }
