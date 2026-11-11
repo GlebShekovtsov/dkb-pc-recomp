@@ -302,6 +302,13 @@ within the frame, and the GPU started on a submission only once most of its repl
 replay plus the GPU work. Draws collected for slices did not count towards a command buffer split; from the next commit
 they do, so a split follows a big sliced pass and the GPU starts on it while the rest is replayed.
 
+### Splits after sliced passes: 43-47 fps (0b239bc)
+
+Eight threads, the hills, standing still: 42.3-46.7 fps (21.4-23.7 ms a frame) against 35-35.6 at af96356, with the
+same 28,400 draws a frame. A submission now goes to the queue in 2.2 parts (1.62 before), the game's other threads
+wait 5.6 ms a frame on fences (12.4 before), the GPU takes 11.1 ms, and the replay 13.5-14.4 ms (the splits cost a
+little). The frame is still bound by the CPU: the render thread is busy 21.4-23 ms.
+
 ## Plan
 
 1. **Measure and remove the cheap waste** (done here).
