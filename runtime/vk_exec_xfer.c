@@ -138,6 +138,8 @@ static unsigned pending_head;
 static VkQueryPool oq_pool;
 static int oq_state;                     // 0 not set up, 1 counting available, -1 unavailable
 static VkQueryControlFlags oq_flags;
+static int oq_inherit;                   // inheritedQueries: a secondary command buffer may run inside the query
+static int oq_outside;                   // the open query began before its pass and ends after it (sliced passes)
 static volatile uint8_t oq_busy[OQ_N];   // from begin until the completion thread read and reset the slot
 static uint32_t oq_next;                 // replay: next ring slot
 static int oq_counting;                  // replay: draws are counted (a reset since the last report, or oq_keep)
@@ -172,6 +174,7 @@ static int oq_ready(void) {
     }
     vkResetQueryPool(v->device, oq_pool, 0, OQ_N);
     oq_flags = f2.features.occlusionQueryPrecise ? VK_QUERY_CONTROL_PRECISE_BIT : 0;
+    oq_inherit = f2.features.inheritedQueries != 0;
     oq_state = 1;
     return 1;
 }
@@ -204,8 +207,32 @@ void vk_exec_oq_draw(VkExec *ex) {
     oq_open = (int)q;
 }
 
-void vk_exec_oq_pass_end(VkExec *ex) { oq_close(ex); }
+void vk_exec_oq_pass_end(VkExec *ex) {
+    if (!oq_outside) oq_close(ex);
+}
 int vk_exec_oq_idle(void) { return !oq_counting && oq_open < 0; }
+
+// Sliced passes (vk_exec.c par_start): a pass of secondary command buffers takes no query command, so its query begins
+// before vkCmdBeginRendering and ends after vkCmdEndRendering (vk_exec_oq_pass_ended), and the slices inherit it.
+// 0: draws are not counted now; 1: the query is open, *flags its control flags (a full ring also gives 1 with *open 0:
+// the draws go uncounted as on the plain path); -1: the device cannot inherit queries, the pass must not be sliced.
+int vk_exec_oq_begin_outside(VkExec *ex, VkQueryControlFlags *flags, int *open) {
+    *open = 0;
+    if (!oq_counting) return 0;
+    if (!oq_inherit) return -1;
+    if (oq_open < 0) vk_exec_oq_draw(ex);
+    *flags = oq_flags, *open = oq_open >= 0;
+    oq_outside = oq_open >= 0;
+    return 1;
+}
+
+void vk_exec_oq_pass_ended(VkExec *ex) {
+    if (!oq_outside) return;
+    oq_outside = 0;
+    oq_close(ex);
+}
+
+int vk_exec_oq_counting(void) { return oq_counting; }
 
 void vk_exec_xfer_shutdown(void) {
     if (oq_state > 0) vkDestroyQueryPool(vk_ctx()->device, oq_pool, NULL);

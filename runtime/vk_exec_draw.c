@@ -446,6 +446,7 @@ int vk_exec_reset_indirect(VkExec *ex, uint64_t list_addr, uint32_t descriptor_b
 #ifdef VK_EXEC_DRAW_HELPER
     if (vk_spec_fail(VK_SPEC_WRITE)) return 0;   // reads a buffer back and rewrites it: both need the earlier parts
 #endif
+    if (vk_exec_par_slice()) return vk_exec_par_hazard(), 0;   // barriers and reads: the primary's (sliced passes)
     NvnIndirectResetList list;
     if (!nvn_indirect_reset_list(list_addr, descriptor_bytes, first, count, &list)) return 0;
     uint64_t *pointers = malloc(list.bytes);
@@ -2904,6 +2905,12 @@ static int skip_fs_listed(const VkExec *ex) {
 static struct { int on, valid, has_fs, has_gs; MemoKey k; const GfxShader *vs, *fs, *gs; } SM_m = {-1};
 static _Thread_local __typeof__(SM_m) *SM_tp = &SM_m;
 #define SM (*SM_tp)
+void vk_exec_draw_slice_begin(void) {
+    memset(&B, 0, sizeof B);
+    bind_gen++;              // the descriptor-build record (RS) compared against another replay state
+    SM.valid = 0;            // the shader memo keys on texture bind serials of another replay state
+    RS.info = NULL;
+}
 
 // Numeric handles are relative to the active descriptor tables. Keep the per-handle memos only while those tables
 // and their address mappings stay unchanged. A sampler table switch also changes combined image descriptors.
