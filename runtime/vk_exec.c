@@ -969,6 +969,11 @@ static void maybe_split(VkExec *ex) {
         split_n = cfg_int("TOTK_SPLIT_DRAWS");
         if (split_n < 0) split_n = 0;
         int us = cfg_int("TOTK_SPLIT_US");
+        // With the replay recorded on several threads (TOTK_REPLAY_THREADS above 1) the default is 300 us: in the
+        // hills region on eight threads, parts of at least 300 us gave 47-49 fps against 43-47 with 1000 us and 45-47
+        // with none, since the GPU starts sooner on the big passes the game waits for within the frame.
+        const char *threads = cfg_get("TOTK_REPLAY_THREADS");
+        if (!cfg_is_set("TOTK_SPLIT_US") && threads && atoi(threads) > 1) us = 300;
         split_ns = us > 0 ? (uint64_t)us * 1000 : 0;
         rt_log("vk: replay command buffer split every %d draws between passes, parts of at least %d us%s", split_n,
                us > 0 ? us : 0, split_n ? "" : " (off)");

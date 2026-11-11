@@ -309,6 +309,12 @@ same 28,400 draws a frame. A submission now goes to the queue in 2.2 parts (1.62
 wait 5.6 ms a frame on fences (12.4 before), the GPU takes 11.1 ms, and the replay 13.5-14.4 ms (the splits cost a
 little). The frame is still bound by the CPU: the render thread is busy 21.4-23 ms.
 
+### Shorter parts: 47-49 fps (0b239bc with `DKB_SPLIT_US`)
+
+The same spot on eight threads: parts of at least 300 us gave 46.8-48.8 fps (20.5-21.4 ms a frame, 3.04 parts a
+submission, the game's threads waiting 4.9 ms a frame on fences, GPU 10.5 ms); no minimum gave 43.7-46.9 fps with
+3.09 parts. With more than one replay thread, `TOTK_SPLIT_US` now defaults to 300.
+
 ## Plan
 
 1. **Measure and remove the cheap waste** (done here).
