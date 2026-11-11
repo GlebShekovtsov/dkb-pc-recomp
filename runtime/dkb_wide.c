@@ -10,6 +10,16 @@
 static unsigned wide_output[2] = {2880, 1620};
 static int wide_enabled;
 
+// The game's render-target pool is a fixed 200 MiB sized for 2880x1620 (main+0x458adc in
+// f_7000458a88). Grow it with the output pixel count, rounded up to 2 MiB, never below the
+// default. The highest accepted output (7680x4320) needs 1424 MiB (about 1.39 GiB), which fits uint32_t.
+static uint32_t dkb_wide_pool_bytes(unsigned w, unsigned h) {
+    const uint64_t base = 0xc800000, align = 2u << 20;
+    uint64_t bytes = (base * w * h + 2880ull * 1620 - 1) / (2880ull * 1620);
+    bytes = (bytes + align - 1) / align * align;
+    return (uint32_t)(bytes > base ? bytes : base);
+}
+
 int dkb_wide_output(unsigned out[2]) {
     if (out) memcpy(out, wide_output, sizeof wide_output);
     return wide_enabled;
@@ -48,6 +58,8 @@ void dkb_wide_init(void) {
     memcpy(page + 0x104, &height, 4);
     memcpy(page + 0x108, &aspect, 4);
     memcpy(page + 0x10c, &factor, 4);
+    uint32_t pool = dkb_wide_pool_bytes(width, height);
+    memcpy(page + 0x110, &pool, 4);
     wide_output[0] = width;
     wide_output[1] = height;
     wide_enabled = width * 9 > height * 16;

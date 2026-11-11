@@ -78,7 +78,7 @@ vsync and a 40 fps limit. These are starting points, not measurements. What help
 
 1. The performance overlay (F10, or both stick clicks L3 + R3) in full mode: the frame rate, mean and longest frame
    time over a minute in Lookout Landing, in the Depths and in the Sky, with the settings named.
-2. The same with `fps_limit` 30, 45 and 60 and `render_scale` 50, 67 and game, so the defaults can be picked from
+2. The same with `fps_limit` 30, 45 and 60 and `render_scale` 50, 67 and game (TotK only; Bananza's HUD shows the game's own upscaler sizes), so the defaults can be picked from
    measurements. Steam's own performance overlay (the ... button) adds power draw and temperatures.
 3. LCD or OLED, SteamOS version (`uname -r` in Desktop Mode's terminal), and the game update.
 4. Anything that looks stretched, squeezed or cut off, with a screenshot. At 16:10 the menus keep their 16:9

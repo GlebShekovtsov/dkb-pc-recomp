@@ -4,8 +4,9 @@
 # '#' and ';' start a comment; [sections] only group lines.
 
 [frame rate]
-# Frame rate limit: 30, 40, 45, 60, 90, 120, 144, any whole rate from 30 to 360, or display (the refresh rate of the
-# window's monitor). Above 60 is experimental and needs realtime = 1. Changes while the game runs take effect at once.
+# Frame rate limit: 30, 40, 45, 60, 90, 120, 144, any whole rate from 30 to 360, display (the refresh rate of the
+# window's monitor) or unlimited (no wait; with vk_present = fifo the monitor still caps it). Above 60 and unlimited
+# are experimental and need realtime = 1. Changes while the game runs take effect at once.
 # fps_limit = 60
 # Older key, read only while fps_limit is unset: fps60 = 0 means a limit of 30.
 # fps60 = 1
@@ -140,6 +141,7 @@
 # output_res = 1920x1080
 # 3D render scale: the scene's size relative to the game resolution, game (5/6, the game's own 1600x900 at 1080p) or
 # a percentage (25 to 400, at most 4096 pixels a side); above 100 supersamples the scene (anti-aliasing). Read at start.
+# TotK only: Bananza draws at the game's own size, and the HUD and dkb.log report its upscaler's input and output sizes.
 # render_scale = game
 # Scaling to the window when it is larger than the game resolution: fsr (AMD FSR 1) or bilinear, and FSR's sharpening
 # from 0 (off) to 100. Changes while the game runs take effect at once.
@@ -180,6 +182,13 @@
 # hdr_peak_nits = 1000
 # hdr_game_nits = 203
 # hdr_ui_nits = 203
+# Bananza 3.2.0 only (untested on 1.0.0, where it stays off), read at start: with hdr = 1,
+# hdr_native = 1 lets the game make its own HDR10 picture (the console's HDR mode) instead of lifting the SDR one, while
+# the swapchain is HDR10; hdr_peak_nits and hdr_game_nits are what it is told the display has. The game caps its peak
+# at 1400 nits, so a higher hdr_peak_nits changes nothing there; the display is told the game's peak. Its highlights
+# reach that peak (the game's own curve stops at about 1.36 times hdr_game_nits). FSR, SMAA and the colour adjustment
+# are off with hdr_native.
+# hdr_native = 0
 
 [language]
 # Language: a Windows locale such as de-DE, or a Switch code (en-US, ja, zh-Hant, ...). Default: the Windows locale.

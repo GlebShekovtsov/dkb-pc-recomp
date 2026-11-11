@@ -1,6 +1,7 @@
 // Frame timing (TOTK_TRACE=perf, the frame-time summary, the performance overlay's counts), the A/B switches (rt_ab,
 // rt_knob) and TOTK_ONE_PER_CORE. The sampling profiler (TOTK_PROFILE) is the OS's (prof_win.c); without one the weak
 // prof_sampler_* below do nothing.
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -269,6 +270,31 @@ static void cpu_placement(void) {
     plat_process_affinity(on ? one : all);
 }
 
+// TOTK_AB: every frame's interval and replay time summed per side (A, B) once the world clock passes 10 s, logged
+// every 600 frames. Frame by frame, so blocks of a few seconds count whole (the 60-frame perf windows mostly straddle
+// them); a 2-3 s period keeps both sides on nearly the same scenery and the same CPU temperature.
+static void ab_frame(uint64_t frame, uint64_t d, uint64_t rep, int side) {
+    static int on = -1;
+    static double sum[2], rsum[2], n[2], sq[2];
+    if (on < 0) {
+        const char *e = cfg_get("TOTK_AB");
+        on = e && *e && atof(e) > 0;
+    }
+    if (!on || !d) return;
+    if (frame_step_world_us() >= 10000000 && d < 250000000ull) {
+        double ms = d / 1e6;
+        sum[side] += ms, sq[side] += ms * ms, rsum[side] += rep / 1e6, n[side]++;
+    }
+    if (frame % 600 || !n[0] || !n[1]) return;
+    double a = sum[0] / n[0], b = sum[1] / n[1], ra = rsum[0] / n[0], rb = rsum[1] / n[1];
+    double va = sq[0] / n[0] - a * a, vb = sq[1] / n[1] - b * b;
+    double se = sqrt((va > 0 ? va : 0) / n[0] + (vb > 0 ? vb : 0) / n[1]);
+    rt_log("perf: ab frames: A %.0f frames %.2f ms (%.1f fps) replay %.2f ms; B %.0f frames %.2f ms (%.1f fps) replay %.2f "
+           "ms; B-A interval %+.1f%% (+-%.1f%%), fps %+.1f%%, replay %+.1f%%",
+           n[0], a, 1000 / a, ra, n[1], b, 1000 / b, rb, 100 * (b - a) / a, 200 * se / a, 100 * (a / b - 1),
+           ra > 0 ? 100 * (rb - ra) / ra : 0);
+}
+
 void perf_present(uint64_t frame) {
     static uint64_t last, sum, max, n, win_start, ab_b;
     static int64_t win_prev[PERF_CNT_N];
@@ -277,7 +303,9 @@ void perf_present(uint64_t frame) {
     uint64_t now = kern_now_ns(), d = last ? now - last : 0;
     prof_sampler_frame(frame, now, last ? d : 0);
     uint64_t rep = ft_frame(frame, now, d);   // d is 0 on the first present: it only starts the period
-    ab_b += rt_ab();
+    int ab_side = rt_ab();
+    ab_b += ab_side;
+    ab_frame(frame, d, rep, ab_side);
     cpu_placement();
     if (__atomic_load_n(&overlay, __ATOMIC_RELAXED))   // the overlay's only cost while it is off: this branch
         perfmon_frame(now, d, frame_ns, rep, __atomic_load_n(&counts[PERF_CNT_TEX_UP], __ATOMIC_RELAXED));

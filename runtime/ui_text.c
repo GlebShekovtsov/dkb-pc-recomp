@@ -113,6 +113,11 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_HDR_DESC] = "Experimental: the game's SDR picture with its highlights lifted on an HDR display. Needs HDR turned on in Windows (\"Use HDR\") or in a "
                          "Wayland compositor with colour management; without it the picture stays SDR. Applies after a "
                          "restart.",
+    [UI_MENU_HDR_NATIVE] = "Game's own HDR",
+    [UI_MENU_HDR_NATIVE_DESC] = "With HDR output on: the game renders its own HDR picture, as on the console, with "
+                                "highlights up to Peak brightness (the game stops at 1400 nits), instead of the lifted "
+                                "SDR one. FSR, SMAA and the colour adjustment are off in this mode. Applies after a "
+                                "restart.",
     [UI_MENU_HDR_PEAK] = "Peak brightness",
     [UI_MENU_HDR_PEAK_DESC] = "Your display's peak in nits; the brightest highlights stop there.",
     [UI_MENU_HDR_GAME] = "Game brightness",
@@ -123,13 +128,15 @@ static const char *const text_en[UI_TEXT_COUNT] = {
 
     [UI_MENU_FPS_LIMIT] = "Frame rate limit",
     [UI_MENU_DKB_FPS_LIMIT_DESC] = "With Game speed follows the clock enabled, changes apply immediately. Above 60 "
-                                 "needs that experimental setting and enough CPU and GPU performance.",
+                                 "needs that experimental setting and enough CPU and GPU performance. Unlimited is experimental.",
     [UI_MENU_FPS_LIMIT_DESC] = "The most frames per second the game draws. Above 60 is experimental and needs Game speed "
-                               "follows the clock.",
+                               "follows the clock. Unlimited is experimental.",
     [UI_MENU_FPS_30] = "30 FPS", [UI_MENU_FPS_40] = "40 FPS", [UI_MENU_FPS_45] = "45 FPS",
     [UI_MENU_FPS_60] = "60 FPS", [UI_MENU_FPS_90] = "90 FPS", [UI_MENU_FPS_120] = "120 FPS", [UI_MENU_FPS_144] = "144 FPS",
     // the monitor's refresh rate; printf format with the rate in Hz when it is known
     [UI_MENU_FPS_DISPLAY] = "Monitor rate", [UI_MENU_FPS_DISPLAY_HZ] = "Monitor rate (%.0f Hz)",
+    [UI_MENU_FPS_UNLIMITED] = "Unlimited",
+    [UI_MENU_FPS_NEEDS_REALTIME] = "Needs Game speed follows the clock (restart): limits below and above 60 FPS",
     [UI_MENU_REALTIME] = "Game speed follows the clock",
     [UI_MENU_REALTIME_DESC] = "Steps the game by real time, so a slow frame does not slow the game down.",
     [UI_MENU_DKB_REALTIME_DESC] = "Experimental; off by default. Adjusts game timing to measured frame duration. "
@@ -327,6 +334,8 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_OV_WINDOW] = "Window", [UI_MENU_OV_OUTPUT] = "Game image", [UI_MENU_OV_SCENE] = "3D scene",
     [UI_MENU_OV_SCALING] = "Scaling", [UI_MENU_OV_LIMIT] = "Frame limit", [UI_MENU_OV_PRESENT] = "Presentation",
     [UI_MENU_OV_FMT_SIZE] = "%ux%u", [UI_MENU_OV_FMT_SCENE] = "%ux%u, %.0f%%",
+    [UI_MENU_OV_FMT_UPSCALE] = "%ux%u -> %ux%u",
+    [UI_MENU_OV_NO_UPSCALER] = "no upscaler",
     [UI_MENU_OV_FMT_FSR] = "AMD FSR 1, sharpness %d%%", [UI_MENU_OV_SCALE_NONE] = "none (1:1)",
     [UI_MENU_OV_SCALE_BILINEAR] = "bilinear",
 };
@@ -423,6 +432,10 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_HDR_DESC] = "Экспериментально: SDR-картинка игры с поднятыми бликами на HDR-дисплее. Нужен включённый HDR в Windows («Использовать HDR») или "
                          "Wayland-композитор с управлением цветом; без него картинка остаётся SDR. Применяется после "
                          "перезапуска.",
+    [UI_MENU_HDR_NATIVE] = "Собственный HDR игры",
+    [UI_MENU_HDR_NATIVE_DESC] = "При включённом выводе HDR: игра сама строит HDR-картинку, как на консоли, с бликами до "
+                                "пиковой яркости (игра останавливается на 1400 нит), вместо поднятой SDR-картинки. FSR, "
+                                "SMAA и цветокоррекция в этом режиме выключены. Применяется после перезапуска.",
     [UI_MENU_HDR_PEAK] = "Пиковая яркость",
     [UI_MENU_HDR_PEAK_DESC] = "Пик вашего дисплея в нитах; самые яркие блики останавливаются на нём.",
     [UI_MENU_HDR_GAME] = "Яркость игры",
@@ -433,12 +446,14 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
 
     [UI_MENU_FPS_LIMIT] = "Ограничение частоты кадров",
     [UI_MENU_DKB_FPS_LIMIT_DESC] = "При включённой настройке «Скорость игры по часам» изменения применяются сразу. "
-                                 "Для частоты выше 60 нужны этот экспериментальный режим и достаточная производительность CPU и GPU.",
+                                 "Для частоты выше 60 нужны этот экспериментальный режим и достаточная производительность CPU и GPU. «Без ограничения» — экспериментально.",
     [UI_MENU_FPS_LIMIT_DESC] = "Наибольшее число кадров в секунду. Выше 60 — экспериментальный режим, нужна «Скорость "
-                               "игры по часам».",
+                               "игры по часам». «Без ограничения» — экспериментально.",
     [UI_MENU_FPS_30] = "30 FPS", [UI_MENU_FPS_40] = "40 FPS", [UI_MENU_FPS_45] = "45 FPS",
     [UI_MENU_FPS_60] = "60 FPS", [UI_MENU_FPS_90] = "90 FPS", [UI_MENU_FPS_120] = "120 FPS", [UI_MENU_FPS_144] = "144 FPS",
     [UI_MENU_FPS_DISPLAY] = "Как у монитора", [UI_MENU_FPS_DISPLAY_HZ] = "Как у монитора (%.0f Гц)",
+    [UI_MENU_FPS_UNLIMITED] = "Без ограничения",
+    [UI_MENU_FPS_NEEDS_REALTIME] = "Нужна «Скорость игры по часам» (перезапуск): частоты ниже и выше 60 FPS",
     [UI_MENU_REALTIME] = "Скорость игры по часам",
     [UI_MENU_REALTIME_DESC] = "Игра идёт по реальному времени, медленный кадр её не замедляет.",
     [UI_MENU_DKB_REALTIME_DESC] = "Экспериментальный режим, по умолчанию выключен. Шаг игрового времени зависит от длительности кадра. "
@@ -639,6 +654,8 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_OV_WINDOW] = "Окно", [UI_MENU_OV_OUTPUT] = "Изображение игры", [UI_MENU_OV_SCENE] = "3D-сцена",
     [UI_MENU_OV_SCALING] = "Масштабирование", [UI_MENU_OV_LIMIT] = "Лимит кадров", [UI_MENU_OV_PRESENT] = "Вывод кадров",
     [UI_MENU_OV_FMT_SIZE] = "%ux%u", [UI_MENU_OV_FMT_SCENE] = "%ux%u, %.0f%%",
+    [UI_MENU_OV_FMT_UPSCALE] = "%ux%u -> %ux%u",
+    [UI_MENU_OV_NO_UPSCALER] = "без апскейлера",
     [UI_MENU_OV_FMT_FSR] = "AMD FSR 1, резкость %d%%", [UI_MENU_OV_SCALE_NONE] = "нет (1:1)",
     [UI_MENU_OV_SCALE_BILINEAR] = "билинейное",
 };

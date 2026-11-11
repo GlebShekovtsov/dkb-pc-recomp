@@ -27,6 +27,13 @@ def main():
         if fields[:3] != ['site', 'realtime', 'main']:
             continue
         pc = int(fields[3], 16)
+        words = fields[5:]
+        if len(words) == 1 and not words[0].startswith('@') and int(words[0], 16) >> 26 == 0x25:
+            # A host call (runtime/frame_rate.c blur_frames, 3.2.0): one BL to patch page +0x250, which recomp/layout.py
+            # puts at main+0x2810000. The host function itself is not exercised here.
+            imm = int(words[0], 16) & 0x3FFFFFF
+            assert pc + ((imm ^ 0x2000000) - 0x2000000) * 4 == 0x2810000 + 0x250, line
+            continue
         offsets.append(pc)
         code = []
         for word in fields[5:]:

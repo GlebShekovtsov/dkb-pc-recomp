@@ -66,6 +66,7 @@ uint64_t rt_ns_to_ticks(uint64_t ns) {
 // Unrelated object/observer entry points are linked but must never run in this fixture.
 const RtConfig *rt_config(void) { rt_fatal("unexpected configuration lookup"); return NULL; }
 const GfxBackend gfx_vulkan_backend = {0};
+const char rt_game_target[] = "dkb100";
 void nvn_pool_flushed(const pool_t *p, uint64_t off, uint64_t size) {
     (void)p; (void)off; (void)size; rt_fatal("unexpected pool flush");
 }

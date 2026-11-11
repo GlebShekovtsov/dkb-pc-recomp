@@ -46,9 +46,11 @@ extern "C" {
 void rt_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void vk_queue_lock(void);
 void vk_queue_unlock(void);
-void res_sizes(unsigned out[2], unsigned scene[2]);
+int res_sizes(unsigned out[2], unsigned scene[2]);
 double frame_step_limit_hz(void);
+int frame_step_realtime(void);
 extern const int rt_game_version;
+extern const char rt_game_target[];   // build target: dkb100, dkb458752 or a TotK one
 // fs.h (romfs.c): romfs-patches-xbox was next to romfs-index.bin at start, and was loaded.
 int romfs_xbox_prompts_ready(void);
 int romfs_xbox_prompts_active(void);
@@ -537,10 +539,11 @@ static void row_output_res(void) {
 // ratios; switching it keeps the nearest render height, preferring the monitor's
 // aspect when widening. Window dimensions do not change the render resolution.
 static void rows_dkb_wide(void) {
-    // 5120x1440 and 3840x2160 fail during game render-resource creation. Keep
-    // presets within the largest tested frame (3440x1440) until that is fixed.
-    static const char *const standard[] = {"1280x720", "1600x900", "1920x1080", "2560x1440", "2880x1620"};
-    static const char *const wide[] = {"2560x1080", "3440x1440", "3840x1080"};
+    // The game's fixed 200 MiB render-target pool is grown by the dkbwide patch
+    // (runtime/dkb_wide.c dkb_wide_pool_bytes), so these sizes work on 1.0.0; tested on
+    // one NVIDIA GPU. 3.2.0 has the same patch ported but is untested.
+    static const char *const standard[] = {"1280x720", "1600x900", "1920x1080", "2560x1440", "2880x1620", "3840x2160"};
+    static const char *const wide[] = {"2560x1080", "3440x1440", "3840x1600", "5120x2160", "3840x1080", "5120x1440"};
     bool enabled = cfg_bool("TOTK_ULTRAWIDE");
     const char *const *sizes = enabled ? wide : standard;
     int count = enabled ? sizeof wide / sizeof *wide : sizeof standard / sizeof *standard;
@@ -625,9 +628,10 @@ static void row_game_lang(void) {
 // The frame limit (frame_rate.c): unset, the older fps60 = 0 still means 30. The monitor choice shows the rate it gives.
 static void row_fps_limit() {
     // 40 and 45: the Steam Deck's screen runs at 40 to 60 Hz (the OLED to 90); 40 divides 40 and 120 Hz evenly
-    static const char *const vals[] = {"30", "40", "45", "60", "90", "120", "144", "display"};
+    static const char *const vals[] = {"30", "40", "45", "60", "90", "120", "144", "display", "unlimited"};
     static const UiTextId ids[] = {UI_MENU_FPS_30, UI_MENU_FPS_40,  UI_MENU_FPS_45,  UI_MENU_FPS_60,
-                                   UI_MENU_FPS_90, UI_MENU_FPS_120, UI_MENU_FPS_144, UI_MENU_FPS_DISPLAY};
+                                   UI_MENU_FPS_90, UI_MENU_FPS_120, UI_MENU_FPS_144, UI_MENU_FPS_DISPLAY,
+                                   UI_MENU_FPS_UNLIMITED};
     enum { N = sizeof vals / sizeof *vals };
     const char *names[N];
     for (int i = 0; i < N; i++) names[i] = menu_text(ids[i]);
@@ -635,8 +639,9 @@ static void row_fps_limit() {
     double hz = gfx_window_refresh_hz();
     if (hz > 0) {
         snprintf(display, sizeof display, menu_text(UI_MENU_FPS_DISPLAY_HZ), hz);
-        names[N - 1] = display;
+        names[N - 2] = display;
     }
+    if (!rt_game_version && !frame_step_realtime()) opt_disable_next(UI_MENU_FPS_NEEDS_REALTIME);   // Bananza follows the game's own timing
     const char *set = cfg_get("TOTK_FPS_LIMIT"), *old = cfg_get("TOTK_FPS60");
     int cur = (!set || !*set) && old && !strcmp(old, "0") ? 0 : -1;
     opt_choice_list("TOTK_FPS_LIMIT", UI_MENU_FPS_LIMIT, vals, names, N,
@@ -715,7 +720,7 @@ static void tab_screen(float scale) {
     static const UiTextId perf[] = {UI_MENU_PERF_OFF, UI_MENU_PERF_FPS, UI_MENU_PERF_FULL};
     opt_choice("TOTK_PERF_OVERLAY", UI_MENU_PERF_OVERLAY, perf, 3, UI_MENU_PERF_OVERLAY_DESC);
     opt_group(UI_MENU_GRAPHICS);
-    row_render_scale();
+    if (rt_game_version) row_render_scale();   // TotK only: Bananza's 3D size is the game's own
     static const UiTextId up[] = {UI_MENU_UPSCALER_FSR, UI_MENU_UPSCALER_BILINEAR};
     opt_choice("TOTK_UPSCALER", UI_MENU_UPSCALER, up, 2, UI_MENU_UPSCALER_DESC);
     opt_slider("TOTK_SHARPNESS", UI_MENU_SHARPNESS, 0, 100, UI_MENU_SHARPNESS_DESC, 5, "%.0f %%");
@@ -727,6 +732,8 @@ static void tab_screen(float scale) {
     rows_color();
     opt_group(UI_MENU_HDR_GROUP);
     opt_toggle("TOTK_HDR", UI_MENU_HDR, UI_MENU_HDR_DESC);
+    // native HDR is in effect on 3.2.0 only (ov_gfx.c hdr_native_on), so the row is shown only there
+    if (!strcmp(rt_game_target, "dkb458752")) opt_toggle("TOTK_HDR_NATIVE", UI_MENU_HDR_NATIVE, UI_MENU_HDR_NATIVE_DESC);
     opt_slider("TOTK_HDR_PEAK_NITS", UI_MENU_HDR_PEAK, 400, 10000, UI_MENU_HDR_PEAK_DESC, 50, "%.0f");
     opt_slider("TOTK_HDR_GAME_NITS", UI_MENU_HDR_GAME, 80, 500, UI_MENU_HDR_GAME_DESC, 5, "%.0f");
     opt_slider("TOTK_HDR_UI_NITS", UI_MENU_HDR_UI, 80, 500, UI_MENU_HDR_UI_DESC, 5, "%.0f");
@@ -1231,11 +1238,14 @@ static float perf_gb(float mb) { return mb < 0 ? -1 : mb / 1024; }
 // in use.
 static void perf_picture(const MenuTarget *t, const ImVec4 &c) {
     unsigned out[2], scene[2];
-    res_sizes(out, scene);
+    int have = res_sizes(out, scene);
     char v[6][64];
     snprintf(v[0], sizeof v[0], menu_text(UI_MENU_OV_FMT_SIZE), t->width, t->height);
     snprintf(v[1], sizeof v[1], menu_text(UI_MENU_OV_FMT_SIZE), (unsigned)t->image_w, (unsigned)t->image_h);
-    snprintf(v[2], sizeof v[2], menu_text(UI_MENU_OV_FMT_SCENE), scene[0], scene[1], scene[0] * 100.0 / out[0]);
+    if (!have) snprintf(v[2], sizeof v[2], "%s", menu_text(UI_MENU_OV_NO_UPSCALER));   // Bananza, no upscaler dispatch lately
+    else if (!rt_game_version)
+        snprintf(v[2], sizeof v[2], menu_text(UI_MENU_OV_FMT_UPSCALE), scene[0], scene[1], out[0], out[1]);
+    else snprintf(v[2], sizeof v[2], menu_text(UI_MENU_OV_FMT_SCENE), scene[0], scene[1], scene[0] * 100.0 / out[0]);
     if (t->scaler == 2) {
         int s = cfg_int("TOTK_SHARPNESS");
         snprintf(v[3], sizeof v[3], menu_text(UI_MENU_OV_FMT_FSR), s < 0 ? 0 : s > 100 ? 100 : s);

@@ -24,6 +24,7 @@
 #include "cfg.h"
 #include "fs.h"
 #include "host.h"
+#include "input.h"
 #include "romfs_config.h"
 #include "romfs_path.h"
 #include "platform/platform.h"
@@ -543,11 +544,14 @@ void fs_init(void) {
 }
 
 // ---- the RomFS interface (fs.h)
+// Every RomFS and host file open passes here: a scripted "wait file" line (input.c) matches it. The trace line carries
+// the world clock (frame_step_world_us, -1 before it starts), the time a wait line on that open names.
 void fs_trace(const char *what, const char *path) {
     static double t0;
+    input_file_opened(path);
     if (!(rt_trace & RT_TRACE_FS)) return;
     if (!t0) t0 = now_s();
-    rt_log("fs %8.3f %s %s", now_s() - t0, what, path ? path : "(null)");
+    rt_log("fs %8.3f @%.1f %s %s", now_s() - t0, frame_step_world_us() / 1000.0, what, path ? path : "(null)");
 }
 
 uint64_t romfs_file_count(void) { return file_count; }

@@ -93,7 +93,8 @@ static struct {
 // (TOTK_DUMP with DKB_DUMP_UBO=1, 1.0.0 in the field): rows 0-2 the view matrix (3x4), rows 3-6 the view-projection,
 // rows 7-10 the projection (OpenGL-style, near 1 far 5000, not reversed), row-major with one matrix row per vec4. The
 // shadow and probe passes read blocks of the same size; their depth is not at the upscaler's input size, which tells
-// them apart.
+// them apart. Update 3.2.0 gives the same layout in play (checked by printing the rows: an orthonormal view, the
+// view-projection as their product, a projection of near 1 and far 5000).
 #define CAM_BLOCK 0x980u
 static struct {
     int have;               // a scene draw since the last evaluation

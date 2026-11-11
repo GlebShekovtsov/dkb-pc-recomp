@@ -29,12 +29,17 @@ site realtime main 69fc60 1e201820 f81f0fe9 @page:x9 bd400920 f84107e9  # second
 
 # Optional Bananza virtual display and camera aspect. Values are supplied by
 # runtime/dkb_wide.c at page +0x100 (width), +0x104 (height), +0x108 (aspect),
-# +0x10c (aspect / 16:9).
+# +0x10c (aspect / 16:9), +0x110 (render-target pool bytes).
 set dkbwide DKB_ULTRAWIDE 0
 
 # al::getVirtualDisplayWidth / Height. The retail base uses 2880 by 1620.
 site dkbwide main 5ad9f0 52816800 @page:x0 b9410000
 site dkbwide main 5ada00 5280ca80 @page:x0 b9410400
+
+# Framework init (f_7000458a88) sets the 200 MiB render-target pool size, 0xc800000, into a
+# field of its init argument. A larger output overflows that pool (issue 152): take the
+# size from page +0x110. x9 is overwritten right after it is stored, so it is free scratch.
+site dkbwide main 458adc 52a19009 @page:x9 b9411129
 
 # al::CameraPoseUpdater constructor, the default perspective aspect at +0x100.
 # The following MOVK preserves the original upper packed FOV word.

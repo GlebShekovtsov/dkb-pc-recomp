@@ -45,6 +45,9 @@ void nvn_called(uint8_t *seen, const char *name) { (void)seen; (void)name; }
 void nvn_mode_trace(unsigned kind, uint64_t cb, uint64_t handle, uint32_t value, uint64_t submit) {
     (void)kind; (void)cb; (void)handle; (void)value; (void)submit;
 }
+// DKB_HDR_TRACE is off in this fixture.
+int hdr_trace_hit(const Cpu *c, const char *name) { (void)c; (void)name; return 0; }
+void hdr_trace_dump(const char *name, const void *p) { (void)name; (void)p; }
 void plat_mutex_lock(PlatMutex *m) { (void)m; }
 void plat_mutex_unlock(PlatMutex *m) { (void)m; }
 void plat_mutex_lock_shared(PlatMutex *m) { (void)m; }

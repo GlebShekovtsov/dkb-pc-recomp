@@ -51,6 +51,7 @@
 #include "host.h"
 #include "nvn_hmap.h"
 #include "platform/platform.h"
+#include "spirv_hdr_shoulder.h"
 #include "spirv_nan_guard.h"
 #include "spirv_screen_uv.h"
 #include "tex.h"
@@ -76,6 +77,7 @@ static struct {
     VkPipelineCache cache;
     uint32_t max_push;
     uint32_t max_stage_samplers;       // maxPerStageDescriptorSamplers: a push set stays within it (push_fits)
+    uint32_t dyn_ubo;                  // TOTK_DYN_UBO: uniform buffers of an allocated fragment set made dynamic, at most this many
     int indep;                         // stage-independent layouts (vk_caps.gpl): vertex set 0, fragment set 1
     int push_stage;                    // GFX_STAGE_* whose set is pushed with independent layouts
     int gpl;                           // draws whose pipeline is building get a fast-linked one (vk_caps.gpl)
@@ -217,6 +219,13 @@ static int ensure_init(void) {
     vkGetPhysicalDeviceProperties2(c->phys, &p2);
     P.max_push = pd.maxPushDescriptors;
     P.max_stage_samplers = p2.properties.limits.maxPerStageDescriptorSamplers;
+    {   // TOTK_DYN_UBO (default off, 1 on, ab as 1 here; bind_resources reads the same knob): see dyn_ubo_convert.
+        // Off until it has run under the validation layer and on AMD and Intel.
+        uint32_t lim = p2.properties.limits.maxDescriptorSetUniformBuffersDynamic;
+        P.dyn_ubo = !rt_knob("DYN_UBO", "0") ? 0 : lim < VK_DYN_UBO_MAX ? lim : VK_DYN_UBO_MAX;
+        rt_log("vk_pipeline: dynamic uniform buffers in the allocated fragment set: %s (up to %u, device limit %u)",
+               P.dyn_ubo ? "on" : "off", P.dyn_ubo, lim);
+    }
     P.indep = vk_caps.gpl;
     P.gpl = vk_caps.gpl;
     rt_log(P.gpl ? "vk_pipeline: graphics pipeline library on: a draw whose pipeline is building gets a fast-linked one, "
@@ -1243,6 +1252,23 @@ static int screen_uv_stage(const GfxShader *src) {
     return 0;
 }
 
+// Native HDR (spirv_hdr_shoulder.c): Bananza's HDR composite takes its highlights up to the display's peak instead of
+// stopping at about 1.36 times paper white. The stage is found by its structure, so the variants with and without the
+// grading LUT both get it; it runs before the NaN guard, whose selects it does not know. DKB_HDR_SHOULDER=0 keeps the
+// game's curve, for a comparison or when a variant comes out wrong.
+// Only with native HDR in effect (ov_gfx.c hdr_native_on: 3.2.0, hdr = 1). The game runs this stage only while it is
+// told HDR is on, so a module made before a fallback to SDR is not used on the SDR swapchain.
+static uint32_t *hdr_shoulder(const GfxShader *src, const uint32_t *w, uint64_t words, uint64_t *out_n) {
+    static int on = -1;   // racing threads compute the same value
+    if (on < 0) on = hdr_native_on() && cfg_bool("TOTK_HDR_SHOULDER");
+    if (!on || !src || gfx_shader_stage(src) != GFX_STAGE_FS) return NULL;
+    uint32_t *o = spirv_hdr_shoulder(w, words, out_n);
+    if (o)
+        rt_log("vk: fs %016llx (origin %016llx): HDR highlights extended to the display's peak",
+               (unsigned long long)gfx_shader_spirv_fnv(src), (unsigned long long)gfx_shader_origin(src));
+    return o;
+}
+
 // DKB_NAN_GUARD (spirv_nan_guard.c): fragment stages store 0 instead of NaN to their float colour outputs (default,
 // or "zero"), a colour named by the stage instead ("mark"), or what they computed ("0"). One NaN texel in the scene
 // colour is spread by the bloom into a glowing band crossed by black lines, and the console shows none. In "mark"
@@ -1329,6 +1355,9 @@ static VkShaderModule make_module_linked(const GfxShader *src, const uint32_t *w
             rt_log("vk: FMZ rewrite %016llx mul=%u fma=%u", (unsigned long long)h, nm, nf);
         }
     }
+    uint64_t hs_n = 0;
+    uint32_t *hs = hdr_shoulder(src, w, words, &hs_n);
+    if (hs) w = hs, words = hs_n;
     uint32_t *nan = nan_guard(src, w, words, &words);
     if (nan) w = nan;
     spv_dump(w, words, src);
@@ -1340,6 +1369,7 @@ static VkShaderModule make_module_linked(const GfxShader *src, const uint32_t *w
     VkResult r = vkCreateShaderModule(P.device, &ci, NULL, &m);
     free(ov);
     free(nan);
+    free(hs);
     free(fmz);
     free(suv);
     free(fixed);
@@ -1987,6 +2017,22 @@ static Layout *layout_get(Bindings *B) {
 // VK_PIPELINE_LAYOUT_CREATE_INDEPENDENT_SETS_BIT_EXT so stage libraries can use it. Only the P.push_stage set is a
 // push-descriptor set (a layout holds one), when it fits maxPushDescriptors; the other is allocated per draw from the
 // command buffer's pools. On success *B holds both lists, set 0 first, VkPipeBinding.set filled in. Caller holds P.lock.
+// TOTK_DYN_UBO: the uniform buffers of an allocated (not pushed) fragment set, b[i0..i1), become
+// UNIFORM_BUFFER_DYNAMIC, in binding order while the total stays within P.dyn_ubo. Bananza's fragment sets differ
+// from draw to draw almost only in one uniform buffer's offset (95% of set rewrites in a dense area, measured):
+// with the offset passed to vkCmdBindDescriptorSets, consecutive draws reuse one written set instead of allocating
+// and writing a new one each (vk_exec_draw.c bind_resources). Push sets cannot hold dynamic descriptors.
+static void dyn_ubo_convert(Bindings *B, uint32_t i0, uint32_t i1) {
+    uint32_t used = 0;
+    for (uint32_t i = i0; i < i1 && P.dyn_ubo; i++) {
+        if (B->b[i].descriptorType != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) continue;
+        if (used + B->b[i].descriptorCount > P.dyn_ubo) break;
+        used += B->b[i].descriptorCount;
+        B->b[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        B->pb[i].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    }
+}
+
 static Layout *layout_pair(Bindings *B, Bindings *F) {
     uint64_t h = fnv(FNV0, "indep", 5);
     int64_t tv = bindings_sort(B, &h);
@@ -1999,14 +2045,19 @@ static Layout *layout_pair(Bindings *B, Bindings *F) {
     for (uint32_t i = n0; i < n; i++) B->pb[i].set = 1;
     B->n = n;
     Layout **head = &layouts[h % LAYOUT_BUCKETS];
+    // The push choice depends on each set's own bindings only, and so does the dynamic conversion below: the halves
+    // GPL libraries are built with (B or F empty) get set layouts identical to the full pipeline's.
+    int push0 = P.push_stage == GFX_STAGE_VS && push_fits(B->b, n0, tv);
+    int push1 = P.push_stage == GFX_STAGE_FS && F->n && push_fits(B->b + n0, n - n0, tf);
+    if (!push1) dyn_ubo_convert(B, n0, n);
     for (Layout *l = *head; l; l = l->next)
         if (l->hash == h && l->set1 && l->n == n && l->n0 == n0 && !memcmp(l->b, B->b, n * sizeof *B->b)) return l;
     Layout *l = calloc(1, sizeof *l + n * sizeof *B->b);
     if (!l) return NULL;
     l->hash = h, l->n = n, l->n0 = n0;
     memcpy(l->b, B->b, n * sizeof *B->b);
-    l->push = P.push_stage == GFX_STAGE_VS && push_fits(l->b, n0, tv);
-    l->push1 = P.push_stage == GFX_STAGE_FS && F->n && push_fits(l->b + n0, n - n0, tf);
+    l->push = push0;
+    l->push1 = push1;
     VkDescriptorSetLayoutCreateInfo s0 = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
                                           .flags = l->push ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR : 0,
                                           .bindingCount = n0, .pBindings = l->b};

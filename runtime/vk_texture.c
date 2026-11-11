@@ -497,7 +497,9 @@ static void rel_unlink(Tex *e) {
     e->rel_prev = e->rel_next = NULL;
 }
 
+static void wb_async_forget(const Tex *e);
 static void destroy_tex(Tex *e) {
+    wb_async_forget(e);
     own_remove(e);
     tex_gen_bump(e->key.addr);
     nvn_hm_del(&by_key, &e->key);
@@ -1571,6 +1573,216 @@ void vk_texture_write_back(uint64_t addr, uint64_t size) {
     unlock();
 }
 
+// ---- asynchronous write-back (TOTK_WB_ASYNC=1; off by default: the replay waits as before)
+// Measured on the Bananza route (RTX 3050 laptop): no FPS gain beyond run-to-run noise, and 30-45% of the late
+// copies found the storage rewritten by the CPU and were dropped, where the waited write-back had landed first.
+// A deferred guest read (TOTK_NX2_READ_NOWAIT) queues a write-back on the replay thread. Done there with
+// vk_texture_write_back, the replay waited for the GPU to finish all the work queued so far (the upload batch is
+// behind it), about a fifth of the replay thread in a dense Bananza area, where the replay is the critical path.
+// Instead the copy image -> staging is recorded and submitted without waiting, and the staging bytes go to the
+// storage at a later vk_texture_wb_poll, once that batch has completed: the GPU's write lands when the GPU gets
+// there, as on the console. A CPU write to the storage after the render (storage_rewritten at completion) keeps the
+// CPU's bytes, so the late copy never overwrites them. gpu_dirty stays set until then: a synchronous read meanwhile
+// still writes the image back itself, and the late copy then sees that write and leaves the storage alone.
+typedef struct {
+    Tex *e;                       // NULL once the entry was destroyed (wb_async_forget)
+    Region g;
+    NVNcopyRegion r;
+    VkBuffer sb;
+    VmaAllocation sa;
+    uint8_t *stg;
+    size_t slice, ib;
+    uint32_t gen;                 // e->gpu_gen when recorded: CPU writes after it keep the storage
+    uint64_t gseq, seq;           // e->gpu_seq when recorded; upload batch holding the copy
+    int keep;                     // vk_texture_wb_poll's decision for a completed copy: the CPU rewrote the storage
+} WbPend;
+static WbPend *wbp;
+static int nwbp, cwbp;
+static int wb_async = -1;
+static uint64_t wb_async_n, wb_async_done, wb_async_kept, wb_async_dup;
+
+static void wb_async_forget(const Tex *e) {
+    for (int i = 0; i < nwbp; i++)
+        if (wbp[i].e == e) wbp[i].e = NULL;
+}
+
+// Records the copy of one region of e into the open upload batch; 0 when the region cannot go this way.
+static int wb_record(Tex *e, const Region *g, const NVNcopyRegion *r, WbPend *p) {
+    VkImageAspectFlags aspect;
+    if (e->f.astc_bw || !read_aspect(e, &aspect) || g->level >= e->pub.levels) return 0;
+    uint32_t w = (uint32_t)r->width, h = (uint32_t)r->height;
+    size_t ib = e->f.expand_rgb ? (size_t)g->bpb / 3 * 4 : 0;
+    size_t slice = ib ? (size_t)w * h * ib : g->wb * g->hb;
+    VkBuffer sb;
+    VmaAllocation sa;
+    uint8_t *stg = vk_staging(slice * (size_t)g->nz, &sb, &sa);
+    VkBufferImageCopy *rg = calloc((size_t)g->nz, sizeof *rg);
+    if (!rg) rt_fatal("vk: out of memory for a texture write-back");
+    for (int z = 0; z < g->nz; z++)
+        rg[z] = (VkBufferImageCopy){.bufferOffset = slice * (size_t)z,
+                                    .imageSubresource = {aspect, g->level, g->is3d ? 0 : g->layer0 + (uint32_t)r->zoffset + (uint32_t)z, 1},
+                                    .imageOffset = {r->xoffset, r->yoffset, g->is3d ? r->zoffset + z : 0},
+                                    .imageExtent = {w, h, 1}};
+    VkCommandBuffer cb = vk_upload_begin();
+    barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+    vkCmdCopyImageToBuffer(cb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, sb, (uint32_t)g->nz, rg);
+    barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_HOST_BIT,
+            VK_ACCESS_2_HOST_READ_BIT);
+    vk_upload_end();
+    free(rg);
+    *p = (WbPend){.e = e, .g = *g, .r = *r, .sb = sb, .sa = sa, .stg = stg, .slice = slice, .ib = ib,
+                  .gen = e->gpu_gen, .gseq = e->gpu_seq};
+    return 1;
+}
+
+static int wb_pending(const Tex *e) {   // a copy of e's newest render is already on its way
+    for (int i = 0; i < nwbp; i++)
+        if (wbp[i].e == e && wbp[i].gseq == e->gpu_seq) return 1;
+    return 0;
+}
+
+// Queues the copies of e's levels and layers; 0 (nothing queued) when one of them cannot go asynchronously.
+static int wb_queue(Tex *e) {
+    const nvn_texdesc *d = &e->t.d;
+    int linear = nvn_tex_is_linear(d), is3d = d->target == NVN_TEXTURE_TARGET_3D;
+    uint32_t levels = linear ? 1 : e->pub.levels, layers = linear || is3d ? 1 : e->pub.layers;
+    VkImageAspectFlags aspect;
+    if (e->f.astc_bw || !read_aspect(e, &aspect)) return 0;
+    for (uint32_t lv = 0; lv < levels; lv++)
+        for (uint32_t ly = 0; ly < layers; ly++) {
+            view_t v = {.set_levels = 1, .set_layers = 1, .base_level = (uint8_t)lv, .min_layer = (uint16_t)ly};
+            NVNcopyRegion r = {.width = (int)mip(d->width, lv),
+                               .height = d->target == 0 || d->target == 3 ? 1 : (int)mip(d->height, lv),
+                               .depth = is3d ? (int)mip(d->depth, lv) : 1};
+            Region g;
+            if (!region_of(&e->t, &v, &r, 0, 0, &g)) continue;
+            if (nwbp == cwbp) {
+                int nc = cwbp ? cwbp * 2 : 16;
+                WbPend *nw = realloc(wbp, sizeof *wbp * (size_t)nc);
+                if (!nw) rt_fatal("vk: out of memory for a texture write-back");
+                wbp = nw, cwbp = nc;
+            }
+            if (wb_record(e, &g, &r, &wbp[nwbp])) wbp[nwbp++].seq = 0;
+        }
+    return 1;
+}
+
+void vk_texture_write_back_async(uint64_t addr, uint64_t size) {
+    if (wb_async < 0) {   // TOTK_WB_ASYNC: 0 (default) waited, 1 asynchronous, ab switched with TOTK_AB's blocks
+        wb_async = rt_knob("WB_ASYNC", "0");
+        rt_log("vk: deferred-read write-backs %s", wb_async == 2 ? "asynchronous in the B blocks (TOTK_AB)"
+                                                    : wb_async ? "asynchronous (TOTK_WB_ASYNC=1)" : "waited for");
+    }
+    if (!RT_KNOB_ON(wb_async)) {
+        vk_texture_write_back(addr, size);
+        return;
+    }
+    lock();
+    Tex **hit = malloc(sizeof *hit * (size_t)(nowned + 1));
+    if (!hit) rt_fatal("vk: out of memory for a texture write-back");
+    int n = owned_dirty(addr, size, hit), k = 0, first = nwbp;
+    for (int i = 0; i < n; i++) {
+        uint32_t now;
+        if (storage_rewritten(hit[i], hit[i]->gpu_gen, &now) == 1) hit[i]->gpu_dirty = 0;
+        else hit[k++] = hit[i];
+    }
+    for (int i = 1; i < k; i++)
+        for (int j = i; j > 0 && hit[j - 1]->gpu_seq > hit[j]->gpu_seq; j--) {
+            Tex *x = hit[j];
+            hit[j] = hit[j - 1], hit[j - 1] = x;
+        }
+    for (int i = 0; i < k; i++) {
+        if (wb_pending(hit[i])) { wb_async_dup++; continue; }
+        if (wb_queue(hit[i])) { wb_async_n++; continue; }
+        write_back(hit[i]);   // not copyable this way (ASTC, packed depth-stencil): as before
+        perf_count(PERF_CNT_WB);
+    }
+    if (nwbp > first) {
+        uint64_t seq = vk_upload_flush(0);
+        for (int i = first; i < nwbp; i++) wbp[i].seq = seq;
+    }
+    free(hit);
+    unlock();
+}
+
+void vk_texture_wb_poll(void) {
+    if (!__atomic_load_n(&nwbp, __ATOMIC_RELAXED)) return;
+    VkCtx *c = vk_ctx();
+    lock();
+    // Every completed copy is decided before any is written, as vk_texture_write_back does: a write below is itself a
+    // CPU write to storage another texture may share, which the check would take for a rewrite by the CPU. The
+    // regions of one texture were queued together and share one decision, stored on each of them: keep -1 for a copy
+    // that has not completed (it stays pending; vk_upload_done is asked only here, so pass 2 cannot see a batch that
+    // completed in between), 0 to write it (also a destroyed entry, which only frees its staging), 1 when the CPU
+    // rewrote the storage.
+    for (int i = 0; i < nwbp;) {
+        int j = i + 1;
+        while (j < nwbp && wbp[j].e == wbp[i].e && wbp[j].seq == wbp[i].seq) j++;
+        int keep = -1;
+        if (vk_upload_done(wbp[i].seq)) {
+            uint32_t now;
+            keep = wbp[i].e && storage_rewritten(wbp[i].e, wbp[i].gen, &now) == 1;
+        }
+        for (int q = i; q < j; q++) wbp[q].keep = keep;
+        i = j;
+    }
+    int k = 0;
+    for (int i = 0; i < nwbp;) {
+        if (wbp[i].keep < 0) { wbp[k++] = wbp[i++]; continue; }
+        int j = i + 1;
+        while (j < nwbp && wbp[j].e == wbp[i].e && wbp[j].seq == wbp[i].seq) j++;
+        Tex *e = wbp[i].e;
+        if (e && wbp[i].keep) {
+            wb_async_kept++;   // the CPU wrote the storage after the render: its bytes stay
+            if (e->gpu_seq == wbp[i].gseq) e->gpu_dirty = 0;
+        } else if (e) {
+            for (int q = i; q < j; q++) {
+                WbPend *p = &wbp[q];
+                const Region *g = &p->g;
+                uint8_t *buf = malloc(g->img * (size_t)g->nz);
+                if (!buf) rt_fatal("vk: out of memory for a texture write-back");
+                vmaInvalidateAllocation(c->vma, p->sa, 0, VK_WHOLE_SIZE);
+                uint32_t w = (uint32_t)p->r.width;
+                for (int z = 0; z < g->nz; z++) {
+                    const uint8_t *s = p->stg + p->slice * (size_t)z;
+                    uint8_t *m = buf + (size_t)z * g->img;
+                    for (size_t y = 0; y < g->hb; y++) {
+                        if (p->ib) shrink_rgb(e->t.d.format, s + y * w * p->ib, m + y * g->row, w);
+                        else memcpy(m + y * g->row, s + y * g->wb, g->wb);
+                    }
+                }
+                storage_texels(&e->t, g, &p->r, buf, 1);
+                free(buf);
+            }
+            wb_async_done++;
+            perf_count(PERF_CNT_WB);
+            // This write is older than any render recorded since: a newer render of e, and the copies of e still on
+            // their way, must not take it for a CPU write (they would drop their texels).
+            uint32_t g2;
+            storage_rewritten(e, 0, &g2);
+            if (e->gpu_seq == wbp[i].gseq) e->gpu_dirty = 0;
+            else e->gpu_gen = g2;
+            // The same goes for the copies of another texture whose storage overlaps the one just written.
+            for (int q = j; q < nwbp; q++)
+                if (wbp[q].e == e || (wbp[q].e && wbp[q].e->pub.addr < e->pub.addr + e->t.L.size &&
+                                      e->pub.addr < wbp[q].e->pub.addr + wbp[q].e->t.L.size))
+                    wbp[q].gen = g2;
+        }
+        for (int q = i; q < j; q++) vmaDestroyBuffer(c->vma, wbp[q].sb, wbp[q].sa);
+        i = j;
+    }
+    nwbp = k;
+    static uint64_t logged;
+    if (wb_async_n >= logged + 2000) {
+        logged = wb_async_n;
+        rt_log("vk: asynchronous write-backs: %llu textures queued, %llu regions written, %llu kept the CPU's bytes, "
+               "%llu already on their way; %d regions pending",
+               (unsigned long long)wb_async_n, (unsigned long long)wb_async_done, (unsigned long long)wb_async_kept,
+               (unsigned long long)wb_async_dup, nwbp);
+    }
+    unlock();
+}
+
 // TotK's grass system renders a 128x128 RGBA8 map of cut and trampled grass into a CPU-cached pool every frame and its
 // CPU code reads the pool bytes without nvnMemoryPoolInvalidateMappedRange (cut reactions: blades, insects, the cut
 // itself). On the Switch the bytes are there once the frame's fence has passed. So when the
@@ -1876,6 +2088,9 @@ void vk_texture_census(VkTexCensus *s) {
 void vk_texture_shutdown(void) {
     VkCtx *c = vk_ctx();
     lock();
+    for (int i = 0; i < nwbp && c; i++) vmaDestroyBuffer(c->vma, wbp[i].sb, wbp[i].sa);   // copies never polled
+    free(wbp);
+    wbp = NULL, nwbp = cwbp = 0;
     Tex **list = malloc(sizeof *list * (size_t)(by_key.n + 1));
     int n = 0;
     for (uint32_t i = 0; i < by_key.cap; i++)

@@ -13,6 +13,10 @@ void input_block(int on);
 // The in-game menu (ui/menu.h): input_menu(1) when it opens (input_poll reports nothing, the cursor is released), (0) when
 // it closes (nothing until every button and stick direction is released). Independent of input_block.
 void input_menu(int open);
+// romfs.c fs_trace: the game opened path (RomFS or a host file); a scripted "wait file" line matches it. Any thread.
+void input_file_opened(const char *path);
+// Exit: if TOTK_INPUT_SCRIPT was loaded and events are still pending, logs "input: script ended ..." once. Safe without a script.
+void input_script_report(void);
 // The gamepad alone, for the menu: Switch button bits and the left stick (up +y). 0 without a connected gamepad.
 // Minus+Plus combo and the neutral pad while the menu is open (input_map.c, window-system free): *held is the caller's memory
 // of the combo, sticks are lx, ly, rx, ry. Returns 1 in the poll where the combo goes down (toggle the menu once).

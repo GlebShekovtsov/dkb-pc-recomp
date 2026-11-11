@@ -13,6 +13,14 @@ static GuestFn gamut, tone;
 #include "../runtime/ov_gfx.c"
 
 void nvn_procs_register(void) {}
+// Host services ov_gfx.c links against; the test is single-threaded and reads no settings.
+int cfg_bool(const char *name) { (void)name; return 0; }
+const char rt_game_target[] = "dkb100", rt_game_display[] = "1.0.0";
+void rt_log(const char *fmt, ...) { (void)fmt; }
+const char *ldr_describe(uint64_t a, char *buf, int n) { (void)a; (void)n; return buf; }
+int plat_mem_read(uint64_t addr, void *out, size_t n) { (void)addr; (void)out; (void)n; return 0; }
+void plat_mutex_lock(PlatMutex *m) { (void)m; }
+void plat_mutex_unlock(PlatMutex *m) { (void)m; }
 
 int main(void) {
     if (!gamut || !tone) {

@@ -85,22 +85,33 @@ int vk_hdr_surface_format(const VkSurfaceFormatKHR *f, uint32_t n, VkSurfaceForm
     return 0;
 }
 
-// The display's peak and the picture's white for sc; again when the settings change (gfx_present.c calls it on every
-// present to an HDR10 swapchain, with new = 1 for a new swapchain).
+// The content's peak and the picture's white for sc, sent again when either changes (gfx_present.c calls it on every
+// present to an HDR10 swapchain, with new = 1 for a new swapchain). The lifted SDR picture reaches hdr_peak_nits. With
+// native HDR the game grades to its own peak, the display's capped by the game's limit for the mode (ov_gfx.c
+// hdr_game_content_peak: 1400 nits in 3.2.0 gameplay with any higher hdr_peak_nits); a display told hdr_peak_nits
+// would tone-map for a range the picture never reaches.
 void vk_hdr_metadata(VkSwapchainKHR sc, int new_sc) {
     static unsigned sent = ~0u;
+    static int sent_game_peak = -1;
     VkCtx *c = vk_ctx();
-    if (!c->has_hdr_metadata || (!new_sc && cfg_version() == sent)) return;
+    int game_peak = hdr_native_on() ? hdr_game_content_peak() : 0;
+    if (!c->has_hdr_metadata || (!new_sc && cfg_version() == sent && game_peak == sent_game_peak)) return;
     sent = cfg_version();
+    sent_game_peak = game_peak;
     PFN_vkSetHdrMetadataEXT set = (PFN_vkSetHdrMetadataEXT)vkGetDeviceProcAddr(c->device, "vkSetHdrMetadataEXT");
     if (!set) return;
     Nits n = nits();
+    float peak = game_peak > 0 && game_peak < n.peak ? (float)game_peak : n.peak;
     VkHdrMetadataEXT m = {.sType = VK_STRUCTURE_TYPE_HDR_METADATA_EXT,
                           .displayPrimaryRed = {0.708f, 0.292f}, .displayPrimaryGreen = {0.170f, 0.797f},
                           .displayPrimaryBlue = {0.131f, 0.046f}, .whitePoint = {0.3127f, 0.3290f},
-                          .maxLuminance = n.peak, .minLuminance = 0.0f, .maxContentLightLevel = n.peak,
+                          .maxLuminance = peak, .minLuminance = 0.0f, .maxContentLightLevel = peak,
                           .maxFrameAverageLightLevel = n.game};
     set(c->device, 1, &sc, &m);
+    static float logged = -1;
+    if (peak != logged) rt_log("hdr: metadata to the display: peak %.0f nits, paper white %.0f%s", peak, n.game,
+                               game_peak > 0 && peak == (float)game_peak ? " (the game's own peak)" : "");
+    logged = peak;
 }
 
 // ---- 3. present passes

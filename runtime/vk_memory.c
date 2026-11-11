@@ -2314,6 +2314,16 @@ uint64_t vk_upload_flush(int wait) {
     return seq;
 }
 
+int vk_upload_done(uint64_t seq) {
+    plat_once(&cmd_once, cmd_init, NULL);
+    plat_rmutex_lock(&cmd_lock);
+    VkCtx *c = vk_ctx();
+    if (c && done_seq < seq) retire(c, 0);
+    int d = done_seq >= seq;
+    plat_rmutex_unlock(&cmd_lock);
+    return d;
+}
+
 static void defer(int kind, uint64_t handle, VmaAllocation alloc) {
     plat_once(&cmd_once, cmd_init, NULL);
     plat_rmutex_lock(&cmd_lock);

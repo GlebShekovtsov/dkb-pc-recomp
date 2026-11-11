@@ -46,13 +46,24 @@ NVN_API(nvnMultisampleStateGetCoverageTruncationEnable) { ret_x(c, 0); }
 
 // ---- Window colour space and HDR metadata: the host presents SDR sRGB
 // void nvnWindowBuilderSetColorSpace(NVNwindowBuilder *, NVNcolorSpace), NVNcolorSpace ...GetColorSpace(...): 0, sRGB
-NVN_API(nvnWindowBuilderSetColorSpace) { NVN_LOG("WindowBuilderSetColorSpace %d", (int)arg_x(c, 1)); }
-NVN_API(nvnWindowBuilderGetColorSpace) { ret_x(c, 0); }
+NVN_API(nvnWindowBuilderSetColorSpace) {
+    if (hdr_trace_hit(c, "nvnWindowBuilderSetColorSpace")) rt_log("hdr-trace: nvnWindowBuilderSetColorSpace x1=%d", (int)arg_x(c, 1));
+    NVN_LOG("WindowBuilderSetColorSpace %d", (int)arg_x(c, 1));
+}
+NVN_API(nvnWindowBuilderGetColorSpace) { hdr_trace_hit(c, "nvnWindowBuilderGetColorSpace"); ret_x(c, 0); }
 // void ...Set{Hdr}Display/ContentMetadata(obj, const metadata *): kept by no one
-NVN_API(nvnWindowBuilderSetHdrDisplayMetadata) { (void)c; }
-NVN_API(nvnWindowBuilderSetHdrContentMetadata) { (void)c; }
-NVN_API(nvnWindowSetHdrDisplayMetadata) { (void)c; }
-NVN_API(nvnWindowSetHdrContentMetadata) { (void)c; }
+NVN_API(nvnWindowBuilderSetHdrDisplayMetadata) {
+    if (hdr_trace_hit(c, "nvnWindowBuilderSetHdrDisplayMetadata")) hdr_trace_dump("nvnWindowBuilderSetHdrDisplayMetadata", arg_p(c, 1));
+}
+NVN_API(nvnWindowBuilderSetHdrContentMetadata) {
+    if (hdr_trace_hit(c, "nvnWindowBuilderSetHdrContentMetadata")) hdr_trace_dump("nvnWindowBuilderSetHdrContentMetadata", arg_p(c, 1));
+}
+NVN_API(nvnWindowSetHdrDisplayMetadata) {
+    if (hdr_trace_hit(c, "nvnWindowSetHdrDisplayMetadata")) hdr_trace_dump("nvnWindowSetHdrDisplayMetadata", arg_p(c, 1));
+}
+NVN_API(nvnWindowSetHdrContentMetadata) {
+    if (hdr_trace_hit(c, "nvnWindowSetHdrContentMetadata")) hdr_trace_dump("nvnWindowSetHdrContentMetadata", arg_p(c, 1));
+}
 
 // void nvnCommandBufferSetComputeOverlapMode(NVNcommandBuffer *cmd, uint32_t mode)
 // NVN 2 changes compute/graphics scheduling, not shader or resource state (docs/nvn2-command-modes.md).

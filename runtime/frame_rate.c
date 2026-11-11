@@ -80,6 +80,44 @@ static int no_table;   // this game version has no realtime patch table in this 
 // down when frames take longer than 1/60 s and speeds up above 60 fps; meant for A/B and image tests.
 static int fixed_step;
 
+// Bananza 3.2.0 radial blur lifetimes (recomp/patches-dkb458752.txt, the site at main+426f54). The blur entries a smash
+// starts count down whole 60 Hz frames, subtracting the step truncated to an integer each frame, so a step under 1.0
+// subtracted nothing and the blur stayed on screen for good (#158). This stands in for that fcvtzs: it adds the step to
+// the entry's leftover fraction and returns the whole frames in w8. Steps of 1.0 and 2.0 give what the game computes.
+// An entry is its address (x22, the counter at [x22-4]); a counter the hook did not leave was restarted by the game,
+// and its fraction starts again from 0. The table is small, as the game keeps a handful of entries.
+#define BLUR_ENTRIES 32
+static struct { uint64_t key; int32_t left; float frac; } blur_acc[BLUR_ENTRIES];
+static unsigned blur_next;
+static PlatMutex blur_lock = PLAT_MUTEX_INIT;
+
+static void blur_frames(Cpu *c) {
+    uint32_t bits = (uint32_t)c->v[0];
+    float step;
+    memcpy(&step, &bits, 4);
+    uint64_t key = c->x[22];
+    int32_t counter = LD32(key - 4);
+    if (!(step > 0) || step > 1000) {   // NaN, negative or absurd: as the game would truncate it
+        c->x[8] = (uint32_t)(int32_t)(step > 0 ? 1000 : 0);
+        return;
+    }
+    plat_mutex_lock(&blur_lock);
+    unsigned i = 0;
+    while (i < BLUR_ENTRIES && blur_acc[i].key != key) i++;
+    if (i == BLUR_ENTRIES) {
+        i = blur_next++ % BLUR_ENTRIES;
+        blur_acc[i].key = key;
+        blur_acc[i].left = counter + 1;   // differs from counter: the fraction starts from 0 below
+    }
+    if (blur_acc[i].left != counter) blur_acc[i].frac = 0;
+    float t = blur_acc[i].frac + step;
+    int32_t whole = (int32_t)t;
+    blur_acc[i].frac = t - (float)whole;
+    blur_acc[i].left = counter - whole;
+    plat_mutex_unlock(&blur_lock);
+    c->x[8] = (uint32_t)whole;
+}
+
 void frame_step_init(void) {
     int fps60 = rt_patch_set("fps60"), realtime = rt_patch_set("realtime"), cloth = rt_patch_set("cloth");
     if (realtime < 0) {
@@ -94,7 +132,10 @@ void frame_step_init(void) {
     if (rt_patch_enabled(realtime)) {
         step_word = (_Atomic uint64_t *)rt_patch_page();
         step_interval = (_Atomic uint32_t *)((uint8_t *)rt_patch_page() + 8);
-        if (!rt_game_version) dkb_rate = (_Atomic uint32_t *)((uint8_t *)rt_patch_page() + 12);
+        if (!rt_game_version) {
+            dkb_rate = (_Atomic uint32_t *)((uint8_t *)rt_patch_page() + 12);
+            rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + 0x250, blur_frames);   // 3.2.0 radial blur lifetimes
+        }
         step_store((float)STEP_FIRST_S);
     }
     const char *fx = cfg_get("TOTK_FIXED_STEP");
@@ -115,27 +156,30 @@ void frame_step_init(void) {
 
 int frame_step_realtime(void) { return step_word != NULL; }
 
-// The frame limit (menu, TOTK_FPS_LIMIT, live): 30, 60, 90, 120, 144, any whole rate from 30 to 360, or display (the
-// refresh rate of the window's monitor). Unset, the older TOTK_FPS60=0 still means 30. A limit of 30 switches the set
+// The frame limit (menu, TOTK_FPS_LIMIT, live): 30, 60, 90, 120, 144, any whole rate from 30 to 360, display (the
+// refresh rate of the window's monitor) or unlimited (no pacer wait: nvn_api_obj.c pace() treats the period 0 as
+// "present at once"; with TOTK_VK_PRESENT=fifo the display still caps the rate). Unset, the older TOTK_FPS60=0 still means 30. A limit of 30 switches the set
 // fps60 off (the shipping minimum interval 2), every other limit switches it on; the controller reads its minimum
 // interval from the patched sites each frame. With the real-time step the pacer holds frames to the limit; above 60
 // only the pacer changes, as the step has no lower bound. Without it the game steps whole 60 Hz vsyncs and the pacer
 // follows the game's interval, so the limit stops at 60.
 #define LIMIT_MIN_HZ 30
 #define LIMIT_MAX_HZ 360
+#define LIMIT_NONE (-2)   // limit_hz for unlimited; 0 is display and -1 is "not read yet"
 static int fps60_set = -2;
 static unsigned limit_seen;
 static int limit_read;
-static int limit_hz = -1;   // 0: display; -1 before the first read
+static int limit_hz = -1;   // 0: display; LIMIT_NONE: unlimited; -1 before the first read
 
 static int limit_parse(void) {
     const char *e = cfg_get("TOTK_FPS_LIMIT"), *old = cfg_get("TOTK_FPS60");
     if (!e || !*e) return old && !strcmp(old, "0") ? 30 : 60;
     if (!strcmp(e, "display")) return 0;
+    if (!strcmp(e, "unlimited")) return LIMIT_NONE;
     char *end;
     long n = strtol(e, &end, 10);
     if (!*end && n >= LIMIT_MIN_HZ && n <= LIMIT_MAX_HZ) return (int)n;
-    rt_log("frame rate: TOTK_FPS_LIMIT=%s is not 30..360 or display; 60", e);
+    rt_log("frame rate: TOTK_FPS_LIMIT=%s is not 30..360, display or unlimited; 60", e);
     return 60;
 }
 
@@ -149,7 +193,11 @@ static void frame_limit_live(void) {
     limit_hz = hz;
     if (fps60_set == -2) fps60_set = rt_patch_set("fps60");
     if (fps60_set >= 0) rt_patch_switch(fps60_set, hz != 30);
-    if ((hz > 60 || hz == 0) && !step_word)
+    if (hz == LIMIT_NONE) {
+        if (!step_word) rt_log("frame rate: unlimited needs the real-time step (TOTK_REALTIME=1); 60 fps");
+        else rt_log("frame rate: no limit (unlimited)%s", strcmp(cfg_value("TOTK_VK_PRESENT"), "fifo") ? "" :
+                    "; TOTK_VK_PRESENT=fifo still caps it at the monitor's rate, use mailbox or immediate");
+    } else if ((hz > 60 || hz == 0) && !step_word)
         rt_log("frame rate: limits above 60 need the real-time step (TOTK_REALTIME=1); 60 fps");
     else if (hz && hz < 60 && no_table && !rt_game_version)
         rt_log("frame rate: this game version has no real-time frame-rate support in this build; limit %d fps cannot be held", hz);
@@ -164,17 +212,18 @@ static void frame_limit_live(void) {
 
 uint64_t frame_step_cap_ns(void) {
     frame_limit_live();
-    double hz = limit_hz ? limit_hz : gfx_window_refresh_hz();
+    if (limit_hz == LIMIT_NONE && step_word) return 0;   // pace() presents at once
+    double hz = limit_hz > 0 ? limit_hz : gfx_window_refresh_hz();
     if (hz < LIMIT_MIN_HZ) hz = 60;   // display rate unknown (no window yet)
     if (hz > LIMIT_MAX_HZ) hz = LIMIT_MAX_HZ;
     return (uint64_t)(1e9 / hz + 0.5);
 }
 
-// The frame rate the limit gives, for the performance overlay: the setting, the monitor's rate for "display", 60 at
+// The frame rate the limit gives, for the performance overlay: the setting, the monitor's rate for "display", 0 for unlimited, 60 at
 // most without the real-time step; 0 before the first frame read the setting.
 double frame_step_limit_hz(void) {
     int hz = limit_hz;
-    if (hz < 0) return 0;
+    if (hz < 0) return 0;   // not read yet, or unlimited: the overlay shows no limit
     double r = hz ? hz : gfx_window_refresh_hz();
     if (r < LIMIT_MIN_HZ) r = 60;
     return !step_word && r > 60 ? 60 : r > LIMIT_MAX_HZ ? LIMIT_MAX_HZ : r;

@@ -62,8 +62,11 @@ static void configured(const char *text, unsigned w, unsigned h, int enabled) {
     // A projected unit square must have equal pixel dimensions after the x
     // correction: a 16:9 authored canvas followed by this wider output.
     CHECK(fabs((double)w / (1280.0 * factor) - (double)h / 720.0) < 0.000002);
+    uint32_t pool;
+    memcpy(&pool, test_page + 0x110, 4);
+    CHECK(pool == dkb_wide_pool_bytes(w, h) && pool >= 0xc800000);
     for (size_t i = 0; i < sizeof test_page; i++)
-        if (i < 0x100 || i >= 0x110) CHECK(test_page[i] == 0xa5);
+        if (i < 0x100 || i >= 0x114) CHECK(test_page[i] == 0xa5);
 }
 
 static void valid(const char *text, unsigned w, unsigned h) { configured(text, w, h, 1); }
@@ -79,9 +82,17 @@ static void rejected(const char *text) {
 }
 
 int main(void) {
+    CHECK(dkb_wide_pool_bytes(2880, 1620) == 0xc800000);
+    CHECK(dkb_wide_pool_bytes(1280, 720) == 0xc800000);
+    CHECK(dkb_wide_pool_bytes(3440, 1440) == 0xd600000);
+    CHECK(dkb_wide_pool_bytes(3840, 2160) == 0x16400000);
+    CHECK(dkb_wide_pool_bytes(5120, 1440) == 0x13e00000);
+    // The largest accepted output needs 1424 MiB (about 1.39 GiB): it fits uint32_t without clamping.
+    CHECK(dkb_wide_pool_bytes(7680, 4320) > 0x40000000 && dkb_wide_pool_bytes(7680, 4320) % (2u << 20) == 0);
     valid("3440x1440", 3440, 1440);
     valid("2560x1080", 2560, 1080);
     valid("3840x1600", 3840, 1600);
+    valid("5120x2160", 5120, 2160);
     valid("5120x1440", 5120, 1440);
     valid("7680x2160", 7680, 2160);
     valid("1920x1080", 1920, 1080);

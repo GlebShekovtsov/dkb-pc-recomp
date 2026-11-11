@@ -222,6 +222,7 @@ static void replay_main(void *arg) {
         r_busy = 1;
         plat_cond_broadcast(&rcv);
         plat_mutex_unlock(&rl);
+        vk_texture_wb_poll();   // asynchronous write-backs whose copies completed
         if (it.kind == RI_SUBMIT) {
             uint64_t f = submit_sync(it.h, it.n, it.submitted_ticks);
             if (f != it.value)
@@ -230,7 +231,7 @@ static void replay_main(void *arg) {
             free(it.h);
         } else if (it.kind == RI_WRITE_BACK) {
             vk_present_drain();
-            vk_texture_write_back(it.at, it.queued);
+            vk_texture_write_back_async(it.at, it.queued);
         } else if (it.kind == RI_RELEASE) {
             vk_present_drain();
             vk_texture_release(it.tex);

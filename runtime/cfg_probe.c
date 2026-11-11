@@ -160,6 +160,8 @@ int probe_cfg(void) {
     m = cfg_meta("totk_vk_present");
     CHECK(m && EQ(m->key, "VK_PRESENT") && EQ(m->values, "mailbox|fifo|immediate") && m->live,
           "meta: prefix and case are accepted");
+    m = cfg_meta("FPS_LIMIT");
+    CHECK(m && strstr(m->values, "|display|unlimited") && !strstr(m->values, "garbage"), "meta: fps_limit accepts unlimited");
     m = cfg_meta("RUMBLE_STRENGTH");
     CHECK(m && EQ(m->def, "130") && EQ(m->values, "0..300"), "meta: rumble strength 130 in 0..300");
     m = cfg_meta("PERF_OVERLAY");

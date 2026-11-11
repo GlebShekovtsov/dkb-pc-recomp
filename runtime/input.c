@@ -57,11 +57,35 @@ static const SDL_GamepadButton pad_sdl[PAD_COUNT] = {
 // and its hold are milliseconds of the world clock (frame_step_world_us, game time since the loaded save's first
 // frame), so it lands at the same game time at any frame rate and load length. A timed event shorter than a frame is
 // applied once. In a script with timed lines (a recording) the untimed ones belong before the world clock: they stop
-// when it starts, as the load ends at another tick in each run. Parser and scheduler: input_script.c.
+// when it starts, as the load ends at another tick in each run. A line "[<time>] wait world|file <name> [timeout_ms]"
+// holds the lines after it until the condition holds (or the timeout runs out), then shifts their clocks so they read
+// <time> there. Parser and scheduler: input_script.c.
 static ScriptEv *script_ev;
 static int script_n, script_state;   // 0 not loaded, 1 loaded
 static int script_mixed;             // the script has timed lines: its untimed ones end where the world clock starts
 static int script_done;              // the summary line is out: no event can land any more
+static int wait_armed = -1;          // the wait line being waited for, -1 none
+// "wait file": the name each file open is matched against (NULL while no such wait is armed), and whether one matched.
+// input_file_opened runs on the game's file-open thread, wait_met and script_apply on the input thread: the pointer is
+// published with release and read with acquire.
+static const char *wait_file;
+static volatile int32_t wait_file_hit;
+
+void input_file_opened(const char *path) {
+    const char *want = __atomic_load_n(&wait_file, __ATOMIC_ACQUIRE);
+    if (want && path && strstr(path, want)) plat_xchg32(&wait_file_hit, 1);
+}
+
+// Whether wait line i's condition holds now. The first call for a line arms it: a file opened before does not count
+// (the hit is cleared before the name is published, so only an open that sees the name can set it).
+static int wait_met(const ScriptEv *e, int i, int64_t w) {
+    if (wait_armed != i) {
+        wait_armed = i;
+        plat_xchg32(&wait_file_hit, 0);
+        __atomic_store_n(&wait_file, e->wait == SCRIPT_WAIT_FILE ? e->arg : NULL, __ATOMIC_RELEASE);
+    }
+    return e->wait == SCRIPT_WAIT_WORLD ? w >= 0 : e->wait == SCRIPT_WAIT_FILE && wait_file_hit;
+}
 
 static void script_load(void) {
     script_state = 1;
@@ -84,9 +108,10 @@ static void script_load(void) {
             if (!script_ev) { script_n = 0; fclose(f); return; }
         }
         script_ev[script_n++] = e;
-        script_mixed |= e.timed;
+        script_mixed |= e.timed && !e.wait;
     }
     fclose(f);
+    script_link(script_ev, script_n);
     rt_log("input: script %s, %d events", path, script_n);
 }
 
@@ -130,14 +155,31 @@ static void script_apply(uint64_t *b, int32_t sl[2], int32_t sr[2]) {
     int64_t w = frame_step_world_us();
     for (int i = 0; i < script_n; i++) {
         ScriptEv *e = &script_ev[i];
-        int due = script_due(e, tick, w, script_mixed);
+        uint64_t t = tick;
+        int64_t sw = w;
+        if (!script_clock(script_ev, i, &t, &sw)) continue;
+        if (e->wait) {
+            int r = e->logged ? 0 : script_wait(script_ev, i, tick, w, wait_met(e, i, w));
+            if (!r) continue;
+            __atomic_store_n(&wait_file, NULL, __ATOMIC_RELEASE);
+            // In ms on its clock; the difference is the shift the lines after it get (later in this run: positive).
+            double unit = e->timed ? 1e-3 : 1000.0 / 60, at = e->at * unit, got = e->landed * unit;
+            if (e->timed && !e->off_w && !e->landed)   // held before the world clock: nothing to shift by
+                rt_log("input: script frame %llu: %s %s before the world clock (asked %.1f ms)", (unsigned long long)fr,
+                       e->text, r == 1 ? "held" : "timed out", at);
+            else
+                rt_log("input: script frame %llu: %s %s at %.1f ms (asked %.1f): the lines after it move by %+.1f ms",
+                       (unsigned long long)fr, e->text, r == 1 ? "held" : "timed out", got, at, got - at);
+            continue;
+        }
+        int due = script_due(e, t, sw, script_mixed);
         if (!due) continue;
         // The landing log: the clock reading against the time asked, so two replays can be compared line by line.
         if (due == 2 && e->timed)
-            rt_log("input: script frame %llu at %.1f ms (asked %.1f): %s", (unsigned long long)fr, w / 1000.0,
+            rt_log("input: script frame %llu at %.1f ms (asked %.1f): %s", (unsigned long long)fr, sw / 1000.0,
                    e->at / 1000.0, e->text);
         else if (due == 2)
-            rt_log("input: script frame %llu tick %llu (asked %llu): %s", (unsigned long long)fr, (unsigned long long)tick,
+            rt_log("input: script frame %llu tick %llu (asked %llu): %s", (unsigned long long)fr, (unsigned long long)t,
                    (unsigned long long)e->at, e->text);
         if (e->stick) { int32_t *s = e->stick == 1 ? sl : sr; s[0] = e->x; s[1] = e->y; }
         else *b |= 1ull << e->bit;
@@ -148,6 +190,18 @@ static void script_apply(uint64_t *b, int32_t sl[2], int32_t sr[2]) {
     script_done = 1;
     rt_log("input: script done at frame %llu: %d of %d events landed, latest %llu ticks and %.1f ms after the time asked",
            (unsigned long long)fr, s.landed, s.total, (unsigned long long)s.max_late_ticks, s.max_late_ms);
+    if (s.waits) rt_log("input: script waits: %d, %d of them timed out", s.waits, s.timeouts);
+}
+
+// Exit path (boot.c): the run ended before every event landed, so the done line never came. Logs once.
+void input_script_report(void) {
+    if (script_state != 1 || !script_n || script_done) return;
+    script_done = 1;
+    uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    ScriptSummary s = script_summary(script_ev, script_n, frame_step_ticks(), frame_step_world_us(), script_mixed);
+    rt_log("input: script ended at frame %llu: %d of %d events landed, %d pending", (unsigned long long)fr, s.landed,
+           s.total, s.pending);
+    if (s.waits) rt_log("input: script waits: %d, %d of them timed out", s.waits, s.timeouts);
 }
 
 // TOTK_INPUT_RECORD=<file>: writes the merged input as TOTK_INPUT_SCRIPT lines, one per button press and per stick

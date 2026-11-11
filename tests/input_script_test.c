@@ -80,6 +80,85 @@ int main(void) {
     assert(s.total == 3 && s.landed == 2 && s.pending == 0 && s.max_late_ticks == 1);
     assert(s.max_late_ms > 9.99 && s.max_late_ms < 10.01);
 
+    // Wait lines: conditions, timeouts and bad lines.
+    assert(parse("@14590 wait file Title.bwav 5000 # title music\n", &e) == 1);
+    assert(e.wait == SCRIPT_WAIT_FILE && e.timed && e.at == 14590000 && e.hold == 5000000 && !strcmp(e.arg, "Title.bwav"));
+    assert(!strcmp(e.text, "wait file Title.bwav"));
+    assert(parse("  wait world\n", &e) == 1);
+    assert(e.wait == SCRIPT_WAIT_WORLD && !e.timed && e.at == 0 && e.hold == 3600);   // 60 s in ticks
+    assert(parse("30 wait world 1000\n", &e) == 1 && !e.timed && e.at == 30 && e.hold == 60);
+    assert(parse("@5 wait\n", &e) == -1);
+    assert(parse("@5 wait file\n", &e) == -1);
+    assert(parse("@5 wait load\n", &e) == -1);
+
+    // A recorded script with a wait before a press: the wait held 3 s later in this run, so the press moves with it
+    // and keeps its 362 ms from the condition; the line before the wait is not held back.
+    ScriptEv sc[3];
+    assert(parse("@10952.1 A\n", &sc[0]) == 1);
+    assert(parse("@14590 wait file Title.bwav\n", &sc[1]) == 1);
+    assert(parse("@14952 A\n", &sc[2]) == 1);
+    script_link(sc, 3);
+    assert(sc[0].seg == -1 && sc[1].seg == -1 && sc[2].seg == 1);
+    uint64_t t = 0;
+    int64_t w = 15000000;
+    assert(script_clock(sc, 0, &t, &w) == 1 && w == 15000000);
+    assert(script_clock(sc, 2, &t, &w) == 0);                        // held back
+    s = script_summary(sc, 3, 0, 15000000, 1);
+    assert(s.total == 2 && s.waits == 1 && s.pending == 3);
+    assert(script_wait(sc, 1, 900, 17000000, 0) == 0);
+    assert(script_wait(sc, 1, 1055, 17590000, 1) == 1);               // the file opened 3 s late
+    assert(sc[1].landed == 17590000 && sc[1].logged == 1);
+    assert(script_wait(sc, 1, 1056, 17600000, 1) == 0);               // done once
+    t = 1055, w = 17590000;
+    assert(script_clock(sc, 2, &t, &w) == 1 && w == 14590000 && t == 875);
+    t = 1076, w = 17950000;
+    assert(script_clock(sc, 2, &t, &w) == 1 && script_due(&sc[2], t, w, 1) == 0);
+    t = 1077, w = 17966667;
+    assert(script_clock(sc, 2, &t, &w) == 1 && script_due(&sc[2], t, w, 1) == 2);   // 362 ms after the condition
+
+    // The condition earlier than in the recording moves the press earlier.
+    assert(parse("@14590 wait file Title.bwav\n", &sc[1]) == 1);
+    assert(parse("@14952 A\n", &sc[2]) == 1);
+    script_link(sc, 3);
+    assert(script_wait(sc, 1, 700, 12000000, 1) == 1);
+    t = 722, w = 12366667;
+    assert(script_clock(sc, 2, &t, &w) == 1 && script_due(&sc[2], t, w, 1) == 2);
+
+    // A timeout falls through at the wait's time plus its timeout, and the lines after it then count from there.
+    assert(parse("@1000 wait file never 500\n", &sc[1]) == 1);
+    assert(parse("@1100 B\n", &sc[2]) == 1);
+    script_link(sc, 3);
+    assert(script_wait(sc, 1, 0, 1499000, 0) == 0);
+    assert(script_wait(sc, 1, 0, 1500000, 0) == 2);
+    t = 0, w = 1600000;
+    assert(script_clock(sc, 2, &t, &w) == 1 && w == 1100000 && script_due(&sc[2], t, w, 1) == 2);
+    s = script_summary(sc, 3, 0, 1600000, 1);
+    assert(s.waits == 1 && s.timeouts == 1);
+
+    // A timed wait does not time out before the world clock starts; a bare wait runs on ticks from 0.
+    assert(parse("@0 wait world 100\n", &sc[0]) == 1);
+    sc[0].seg = -1;
+    assert(script_wait(sc, 0, 100000, -1, 0) == 0);
+    assert(parse("wait world 1000\n", &sc[0]) == 1);
+    sc[0].seg = -1;
+    assert(script_wait(sc, 0, 0, -1, 0) == 0);                        // reached at tick 0
+    assert(script_wait(sc, 0, 59, -1, 0) == 0);
+    assert(script_wait(sc, 0, 60, -1, 0) == 2 && sc[0].off_t == 60 && sc[0].off_w == 0);
+
+    // A bare wait after a late wait times out from when it was reached, not from the earlier wait's recorded time.
+    assert(parse("@70000 wait file a\n", &sc[0]) == 1);
+    assert(parse("wait file b 1000\n", &sc[1]) == 1);
+    script_link(sc, 2);
+    assert(script_wait(sc, 0, 4300, 71000000, 1) == 1);
+    assert(script_wait(sc, 1, 4400, 71100000, 0) == 0);               // first poll: not timed out
+    assert(script_wait(sc, 1, 4400 + 59, 71100000, 0) == 0);
+    assert(script_wait(sc, 1, 4400 + 60, 71100000, 0) == 2);
+
+    // Names that fill the buffer are rejected.
+    char longw[200];
+    snprintf(longw, sizeof longw, "wait file %0*d\n", 63, 1);
+    assert(parse(longw, &sc[0]) == -1);
+
     // Every button name maps to its own bit.
     for (int i = 0; i < 16; i++) {
         char line[32];

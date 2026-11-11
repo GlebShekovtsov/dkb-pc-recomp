@@ -24,14 +24,25 @@ site realtime main 3722e0 1e201828 f81f0fe9 @page:x9 bd400928 f84107e9  # same c
 site realtime main 37232c 1e201860 f81f0fe9 @page:x9 bd400920 f84107e9  # time-scale transition  [1.0.0 34ec68]
 site realtime main 6b8260 1e201820 f81f0fe9 @page:x9 bd400920 f84107e9  # secondary scene clock  [1.0.0 69fc60]
 
+# The radial blur entries a smash starts (crystal bananas, the intro rock) count their lifetime in whole 60 Hz frames:
+# each frame subtracts fcvtzs(step) from [x22-4], the step being the update info's +0x40 or +0x44. A step under 1.0
+# (any rate above 60 fps) truncates to 0, so the entry was never released and its blur stayed on screen (#158).
+# runtime/frame_rate.c blur_frames (patch page +0x250) keeps the fraction per entry and returns the whole frames in w8.
+# The function saves LR in its prologue (main+426e94), so the BL keeps its return.
+site realtime main 426f54 1e380008 948fa4bf  # fcvtzs w8, s0 in the blur entry update  [3.2.0 only]
+
 # Optional Bananza virtual display and camera aspect. Values are supplied by
 # runtime/dkb_wide.c at page +0x100 (width), +0x104 (height), +0x108 (aspect),
-# +0x10c (aspect / 16:9).
+# +0x10c (aspect / 16:9), +0x110 (render-target pool bytes).
 set dkbwide DKB_ULTRAWIDE 0
 
 # al::getVirtualDisplayWidth / Height. The retail base uses 2880 by 1620.
 site dkbwide main 5bf770 52816800 @page:x0 b9410000  # 1.0.0 5ad9f0
 site dkbwide main 5bf780 5280ca80 @page:x0 b9410400  # 1.0.0 5ada00
+
+# Framework init sets the 200 MiB render-target pool size, 0xc800000, into a field of its init argument. A larger
+# output overflows that pool (issue 152): take the size from page +0x110. x9 is overwritten right after the store.
+site dkbwide main 53995c 52a19009 @page:x9 b9411129  # 1.0.0 458adc
 
 # al::CameraPoseUpdater constructor, the default perspective aspect at +0x100.
 # The following MOVK preserves the original upper packed FOV word.

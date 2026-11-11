@@ -111,6 +111,14 @@ Every guest thread is a host thread. TotK assumes Horizon's scheduler: three app
   Rec. 709 to Rec. 2020 and PQ-encodes into the swapchain image. The in-game menu is drawn into an RGBA8 image and
   blended on at `hdr_ui_nits`. Without an HDR10 surface format (Windows with "Use HDR" off, a compositor without
   colour management) the swapchain stays SDR and none of this runs.
+- Native HDR, Bananza 3.2.0 (`hdr_native = 1` with `hdr = 1`). `ov_gfx.c` answers the game's
+  `nn::vi::QueryDisplayHdrStatus` with "on" and `hdr_peak_nits`, and `QueryDisplayHdrPaperWhite` with
+  `hdr_game_nits`. The game then switches to its own HDR mode: its window texture becomes A2B10G10R10 holding
+  Rec. 2020 PQ, which `gfx_present.c` `present_image` copies onto the HDR10 swapchain as it is (no colour adjustment,
+  FSR or SMAA, which expect an SDR picture). The game's tonemap stops its highlights at about 1.36 times paper white,
+  whatever peak it is told; `spirv_hdr_shoulder.c` (`DKB_HDR_SHOULDER=0` turns it off) rewrites its composite stage
+  so they reach the peak, leaving everything below the shoulder's knee as the game grades it. Findings and
+  measurements: [hdr-native-plan.md](hdr-native-plan.md).
 - DLSS (`upscaler = dlss`, experimental, NVIDIA only, `vk_dlss.c`): the game's upscaler dispatch is replaced by NVIDIA
   NGX DLSS on the same images, spatial only for now. Setup and limits: [dkb-dlss.md](dkb-dlss.md).
 - Occlusion queries never block the CPU; a result that is not ready counts as visible.

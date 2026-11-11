@@ -188,6 +188,19 @@ const RtLoaded *ldr_module(int i);                         // order: main, subsd
 uint64_t ldr_symbol(const char *name);                     // exported definition, 0 if none
 uint64_t ldr_plt_stub(const char *module, const char *name); // PLT stub whose GOT slot holds name, 0 if none
 const char *ldr_describe(uint64_t a, char *buf, int n);    // "main+0x1234 (symbol+0x10)", "host <name>", or the address
+// DKB_HDR_TRACE=1 (ov_gfx.c): hdr_trace_on is the setting. hdr_trace_hit counts a call of the named HDR/colour-space
+// API and, for the first 20 and then every 600th, logs "hdr-trace: <name> #<count> from <caller>" and returns 1 so the
+// caller may log its arguments; 0 when off.
+int hdr_trace_on(void);
+int hdr_trace_hit(const Cpu *c, const char *name);
+// Logs the first 64 bytes at p (a guest metadata struct) as hex, "null" or "not readable"; call after a hdr_trace_hit
+// that returned 1.
+void hdr_trace_dump(const char *name, const void *p);
+// DKB_HDR_NATIVE=1 in effect (ov_gfx.c): the setting, on game 3.2.0 with hdr = 1. Read once.
+int hdr_native_on(void);
+// The peak in nits the game last said its HDR picture reaches (SetLayerNextHdrExtendedContentLuminanceRangeMetadata),
+// 0 before it said one (ov_gfx.c). Any thread.
+int hdr_game_content_peak(void);
 uint8_t *ldr_read_verified(const char *dir, const char *file, size_t *len);   // whole file, SHA-256 checked against
                                                            // modules.c (fatal on mismatch); free() it
 
@@ -268,8 +281,12 @@ void res_heapdef_served(void);                             // romfs.c serves the
 void res_init(void);                                       // after rt_patches_init: the patch page and the sets
 void dkb_wide_init(void);                                  // Bananza-only virtual display and camera patch values
 int dkb_wide_output(unsigned out[2]);                      // active mode; optional output gets its size or the stock size
-void res_sizes(unsigned out[2], unsigned scene[2]);      // the output and scene sizes in effect (the game's own
-                                                           // until res_init switched the sets on)
+int res_sizes(unsigned out[2], unsigned scene[2]);         // the output and scene sizes in effect (the game's own
+                                                           // until res_init switched the sets on). Bananza: the game's
+                                                           // upscaler output and input; 0 (both zero) when none ran
+                                                           // in the last 120 presents
+void res_note_upscaler(unsigned in_w, unsigned in_h, unsigned out_w, unsigned out_h);   // Bananza: a dispatch of the
+                                                           // game's upscaler (vk_exec_draw.c op_dispatch)
 int res_is_16x9(unsigned w, unsigned h);                   // within 1% of 16:9 (the test res_init and romfs.c share)
 int res_wants_wide_overlay(const unsigned out[2]);         // not 16:9 on a game version with the camera aspect patch
 void res_wanted(unsigned out[2]);                          // the output size TOTK_OUTPUT_RES asks for

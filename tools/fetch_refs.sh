@@ -41,3 +41,6 @@ fetch SavageWindRecomp https://github.com/Revivedx/SavageWindRecomp.git 575ad88e
 # Eglantine (GPL-3.0-or-later): the emulator that plays Bananza, the reference for NVN 2, the GPU and Switch 2 services.
 # The same commit as runtime/third_party/eglantine/UPSTREAM_COMMIT.
 fetch eglantine https://git.eden-emu.dev/Franseven/PokeDinner-a-Eglantine-Fork.git 1dd40d86df4bca1b68700091fe5ddb71a13162b2
+# Hookshot (GPL-3.0): a recompilation of the Switch 2 Ocarina of Time remake from the same lineage (TotK Recomp, Eglantine's
+# Ampere lowering), the reference for frame generation, pipeline-state lists and its AMD workarounds.
+fetch hookshot https://github.com/NotRexed/Hookshot.git fab8cb37641714bd839ae83c2a7bc582bedc4d70

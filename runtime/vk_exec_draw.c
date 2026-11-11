@@ -106,7 +106,8 @@ static _Thread_local __typeof__(cur_fence_m) *cur_fence_tp = &cur_fence_m;
 // Descriptor pools and full-size transient chunks go back to these lists when their command buffer completes, instead
 // of being destroyed and created again for the next one: each creation is a driver memory allocation (on Windows an
 // allocation, a map and a paging-fence wait on the CPU), about ten of them per frame inside the replay.
-#define SPARE_POOLS 64
+// A pool holds 1024 sets, so 16 spares keep the driver memory they pin (about 150 MB with 64) small.
+#define SPARE_POOLS 16
 #define SPARE_CHUNKS 16
 static PlatMutex spare_lock = PLAT_MUTEX_INIT;
 static VkDescriptorPool spare_pool[SPARE_POOLS];
@@ -142,6 +143,8 @@ static struct {
     VkDescriptorSet ds_last[2];          // last allocated and written set per set number, contents in DS
     VkDescriptorSetLayout ds_last_layout[2];
     int ds_pushed[2];                    // set number holds the push of DS.psig under ds_layout
+    uint32_t ds_dyn[2][VK_DYN_UBO_MAX];  // dynamic offsets ds_bound[s] was bound with (TOTK_DYN_UBO)
+    uint32_t ds_ndyn[2];
     int res_valid;                       // the graphics sets bound hold what the inputs in RS give (bind_resources)
     float jit[2];                        // the DLSS jitter the recorded viewport carries (vk_dlss_jitter)
 } B_m;
@@ -184,6 +187,8 @@ static struct {
     int cmds;                            // check mode: pushes, binds and set writes the build recorded
     uint32_t ckn;                        // check mode: the last build's packed descriptors (bytes in ck)
     uint8_t ck[DS_SIG_BYTES];
+    uint32_t ckdn;                       // check mode: the dynamic offsets of the last build's sets (ck holds only bases)
+    uint32_t ckdyn[2 * VK_DYN_UBO_MAX];
 } RS_m = {-1};
 static _Thread_local __typeof__(RS_m) *RS_tp = &RS_m;
 #define RS (*RS_tp)
@@ -1002,11 +1007,11 @@ static VkDescriptorBufferInfo zero_info(uint64_t max) {
     return (VkDescriptorBufferInfo){Z.zbuf, 0, max < ZERO_BYTES ? max : ZERO_BYTES};
 }
 
-// vk_mem_count, also kept per (class, use) while a graphics build runs (RS).
 // DKB_DRAW_PROFILE=1: where a draw's replay time goes, by section, logged every 60000 draws as nanoseconds per draw.
 // The sections follow prepare_draw from the pass to the vertex buffers; DP_OPS is the rest of vk_exec_op_draw (the
-// bind ops, index buffers, the draw command). Time comes from the TSC (x86) and is scaled to nanoseconds against the
-// clock over each window. Off by default: two TSC reads per section.
+// bind ops, index buffers, the draw command). The "other-ops" section also counts the time of dispatches and uniform
+// updates, and is divided by draws only. Time comes from the TSC (x86) and is scaled to nanoseconds against the
+// clock over each window. Off by default: one TSC read per mark.
 enum { DP_PASS, DP_SHADER, DP_PIPE, DP_STATE, DP_SIG, DP_UBO, DP_SSBO, DP_TEX, DP_SETS, DP_FEEDBACK, DP_VB, DP_TAIL,
        DP_OPS, DP_N };
 static const char *const dp_name[DP_N] = {"pass", "shaders", "pipeline", "state", "bind-sig", "ubo", "ssbo", "textures",
@@ -1051,6 +1056,7 @@ static void dp_log(void) {
     DP.draws = DP.ops = 0, DP.win_tk = tk, DP.win_ns = ns;
 }
 
+// vk_mem_count, also kept per (class, use) while a graphics build runs (RS).
 static void count_use(int cls, int use, uint64_t n) {
     vk_mem_count(cls, use, n);
     if (!RS.rec) return;
@@ -1839,7 +1845,8 @@ static VkDescriptorSet alloc_set(VkExec *ex, VkDescriptorSetLayout layout) {
         // new pool cost a driver allocation. Fewer, larger pools make that rarer. TOTK_TRACE=perf counts the pools
         // created (vk_exec_pool_counts).
         static const VkDescriptorPoolSize sizes[] = {
-            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 16384}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8192},
+            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 16384}, {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 16384},
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8192},
             {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 16384}, {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4096},
             {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4096}, {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 1024},
             {VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 1024}};
@@ -2103,20 +2110,11 @@ static void write_set(const VkPipeInfo *info, uint32_t s, VkDescriptorSet set, c
 // graphics push equal to the last one at its set number, with no other layout or bind between, is not recorded.
 // The descriptors go into one packed array d, a VkDescSlot per descriptor in binding order, which a set's update
 // template reads directly (VkPipeInfo.tpl); write structs are filled only when a set has no template.
-static VkWriteDescriptorSet bind_w_m[MAX_BINDINGS];
-static VkDescSlot bind_d_m[MAX_DESC];
-static VkBufferView bind_bv_m[MAX_DESC];
-static _Thread_local __typeof__(bind_w_m) *bind_w_tp = &bind_w_m;
-#define bind_w (*bind_w_tp)
-static _Thread_local __typeof__(bind_d_m) *bind_d_tp = &bind_d_m;
-#define bind_d (*bind_d_tp)
-static _Thread_local __typeof__(bind_bv_m) *bind_bv_tp = &bind_bv_m;
-#define bind_bv (*bind_bv_tp)
 
 static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
-    VkWriteDescriptorSet *w = bind_w;
-    VkDescSlot *d = bind_d;
-    VkBufferView *bv = bind_bv;
+    static _Thread_local VkWriteDescriptorSet w[MAX_BINDINGS];   // per recording thread (parallel passes)
+    static _Thread_local VkDescSlot d[MAX_DESC];
+    static _Thread_local VkBufferView bv[MAX_DESC];
     if (info->n_bindings > MAX_BINDINGS) rt_fatal("vk: %u descriptor bindings exceed the replay's %d", info->n_bindings, MAX_BINDINGS);
     bind_stats(info);
     int gfx = info->bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS;
@@ -2247,6 +2245,7 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
         B.ds_pushed[0] = B.ds_pushed[1] = 0;
         set1_first = n_sets == 2 && vk_ctx()->validation;
     }
+    uint32_t alld[2 * VK_DYN_UBO_MAX], nall = 0;   // the dynamic offsets of every set, for the check mode
     for (uint32_t k = 0; k < n_sets; k++) {
         uint32_t s = set1_first ? 1 - k : k, i0 = lo[s], i1 = hi[s];
         const VkDescSlot *ds = &d[d0[s]];
@@ -2280,6 +2279,29 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
             vkCmdBindDescriptorSets(ex->cb, info->bind_point, info->layout, s, 1, &set, 0, NULL);
         } else {
             VkDescriptorSetLayout sl = s ? info->set_layout1 : info->set_layout;
+            // Dynamic uniform buffers (TOTK_DYN_UBO): the offset leaves the descriptor for the bind, so a set that
+            // differs from the last only there is reused. The descriptor keeps a 2 GiB-aligned base, a multiple of
+            // any offset alignment, so the bind's 32-bit offset always reaches; base + offset is the buffer's offset.
+            // TOTK_DYN_UBO=ab: the layouts keep their dynamic buffers, and in the A blocks the offsets stay in the
+            // descriptors (dynamic offsets 0), so each set is written anew as before: the reuse alone is measured.
+            static int dyn_mode = -1;
+            if (dyn_mode < 0) dyn_mode = rt_knob("DYN_UBO", "0");   // off by default, as in vk_pipeline.c ensure_init
+            int dyn_split = RT_KNOB_ON(dyn_mode);
+            uint32_t dyn[VK_DYN_UBO_MAX], ndyn = 0;
+            for (uint32_t i = i0, j = d0[s]; i < i1; i++) {
+                const VkPipeBinding *b = &info->bindings[i];
+                uint32_t cnt = b->count ? b->count : 1;
+                if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC)
+                    for (uint32_t k = 0; k < cnt && ndyn < VK_DYN_UBO_MAX; k++) {
+                        VkDescriptorBufferInfo *bi = &d[j + k].buffer;
+                        VkDeviceSize base = bi->range == VK_WHOLE_SIZE || !dyn_split ? bi->offset
+                                                                                     : bi->offset & ~(VkDeviceSize)0x7fffffff;
+                        dyn[ndyn++] = (uint32_t)(bi->offset - base);
+                        bi->offset = base;
+                    }
+                j += cnt;
+            }
+            memcpy(alld + nall, dyn, ndyn * sizeof *dyn), nall += ndyn;
             VkDescriptorSet set = B.ds_last[s];
             if (!set || B.ds_last_layout[s] != sl || DS.n[s] != dbytes || memcmp(DS.sig[s], ds, dbytes)) {
                 set = alloc_set(ex, sl);
@@ -2291,9 +2313,10 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
             } else {
                 BS.set_reuse++;
             }
-            if (B.ds_bound[s] != set) {
-                vkCmdBindDescriptorSets(ex->cb, info->bind_point, info->layout, s, 1, &set, 0, NULL);
-                B.ds_bound[s] = set, B.ds_pushed[s] = 0;
+            if (B.ds_bound[s] != set || B.ds_ndyn[s] != ndyn || (ndyn && memcmp(B.ds_dyn[s], dyn, ndyn * sizeof *dyn))) {
+                vkCmdBindDescriptorSets(ex->cb, info->bind_point, info->layout, s, 1, &set, ndyn, ndyn ? dyn : NULL);
+                B.ds_bound[s] = set, B.ds_pushed[s] = 0, B.ds_ndyn[s] = ndyn;
+                if (ndyn) memcpy(B.ds_dyn[s], dyn, ndyn * sizeof *dyn);
                 RS.cmds++;
             }
         }
@@ -2307,7 +2330,7 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
             if (hi[s] > lo[s] && (s ? info->push1 : info->push) && !B.ds_pushed[s]) valid = 0;
         if (skip == 2) {   // with the pipeline info equal (bind_sig), the packed descriptors determine every write
             uint32_t n = (uint32_t)(nd * sizeof *d);
-            int wr = n != RS.ckn || memcmp(RS.ck, d, n);
+            int wr = n != RS.ckn || memcmp(RS.ck, d, n) || nall != RS.ckdn || memcmp(RS.ckdyn, alld, nall * sizeof *alld);
             int cn = RS.ncnt != RS.pncnt || memcmp(RS.cnt, RS.pcnt, sizeof RS.cnt[0] * (size_t)RS.ncnt);
             if (same && was_valid && (wr || cn || RS.cmds))
                 rt_fatal("vk_exec: descriptor build skip check: a draw of program %llu with the inputs of the previous one "
@@ -2316,6 +2339,8 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
             if (same && was_valid) BS.bind_skip++;   // the draws a skip would have spared, compared instead
             RS.ckn = n;
             memcpy(RS.ck, d, n);
+            RS.ckdn = nall;
+            memcpy(RS.ckdyn, alld, nall * sizeof *alld);
         }
         B.res_valid = valid;
     }
@@ -3172,6 +3197,18 @@ static int dlss_upscale(VkExec *ex, const GfxShader *cs) {
     return vk_dlss_record(ex->cb, ex->fence, s, t);
 }
 
+// Tells the HUD (resolution.c res_note_upscaler) the sizes of every dispatch of the game's upscaler, whatever replaces
+// it (blit, DLSS) or none: same slots as dlss_upscale, the input texture 0 and the output image 1.
+static void note_upscaler(VkExec *ex, const GfxShader *cs) {
+    if (!mvk_upscale_cs(gfx_shader_spirv_fnv(cs))) return;
+    uint64_t hs = ex->tex[NVN_STAGE_CS][0], hd = ex->img[NVN_STAGE_CS][1];
+    view_t vs, vd;
+    int hvs = 0, hvd = 0;
+    const VkTexImage *s = hs ? vk_texture_by_id(&ex->tex_pool, NVN_HANDLE_TEX(hs), &vs, &hvs) : NULL;
+    const VkTexImage *t = hd ? vk_texture_by_id(&ex->tex_pool, NVN_HANDLE_TEX(hd), &vd, &hvd) : NULL;
+    if (s && t) res_note_upscaler(s->width, s->height, t->width, t->height);
+}
+
 static void op_dispatch(VkExec *ex, const p_dispatch *d) {
     if (d->x <= 0 || d->y <= 0 || d->z <= 0) return;
     static int skip = -1;   // DKB_SKIP_COMPUTE=1: drop every direct dispatch (bisecting GPU faults)
@@ -3193,6 +3230,7 @@ static void op_dispatch(VkExec *ex, const p_dispatch *d) {
     twin_dispatch = 1;
     bind_resources(ex, info);
     twin_dispatch = 0;
+    note_upscaler(ex, cs);
     int blit = mvk_upscale_blit(ex, cs);
     int dlss = blit ? 0 : dlss_upscale(ex, cs);
     if (dlss) vk_exec_draw_new_cb(), ex->dirty = VK_EXEC_DIRTY_ALL;   // NGX left its own pipeline, descriptors and state
@@ -3525,7 +3563,7 @@ void vk_exec_op_draw(VkExec *ex, uint32_t op, const void *payload) {
 // file's own objects (*_m) on every thread until vk_exec_draw_ctx_use points them at a worker's copies. A worker's copies
 // start as the submitting thread's at vk_exec_draw_ctx_new, without what belongs to that thread alone (its per-submission
 // resources, the descriptor-build lists) and without the caches keyed by its descriptor contexts.
-#define DRAW_CTX_OBJS(X) X(c0_lay) X(cur) X(cur_fence) X(DS) X(rs_lists) X(rs_last) X(rs_last_l) X(bind_gen) X(shader_tab) X(stagem) X(AC) X(slotm) X(FM) X(SM) X(PM) X(DP) X(c0_dim) X(c0_binst) X(native_gs_vs) X(native_gs_fs) X(B) X(BS) X(RS) X(bind_w) X(bind_d) X(bind_bv) X(TD)
+#define DRAW_CTX_OBJS(X) X(c0_lay) X(cur) X(cur_fence) X(DS) X(rs_lists) X(rs_last) X(rs_last_l) X(bind_gen) X(shader_tab) X(stagem) X(AC) X(slotm) X(FM) X(SM) X(PM) X(DP) X(c0_dim) X(c0_binst) X(native_gs_vs) X(native_gs_fs) X(B) X(BS) X(RS) X(TD)
 typedef struct {
 #define X(n) __typeof__(n##_m) *p_##n;
     DRAW_CTX_OBJS(X)

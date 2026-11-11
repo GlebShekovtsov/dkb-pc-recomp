@@ -36,6 +36,8 @@
 
 #include "cfg.h"
 #include "host.h"
+#include "nvn_api.h"
+#include "res_upscaler.h"
 
 #define BASE_W 1920
 #define BASE_H 1080
@@ -293,8 +295,29 @@ void res_wanted(unsigned out[2]) {
     out[0] = R.ow, out[1] = R.oh;
 }
 
-void res_sizes(unsigned out[2], unsigned scene[2]) {
+// Bananza: the sizes of the game's own compute upscaler, noted at its dispatch (vk_exec_draw.c op_dispatch) on the
+// replaying thread and read by the menu thread. The sizes and the frame stamp are two atomics; a read between the two
+// stores sees an old stamp with new sizes at worst, which only delays the staleness by a frame.
+static uint64_t up_sizes, up_frame;
+
+void res_note_upscaler(unsigned in_w, unsigned in_h, unsigned out_w, unsigned out_h) {
+    uint64_t p = res_up_pack(in_w, in_h, out_w, out_h);
+    uint64_t old = __atomic_exchange_n(&up_sizes, p, __ATOMIC_RELAXED);
+    __atomic_store_n(&up_frame, __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), __ATOMIC_RELAXED);
+    if ((old >> 32) != (p >> 32)) rt_log("upscaler: %ux%u -> %ux%u", in_w, in_h, out_w, out_h);
+}
+
+int res_sizes(unsigned out[2], unsigned scene[2]) {
+    if (!rt_game_version) {
+        // Bananza has no scene size of its own to report: the upscaler's input and output stand in for them.
+        uint64_t p = __atomic_load_n(&up_sizes, __ATOMIC_RELAXED);
+        int fresh = res_up_fresh(p, __atomic_load_n(&up_frame, __ATOMIC_RELAXED),
+                                 __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED));
+        res_up_unpack(fresh ? p : 0, scene, out);
+        return fresh;
+    }
     decide();
     out[0] = R.on ? R.ow : BASE_W, out[1] = R.on ? R.oh : BASE_H;
     scene[0] = R.on ? R.sw : SCENE_W, scene[1] = R.on ? R.sh : SCENE_H;
+    return 1;
 }
