@@ -1017,6 +1017,8 @@ static VkDescriptorBufferInfo zero_info(uint64_t max) {
 // bind ops, index buffers, the draw command). The "other-ops" section also counts the time of dispatches and uniform
 // updates, and is divided by draws only. Time comes from the TSC (x86) and is scaled to nanoseconds against the
 // clock over each window. Off by default: one TSC read per mark.
+static _Thread_local int dp_thread;   // a slice worker (vk_exec_draw_ctx_use), for the profile line
+
 enum { DP_PASS, DP_SHADER, DP_PIPE, DP_STATE, DP_SIG, DP_UBO, DP_SSBO, DP_TEX, DP_SETS, DP_FEEDBACK, DP_VB, DP_TAIL,
        DP_OPS, DP_N };
 static const char *const dp_name[DP_N] = {"pass", "shaders", "pipeline", "state", "bind-sig", "ubo", "ssbo", "textures",
@@ -1055,8 +1057,8 @@ static void dp_log(void) {
         sum += v;
         o += (size_t)snprintf(line + o, sizeof line - o, "%s%s %.0f", i ? ", " : "", dp_name[i], v);
     }
-    rt_log("vk_exec: draw profile over %llu draws (%llu other ops), ns per draw: %s; total %.0f",
-           (unsigned long long)DP.draws, (unsigned long long)DP.ops, line, sum);
+    rt_log("vk_exec: draw profile (%s) over %llu draws (%llu other ops), ns per draw: %s; total %.0f",
+           dp_thread ? "slice worker" : "replay thread", (unsigned long long)DP.draws, (unsigned long long)DP.ops, line, sum);
     memset(DP.ticks, 0, sizeof DP.ticks);
     DP.draws = DP.ops = 0, DP.win_tk = tk, DP.win_ns = ns;
 }
@@ -3596,6 +3598,7 @@ void *vk_exec_draw_ctx_new(void) {
 
 void vk_exec_draw_ctx_use(void *ctx) {
     DrawCtx *c = ctx;
+    dp_thread = 1;
 #define X(n) n##_tp = c->p_##n;
     DRAW_CTX_OBJS(X)
 #undef X

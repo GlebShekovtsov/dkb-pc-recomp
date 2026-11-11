@@ -56,7 +56,9 @@ typedef struct { uint64_t sig; uint32_t draws; uint8_t banned; } ParHist;
 static ParHist par_hist[PAR_HIST];
 static int par_mode = -1;                       // DKB_REPLAY_THREADS: 0 off, else the threads (stage A: 1)
 static uint64_t par_t_collect, par_t_own, par_t_wait, par_t_exec;   // ns on the submitting thread (TOTK_TRACE=perf)
-static uint64_t par_t0;                         // the collection's start
+static uint64_t par_t0; 
+static volatile int64_t par_rec[2][3];          // slices recorded by the submitting thread [0] and workers [1]: count, draws, ns
+                        // the collection's start
 static uint64_t par_unsliced[4];                // draws of unsliced passes: under 64, under 256, under 1024, more
 static uint64_t par_restarts;                   // passes a clear opened that were opened again for slices
 static uint64_t par_passes, par_slices, par_sliced_draws, par_skipped_oq;   // since the last perf line
@@ -1246,6 +1248,12 @@ typedef struct {
 static ParOut par_out[PAR_MAX_SLICES];
 
 // Records slice i into a secondary command buffer of pp, from the slice's copy of the replay state, into w.
+static void par_rec_note(int worker, int i, uint64_t ns) {   // TOTK_TRACE=perf: who recorded slice i, and how long
+    int end = PC.end[i], draws = 0;
+    for (int k = PC.start[i]; k < end; k++) draws += PC.ops[k]->op == OP_DRAW || PC.ops[k]->op == OP_DRAW_IDX;
+    plat_add64(&par_rec[worker][0], 1), plat_add64(&par_rec[worker][1], draws), plat_add64(&par_rec[worker][2], (int64_t)ns);
+}
+
 static void par_record(int i, ParPool *pp, VkExec *w) {
     VkCommandBuffer cb = par_secondary(pp);
     par_begin_secondary(&PC.snap[i], cb);
@@ -1322,7 +1330,9 @@ static void par_worker(void *arg) {
         }
         int i = pw_next++;
         plat_mutex_unlock(&pw_lock);
+        uint64_t t = kern_now_ns();
         par_record(i, &pw->pp, &pw->w);
+        par_rec_note(1, i, kern_now_ns() - t);
         plat_mutex_lock(&pw_lock);
         if (++pw_done == pw_pub) plat_cond_broadcast(&pw_idle);
     }
@@ -1374,6 +1384,15 @@ static void par_flush(VkExec *ex) {
                    "and more %llu", par_t_collect / 1e6, par_t_own / 1e6, par_t_wait / 1e6, par_t_exec / 1e6,
                    (unsigned long long)par_unsliced[0], (unsigned long long)par_unsliced[1],
                    (unsigned long long)par_unsliced[2], (unsigned long long)par_unsliced[3]);
+        if (par_mode > 0) {
+            int64_t r[2][3];
+            for (int k = 0; k < 2; k++)
+                for (int j = 0; j < 3; j++) r[k][j] = plat_xchg64(&par_rec[k][j], 0);
+            rt_log("perf: slices recorded by the submitting thread %lld (%lld draws, %.2f us a draw), by the workers %lld "
+                   "(%lld draws, %.2f us a draw)", (long long)r[0][0], (long long)r[0][1],
+                   r[0][1] ? r[0][2] / 1e3 / (double)r[0][1] : 0.0, (long long)r[1][0], (long long)r[1][1],
+                   r[1][1] ? r[1][2] / 1e3 / (double)r[1][1] : 0.0);
+        }
         par_t_collect = par_t_own = par_t_wait = par_t_exec = 0;
         memset(par_unsliced, 0, sizeof par_unsliced);
         par_restarts = 0;
@@ -1391,7 +1410,9 @@ static void par_flush(VkExec *ex) {
     while (pw_next < pw_pub) {   // the submitting thread records slices too
         int i = pw_next++;
         plat_mutex_unlock(&pw_lock);
+        uint64_t t = kern_now_ns();
         par_record(i, &par_main_pool, &par_main_w);
+        par_rec_note(0, i, kern_now_ns() - t);
         plat_mutex_lock(&pw_lock);
         pw_done++;
     }
