@@ -241,6 +241,14 @@ per recording thread, up to 64. On the submitting thread, the uniform snapshot a
 submission (`vk_usnap_begin`, `copy_ranges`, `plat_mem_written`) take about 3.5 ms a frame, which slicing does not
 touch.
 
+### Spinning workers: 33-38 fps
+
+With the workers spinning (7273a3f, six threads) the hills spot's replay fell to 16-17 ms for 28,000-29,000 draws, the
+frame rate to 33-38 fps (from 30-31), and the area's opening view to 46-47 fps with an 11.5-12 ms replay. The
+submitting thread still records 4.7 ms of slices a frame and waits about 0.5 ms. Under Bananza's original game timing a
+frame rate between 30 and 60 slows the game down (it steps by the present interval it chose), which the tester noticed;
+`DKB_REALTIME=1` makes game time follow the clock.
+
 ## Plan
 
 1. **Measure and remove the cheap waste** (done here).
