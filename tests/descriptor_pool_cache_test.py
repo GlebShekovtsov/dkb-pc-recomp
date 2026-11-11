@@ -118,12 +118,12 @@ static uint64_t ubo_ptr(const VkExec *ex,int st,const GfxShaderRes *r) { (void)e
     # The descriptor switches (TOTK_DESC_*), which tex_info_lookup and descriptor_state ask.
     knobs = draw[draw.index('static int knob_on('):draw.index('// TOTK_BIND_STATS counters (bind_stats).')]
     ac = function(draw, 'static struct { uint64_t context, tex[32],') + ' AC[6];\n'
-    serial = next(line for line in draw.splitlines() if line.startswith('static uint64_t descriptor_serial'))
+    serial = next(line for line in draw.splitlines() if line.startswith(('static uint64_t descriptor_serial', 'static uint64_t _Thread_local descriptor_serial')))
     sub = function(draw, 'typedef struct { VkImage image; uint32_t l0,') + ' SubRange;\n'
     fm = function(draw, 'static struct { uint64_t context, h, tok; uint32_t gen; SubRange r;') + ' FM[FM_N];\n'
     td_start = draw.index('#define TD_N ')
     td_begin = draw.index('static struct {', td_start)
-    td = draw[td_begin:draw.index('} TD[TD_N];', td_begin) + len('} TD[TD_N];')]
+    td = draw[td_begin:draw.index('} TD_m[TD_N];', td_begin)] + '} TD[TD_N];'
     memo_end = draw.index('} MemoKey;')
     memo = draw[draw.rfind('typedef struct {', 0, memo_end):memo_end + len('} MemoKey;')]
     sm = function(draw, 'static struct { int on, valid, has_fs') + ' SM = {.on=-1};\n'
