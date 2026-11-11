@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include "host.h"
+#include "msort.h"
 #include "nvn_api.h"
 #include "vk.h"
 #include "platform/platform.h"
@@ -133,10 +134,8 @@ static int by_lo(const void *a, const void *b) {
     uint64_t x = ((const Rng *)a)->lo, y = ((const Rng *)b)->lo;
     return x < y ? -1 : x > y;
 }
-static int wr_by_lo(const void *a, const void *b) {
-    uint64_t x = ((const Wrote *)a)->lo, y = ((const Wrote *)b)->lo;
-    return x < y ? -1 : x > y;
-}
+#define WROTE_LESS(x, y) ((x)->lo < (y)->lo)
+MSORT_DEFINE(sort_wrote, Wrote, WROTE_LESS)   // by lo, without a call per comparison (msort.h)
 
 // Sorts the collected ranges by lo. A town frame binds about 10,000 uniform ranges and qsort took half a millisecond
 // of the copy's 0.96 ms on the game thread, so they go through an LSD radix sort on (lo - lowest) / ALIGN, three
@@ -183,7 +182,9 @@ static void wr_prune(void) {
     int n = 0;
     for (int i = 0; i < U.nwr; i++)
         if (U.wr[i].fence > done) U.wr[n++] = U.wr[i];
-    qsort(U.wr, (size_t)n, sizeof *U.wr, wr_by_lo);
+    static Wrote *sbuf;   // the submitting thread's (vk_usnap_begin)
+    static size_t scap;
+    sort_wrote(U.wr, (size_t)n, &sbuf, &scap);
     int m = 0;
     for (int i = 0; i < n; i++) {
         if (m && U.wr[i].lo <= U.wr[m - 1].hi) {

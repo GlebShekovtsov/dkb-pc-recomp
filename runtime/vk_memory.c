@@ -18,6 +18,7 @@
 #include "gfx.h"
 #include "host.h"
 #include "nvn_api.h"
+#include "msort.h"
 #include "nvn_pool_index.h"
 #include "vk.h"
 #include "platform/platform.h"
@@ -1507,16 +1508,15 @@ static void range_add(MRange **a, int *n, int *cap, PoolRec *r, uint64_t off, ui
     (*a)[(*n)++] = (MRange){r, off, size};
 }
 
-static int range_cmp(const void *x, const void *y) {
-    const MRange *a = x, *b = y;
-    if (a->r != b->r) return (uintptr_t)a->r < (uintptr_t)b->r ? -1 : 1;
-    return a->off < b->off ? -1 : a->off > b->off;
-}
+#define MRANGE_LESS(x, y) ((x)->r != (y)->r ? (uintptr_t)(x)->r < (uintptr_t)(y)->r : (x)->off < (y)->off)
+MSORT_DEFINE(sort_ranges, MRange, MRANGE_LESS)   // by pool, then offset, without a call per comparison (msort.h)
 
 // Records the ranges as one vkCmdCopyBuffer per pool, overlapping and adjacent ranges merged; to_mirror: buf -> mbuf,
 // else mbuf -> buf. Returns the commands recorded; adds what they move to *bytes and *copies.
 static int copy_ranges(VkCommandBuffer cb, MRange *a, int n, int to_mirror, uint64_t *bytes, uint64_t *copies) {
-    qsort(a, (size_t)n, sizeof *a, range_cmp);
+    static MRange *sbuf;   // the submitting thread's (vk_mem_mirror_begin and _end)
+    static size_t scap;
+    sort_ranges(a, (size_t)n, &sbuf, &scap);
     int rec = 0;
     for (int i = 0; i < n;) {
         PoolRec *r = a[i].r;

@@ -282,6 +282,17 @@ in `vk_usnap_drop`; 5.5% is the driver's push descriptors. The next commit keeps
 slot tokens of a slice per thread while the slot and memory generations stay, and skips a write-back range a thread
 already added in the submission.
 
+### Asynchronous replay, and the submitting thread's own costs (5eae626)
+
+Eight threads with the replay on its own thread (`DKB_REPLAY_ASYNC=1`): 31.5 fps, four threads: 30 fps, against 36-37
+without it. The replay itself took 12.5 ms, but the game's other threads waited 21 ms a frame on fences (10.5 ms
+without): the game waits for the GPU's results within the frame, so the replay stays on its critical path either way.
+
+The profile of the same build (eight threads, synchronous) splits the submitting thread's replay: about 6 ms a frame
+go to per-submission bookkeeping (`vk_usnap_begin` 2.7 ms, `vk_mem_mirror_end` 2 ms, `vk_exec_reset_indirect` 1 ms),
+and most of the first two is the CRT's `qsort` over the write lists (`wr_prune`, `copy_ranges`). A second game thread
+that submits a little work spends about 4 ms a frame waiting for `sub_lock` while the main submission replays.
+
 ## Plan
 
 1. **Measure and remove the cheap waste** (done here).
