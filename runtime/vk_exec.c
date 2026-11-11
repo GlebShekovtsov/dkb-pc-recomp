@@ -54,6 +54,9 @@ enum { PAR_WHY_UNSEEN, PAR_WHY_NONE, PAR_WHY_NEW, PAR_WHY_SMALL, PAR_WHY_BANNED,
 typedef struct { uint64_t sig; uint32_t draws; uint8_t banned; } ParHist;
 static ParHist par_hist[PAR_HIST];
 static int par_mode = -1;                       // DKB_REPLAY_THREADS: 0 off, else the threads (stage A: 1)
+static uint64_t par_t_collect, par_t_own, par_t_wait, par_t_exec;   // ns on the submitting thread (TOTK_TRACE=perf)
+static uint64_t par_t0;                         // the collection's start
+static uint64_t par_unsliced[4];                // draws of unsliced passes: under 64, under 256, under 1024, more
 static uint64_t par_restarts;                   // passes a clear opened that were opened again for slices
 static uint64_t par_passes, par_slices, par_sliced_draws, par_skipped_oq;   // since the last perf line
 static uint64_t par_end_op[OP_COUNT_ + 1];     // collections ended by each op (OP_COUNT_: the submission's end)
@@ -732,6 +735,8 @@ void vk_exec_pass_end(VkExec *ex) {
                    pass_draws, why[pass_why], (unsigned long long)sig, (unsigned)par_slot(sig), h ? h->draws : 0,
                    (unsigned long long)par_hist[par_slot(sig)].sig);
         }
+        if (!pass_sliced && par_mode > 0)
+            par_unsliced[pass_draws < 64 ? 0 : pass_draws < 256 ? 1 : pass_draws < 1024 ? 2 : 3] += pass_draws;
         ParHist *e = par_find(sig, pass_draws >= PAR_MIN_DRAWS);
         if (e) e->draws = pass_draws >= e->draws ? pass_draws : e->draws - e->draws / 8;
     }
@@ -1169,6 +1174,7 @@ static int par_start(VkExec *ex) {
     }
     if (par_mode > 1) par_start_workers();
     PC.on = 1, PC.sig = sig, PC.nops = 0, PC.nslices = 0, PC.draws = 0, PC.slice_draws = PAR_SLICE_DRAWS;
+    par_t0 = kern_now_ns();
     return 1;
 }
 
@@ -1330,6 +1336,14 @@ static void par_flush(VkExec *ex) {
                    (unsigned long long)par_no[1], (unsigned long long)par_no[2], (unsigned long long)par_no[3],
                    (unsigned long long)par_no[4], (unsigned long long)par_restarts);
         }
+        if (par_mode > 0)
+            rt_log("perf: sliced passes on the submitting thread: collecting %.1f ms, own slices %.1f ms, waiting for workers "
+                   "%.1f ms, executing %.1f ms; draws of unsliced passes: under 64 %llu, 64-255 %llu, 256-1023 %llu, 1024 "
+                   "and more %llu", par_t_collect / 1e6, par_t_own / 1e6, par_t_wait / 1e6, par_t_exec / 1e6,
+                   (unsigned long long)par_unsliced[0], (unsigned long long)par_unsliced[1],
+                   (unsigned long long)par_unsliced[2], (unsigned long long)par_unsliced[3]);
+        par_t_collect = par_t_own = par_t_wait = par_t_exec = 0;
+        memset(par_unsliced, 0, sizeof par_unsliced);
         par_restarts = 0;
         memset(par_end_op, 0, sizeof par_end_op), memset(par_no, 0, sizeof par_no);
         par_passes = par_slices = par_sliced_draws = par_skipped_oq = 0;
@@ -1338,6 +1352,8 @@ static void par_flush(VkExec *ex) {
     if (!PC.on) return;
     PC.on = 0;
     par_passes++, par_slices += (uint64_t)PC.nslices, par_sliced_draws += (uint64_t)PC.draws;
+    uint64_t t1 = kern_now_ns();
+    par_t_collect += t1 - par_t0;
     if (PC.nslices) par_publish();
     plat_mutex_lock(&pw_lock);
     while (pw_next < pw_pub) {   // the submitting thread records slices too
@@ -1347,7 +1363,10 @@ static void par_flush(VkExec *ex) {
         plat_mutex_lock(&pw_lock);
         pw_done++;
     }
+    uint64_t t2 = kern_now_ns();
     while (pw_done < pw_pub) plat_cond_wait(&pw_idle, &pw_lock);
+    uint64_t t3 = kern_now_ns();
+    par_t_own += t2 - t1, par_t_wait += t3 - t2;
     pw_pub = pw_next = pw_done = 0;
     plat_mutex_unlock(&pw_lock);
     ParDone *done = malloc(sizeof *done + sizeof(ParCb) * (size_t)PC.nslices);
@@ -1373,6 +1392,7 @@ static void par_flush(VkExec *ex) {
     free(cbs);
     ex->recorded++;
     vk_completion_add(ex->fence, par_done, done);
+    par_t_exec += kern_now_ns() - t3;
     vk_exec_draw_slice_begin();   // the primary's bindings are undefined after vkCmdExecuteCommands
     ex->dirty = VK_EXEC_DIRTY_ALL;
     vk_exec_pass_end(ex);         // a pass of secondary command buffers takes nothing else
