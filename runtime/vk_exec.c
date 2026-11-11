@@ -46,7 +46,8 @@ static _Thread_local int x_here;   // this thread is inside vk_exec_record (vk_e
 
 // Parallel passes: the state shared with the pass handlers (the rest is at the op loop).
 #define PAR_MIN_DRAWS 256
-#define PAR_SLICE_DRAWS 1024
+#define PAR_SLICE_DRAWS 1024   // the largest slice
+#define PAR_SLICE_MIN 128      // the smallest: below it a slice's fixed costs (a copy of X, cold memos) weigh too much
 #define PAR_HIST 256
 enum { PAR_WHY_UNSEEN, PAR_WHY_NONE, PAR_WHY_NEW, PAR_WHY_SMALL, PAR_WHY_BANNED, PAR_WHY_NOATT, PAR_WHY_QUERY };
 #define PAR_BAN_AFTER 8   // hazards after which a target set is not sliced again
@@ -78,7 +79,7 @@ static struct {
     VkExec *snap;                                // X before each slice's first op (PAR_MAX_SLICES)
     int start[PAR_MAX_SLICES], end[PAR_MAX_SLICES];   // each slice's ops; end is set when the slice is published
     int nslices;
-    int draws, slice_draws;
+    int draws, slice_draws, slice_size;
     int oq;                                      // an occlusion query spans the pass: the slices inherit it
     VkQueryControlFlags oq_flags;
 } PC;
@@ -1055,7 +1056,7 @@ static void state_op(VkExec *ex, uint32_t op, const void *a) {
 // ---- parallel passes (DKB_REPLAY_THREADS=N, off by default; docs/parallel-replay.md)
 // A render pass whose targets drew at least PAR_MIN_DRAWS draws the last time is recorded in slices. From its first
 // direct draw the walk collects the pass's state, bind and draw ops instead of replaying them: it applies the state and
-// bind ops to X and starts a slice with a copy of X every PAR_SLICE_DRAWS draws. A complete slice is published to the
+// bind ops to X and starts a slice with a copy of X every PC.slice_size draws (128-1024, a share of the pass per thread). A complete slice is published to the
 // workers, which replay its ops from its copy into a secondary command buffer while the walk collects on. At the first
 // op of another kind (or the end of the submission) the submitting thread records the slices still untaken, waits for
 // the others, and the primary executes all of them in order inside the pass, which began with
@@ -1133,7 +1134,7 @@ static int par_start(VkExec *ex) {
         const char *e = cfg_get("TOTK_REPLAY_THREADS");
         par_mode = e && *e ? atoi(e) : 0;
         if (par_mode < 0) par_mode = 0;
-        if (par_mode) rt_log("vk: passes of %d or more draws are recorded in slices of %d into secondary command buffers "
+        if (par_mode) rt_log("vk: passes of %d or more draws are recorded in slices of up to %d draws into secondary command buffers "
                              "(TOTK_REPLAY_THREADS=%d: recorded by that many threads)", PAR_MIN_DRAWS, PAR_SLICE_DRAWS, par_mode);
     }
     // An open pass (a clear opened it, or its first draws were indirect) can still be sliced: it is ended and opened
@@ -1173,7 +1174,12 @@ static int par_start(VkExec *ex) {
         if (!PC.ops || !PC.snap) rt_fatal("vk: out of memory");
     }
     if (par_mode > 1) par_start_workers();
-    PC.on = 1, PC.sig = sig, PC.nops = 0, PC.nslices = 0, PC.draws = 0, PC.slice_draws = PAR_SLICE_DRAWS;
+    // Slices of about a third of the pass per thread, so that every thread gets a few: with 1024 draws a slice, the
+    // busy area's sliced passes (13 a frame, 1,600 draws on average) made 2.4 slices each, and the submitting thread
+    // spent as long waiting for the workers as recording its own share.
+    int size = par_mode > 1 ? (int)(e->draws / (uint32_t)(3 * par_mode)) : PAR_SLICE_DRAWS;
+    size = size < PAR_SLICE_MIN ? PAR_SLICE_MIN : size > PAR_SLICE_DRAWS ? PAR_SLICE_DRAWS : size;
+    PC.on = 1, PC.sig = sig, PC.nops = 0, PC.nslices = 0, PC.draws = 0, PC.slice_size = size, PC.slice_draws = size;
     par_t0 = kern_now_ns();
     return 1;
 }
@@ -1208,7 +1214,7 @@ static int par_take(VkExec *ex, const op_hdr *h, const void *a) {
         vk_exec_op_draw(ex, h->op, a);   // binds only change ex
         break;
     case OP_DRAW: case OP_DRAW_IDX:
-        if (PC.slice_draws >= PAR_SLICE_DRAWS && PC.nslices < PAR_MAX_SLICES) {
+        if (PC.slice_draws >= PC.slice_size && PC.nslices < PAR_MAX_SLICES) {
             // A new slice starts at this draw, from ex as it is now; the one before is complete and goes to the workers.
             if (PC.nslices) par_publish();
             PC.snap[PC.nslices] = *ex;

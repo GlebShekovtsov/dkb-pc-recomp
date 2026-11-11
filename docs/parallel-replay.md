@@ -219,6 +219,14 @@ replay on it, and the game's other threads wait 18 ms a frame on fences. The fra
 followed by the GPU's 11-14 ms, which begins only when the big passes are submitted, so 60 fps in this spot needs both
 shorter and overlapped, not the replay alone.
 
+### Slices sized by the pass
+
+With the timing line (81c8015, 6 threads, per frame): about 22,000 of 29,000 draws in slices, 13 sliced passes of 1,600
+draws on average in 33 slices. In those passes the submitting thread spent 0.9 ms collecting, 4.8 ms recording its own
+slices and 4.9 ms waiting for the workers: with 1024 draws a slice, a pass gave each thread little or nothing to take.
+Unsliced passes kept only a few hundred draws a frame. The slice size is now a third of the pass's draw count per thread,
+between 128 and 1024 draws.
+
 ## Plan
 
 1. **Measure and remove the cheap waste** (done here).
