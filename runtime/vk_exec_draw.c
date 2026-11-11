@@ -802,8 +802,21 @@ static _Thread_local __typeof__(AC_m) *AC_tp = &AC_m;
 static uint64_t _Thread_local descriptor_serial = 1;
 
 // vk_texture_slot_token of the slot a texture or image handle names; an empty handle always resolves to nothing.
+// In a slice of a parallel pass the thread keeps the tokens while the slot and memory generations stay: a token
+// changes only with a registration or an entry change, which bump vk_texture_slots_gen, or with a remapped pool
+// (vk_mem_gen). A profile on eight threads had 7% of the slices' recording waiting for the texture lock here.
 static uint64_t token_of(const VkExec *ex, uint64_t h) {
-    return h ? vk_texture_slot_token(&ex->tex_pool, (int)(h & 0xfffff)) : 1;
+    if (!h) return 1;
+    int id = (int)(h & 0xfffff);
+    if (!vk_exec_par_slice()) return vk_texture_slot_token(&ex->tex_pool, id);
+    static _Thread_local struct { uint64_t pool, mg, tok; uint32_t id, sg; } tk[256];
+    uint32_t sg = vk_texture_slots_gen();
+    uint64_t mg = vk_mem_gen();
+    __typeof__(tk[0]) *k = &tk[(id ^ id >> 8) & 255];
+    if (k->tok && k->pool == ex->tex_pool.addr && k->id == (uint32_t)id && k->sg == sg && k->mg == mg) return k->tok;
+    uint64_t t = vk_texture_slot_token(&ex->tex_pool, id);
+    *k = (__typeof__(*k)){ex->tex_pool.addr, mg, t, (uint32_t)id, sg};
+    return t;
 }
 
 static void descriptor_state(VkExec *ex);

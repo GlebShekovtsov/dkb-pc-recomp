@@ -1737,12 +1737,21 @@ int vk_mem_mirror_probe(uint64_t addr) {
     return ((PoolRec *)sp.pool)->mstate == MS_ON;
 }
 
+// A range already added in this submission adds nothing (copy_ranges merges overlaps): each thread remembers the
+// ranges it added, so the same storage buffer bound by draw after draw takes use_lock once. A profile on eight
+// threads had 6% of the parallel slices' recording waiting for use_lock here, and the busy area adds about 7,600
+// write-back ranges a frame that vk_mem_mirror_end sorts.
 void vk_mem_gpu_wrote(const VkMemSpan *sp, uint64_t size) {
     PoolRec *r = sp->pool;
     if (!r || r->mstate != MS_ON || sp->buffer != r->mbuf || !size) return;
+    static _Thread_local struct { const PoolRec *r; uint64_t off, size; uint32_t sub; } seen[128];
+    __typeof__(seen[0]) *k = &seen[((uintptr_t)r >> 6 ^ sp->offset >> 4) & 127];
+    uint32_t sub = __atomic_load_n(&msub, __ATOMIC_RELAXED);
+    if (k->r == r && k->sub == sub && k->off == sp->offset && k->size >= size) return;
     plat_mutex_lock(&use_lock);
     range_add(&wbl, &nwbl, &cwbl, r, sp->offset, size);
     plat_mutex_unlock(&use_lock);
+    *k = (__typeof__(*k)){r, sp->offset, size, sub};
 }
 
 void nvn_pool_flushed(const pool_t *p, uint64_t off, uint64_t size) {

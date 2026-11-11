@@ -54,6 +54,7 @@ void rt_fatal(const char *fmt,...) { (void)fmt; abort(); }
 uint64_t vk_mem_gen(void) { return memory_generation; }
 uint64_t vk_usnap_gen(void) { return 1; }
 uint32_t vk_texture_slots_gen(void) { return 7; }
+int vk_exec_par_slice(void) { return 0; }
 uint32_t vk_texture_epoch(void) { return 1; }
 uint32_t vk_sampler_gen(void) { return 9; }
 void vk_texture_lock(void) { if (locked++) abort(); }

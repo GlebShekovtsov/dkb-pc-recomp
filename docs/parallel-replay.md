@@ -272,6 +272,16 @@ busy too: 1.3 million sliced draws a minute at 1.55-1.65 us a draw make about 34
 threads. The cost per draw in a slice is now the limit, against about 1 us on the single-thread path, where the
 recorder thread makes the driver calls; a slice makes its own.
 
+### Where eight threads wait (profile at fd9782e)
+
+`DKB_REPLAY_THREADS=8`, `TOTK_PROFILE_CHAINS=1`, the hills. Of the samples under `par_record` (all threads), 14% wait
+for the texture lock (half in `vk_texture_slot_token` from `feedback_scan` and `shader_for`, half in the texture loop of
+`bind_resources`), 6% for `use_lock` in `vk_mem_gpu_wrote`, 3% for the global lock of `nvn2_origin` (the draw asks for
+every stage's origin), 3% for `pool_lock` in `resolve_locked` (mostly from `bind_vertex_buffers`), 2% for `drop_lock`
+in `vk_usnap_drop`; 5.5% is the driver's push descriptors. The next commit keeps `nvn2_origin` answers per thread, the
+slot tokens of a slice per thread while the slot and memory generations stay, and skips a write-back range a thread
+already added in the submission.
+
 ## Plan
 
 1. **Measure and remove the cheap waste** (done here).
