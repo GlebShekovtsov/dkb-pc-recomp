@@ -34,6 +34,10 @@ typedef struct { int n; VkImageView v[]; } ViewList;
 static void state_reset(VkExec *ex) { memset(ex,0,sizeof *ex); }
 void vk_dump_init(void) {}
 void vk_exec_pass_end(VkExec *ex) { ex->in_pass=0; }
+static void par_flush(VkExec *ex) { (void)ex; }
+static int npiece;
+static int par_collecting(void) { return 0; }
+static uint64_t par_end_op[OP_COUNT_ + 1];
 void vk_exec_barrier(VkExec *ex) { ex->recorded++; }
 void vk_mem_mirror_begin(void) {}
 int vk_mem_mirror_end(VkCommandBuffer cb,uint64_t f) { (void)cb;(void)f;return 0; }

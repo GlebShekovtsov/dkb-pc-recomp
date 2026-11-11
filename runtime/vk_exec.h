@@ -138,6 +138,25 @@ void vk_exec_inline_end(int reopen);
 // vk_exec_draw.c: forget what the command buffer being recorded has bound (pipeline, sets, dynamic state, vertex
 // buffers): the replay continues in a new one (vk_sync_split).
 void vk_exec_draw_new_cb(void);
+// vk_exec_draw.c: forget the bindings, memos and descriptor-build records of the thread's last command buffer before it
+// records a slice of a parallel pass from a copy of the replay state, and after the primary executed the slices.
+void vk_exec_draw_slice_begin(void);
+// Parallel passes (vk_exec.c par_start): 1 while this thread records a slice; vk_exec_par_hazard marks that the slice
+// needed something only the primary may do (the call is then dropped and the pass's targets are not sliced again).
+// vk_exec_draw.c: a copy of the draw path's per-thread state for a worker (made on the submitting thread while it records
+// nothing), and the worker's switch to it (on the worker).
+void *vk_exec_draw_ctx_new(void);
+void vk_exec_draw_ctx_use(void *ctx);
+void vk_exec_draw_spare_threads(int threads);   // spare descriptor pools for this many recording threads
+int vk_exec_par_slice(void);
+void vk_exec_par_hazard(void);
+// As vk_exec_par_hazard for a draw whose effect depends on the order of draws across slices (a storage buffer write):
+// the pass's targets are not sliced again from the next pass on.
+void vk_exec_par_order_hazard(void);
+// vk_exec_xfer.c: 1 while occlusion queries count draws (a sliced pass is not started then).
+int vk_exec_oq_counting(void);
+int vk_exec_oq_begin_outside(VkExec *ex, VkQueryControlFlags *flags, int *open);   // vk_exec_xfer.c, sliced passes
+void vk_exec_oq_pass_ended(VkExec *ex);
 VkBuffer vk_exec_inline_buffer(VkDeviceSize size);
 // vk_exec.c: the stand-in a 3D BC render target is drawn through goes with its image (vk_exec_image_gone).
 void vk_exec_bc_gone(VkImage image);

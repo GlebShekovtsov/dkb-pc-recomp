@@ -720,7 +720,12 @@ static volatile int64_t traffic[VK_MCLS_N][VK_MUSE_N];
 
 // Every caller is the replay (vk_exec*, under vk_sync_submit's lock), about ten adds per draw: one writer at a time, so
 // a plain add, not a locked one. An add racing the census's reset may be lost.
+static _Thread_local int count_quiet;   // a slice of a parallel pass: several threads would fight over the counters' lines
+
+void vk_mem_count_quiet(int on) { count_quiet = on; }
+
 void vk_mem_count(int cls, int use, uint64_t bytes) {
+    if (count_quiet) return;
     if ((unsigned)cls < VK_MCLS_N && (unsigned)use < VK_MUSE_N)
         __atomic_store_n(&traffic[cls][use], __atomic_load_n(&traffic[cls][use], __ATOMIC_RELAXED) + (int64_t)bytes,
                          __ATOMIC_RELAXED);
@@ -1057,14 +1062,19 @@ static int dc_class(const PoolRec *r) {
     return c == VK_MCLS_HOST_CACHED ? DC_CACHED : c == VK_MCLS_HOST_UNC ? DC_UNC : DC_OTHER;
 }
 
-void vk_mem_bound_note(void *pool) {
+void vk_mem_bound_note(void *pool) {   // TOTK_TRACE=perf; parallel slices call it too (dirty_lock)
     PoolRec *r = pool;
-    if (r->bound_sub == dirty_sub) return;
-    r->bound_sub = dirty_sub;
-    if (r->bufbound) return;
-    r->bufbound = 1, r->synced_gen = DIRTY_UNSYNCED;
-    int k = dc_class(r);
-    ever_n[k]++, ever_bytes[k] += r->size, first_pending[k] += r->size;
+    if (__atomic_load_n(&r->bound_sub, __ATOMIC_RELAXED) == dirty_sub) return;
+    plat_mutex_lock(&dirty_lock);
+    if (r->bound_sub != dirty_sub) {
+        r->bound_sub = dirty_sub;
+        if (!r->bufbound) {
+            r->bufbound = 1, r->synced_gen = DIRTY_UNSYNCED;
+            int k = dc_class(r);
+            ever_n[k]++, ever_bytes[k] += r->size, first_pending[k] += r->size;
+        }
+    }
+    plat_mutex_unlock(&dirty_lock);
 }
 
 static uint64_t page_lo(const PoolRec *r) { return r->lo & ~0xfffull; }
@@ -1697,18 +1707,34 @@ static void mirror_sync(PoolRec *r) {
     mrep.sync_t += qpc() - t0;
 }
 
+// Parallel passes (vk_exec.c par_flush) record slices on several threads at once, all inside one submission: the
+// mirror state a binding may change (creation, the first sync of a pool in the submission, the written ranges) is
+// changed under use_lock; a pool already mirrored and synced in this submission takes the fast path without it.
+static PlatMutex use_lock = PLAT_MUTEX_INIT;
+
 void vk_mem_use(VkMemSpan *sp) {
     PoolRec *r = sp->pool;
+    if (__atomic_load_n(&r->mstate, __ATOMIC_ACQUIRE) == MS_ON && __atomic_load_n(&r->acc_sub, __ATOMIC_ACQUIRE) == msub) {
+        sp->buffer = r->mbuf;
+        return;
+    }
+    plat_mutex_lock(&use_lock);
     if (r->mstate == MS_NONE) mirror_create(r);
-    if (r->mstate != MS_ON) return;
-    if (r->acc_sub != msub) mirror_sync(r);
-    sp->buffer = r->mbuf;
+    if (r->mstate == MS_ON) {
+        if (r->acc_sub != msub) mirror_sync(r);
+        sp->buffer = r->mbuf;
+    }
+    plat_mutex_unlock(&use_lock);
 }
 
 void vk_mem_pick(VkMemSpan *sp) {
     PoolRec *r = sp->pool;
-    if (!r || r->mstate != MS_ON) return;
-    if (r->acc_sub != msub) mirror_sync(r);
+    if (!r || __atomic_load_n(&r->mstate, __ATOMIC_ACQUIRE) != MS_ON) return;
+    if (__atomic_load_n(&r->acc_sub, __ATOMIC_ACQUIRE) != msub) {
+        plat_mutex_lock(&use_lock);
+        if (r->acc_sub != msub) mirror_sync(r);
+        plat_mutex_unlock(&use_lock);
+    }
     sp->buffer = r->mbuf;
 }
 
@@ -1720,10 +1746,21 @@ int vk_mem_mirror_probe(uint64_t addr) {
     return ((PoolRec *)sp.pool)->mstate == MS_ON;
 }
 
+// A range already added in this submission adds nothing (copy_ranges merges overlaps): each thread remembers the
+// ranges it added, so the same storage buffer bound by draw after draw takes use_lock once. A profile on eight
+// threads had 6% of the parallel slices' recording waiting for use_lock here, and the busy area adds about 7,600
+// write-back ranges a frame that vk_mem_mirror_end sorts.
 void vk_mem_gpu_wrote(const VkMemSpan *sp, uint64_t size) {
     PoolRec *r = sp->pool;
     if (!r || r->mstate != MS_ON || sp->buffer != r->mbuf || !size) return;
+    static _Thread_local struct { const PoolRec *r; uint64_t off, size; uint32_t sub; } seen[128];
+    __typeof__(seen[0]) *k = &seen[((uintptr_t)r >> 6 ^ sp->offset >> 4) & 127];
+    uint32_t sub = __atomic_load_n(&msub, __ATOMIC_RELAXED);
+    if (k->r == r && k->sub == sub && k->off == sp->offset && k->size >= size) return;
+    plat_mutex_lock(&use_lock);
     range_add(&wbl, &nwbl, &cwbl, r, sp->offset, size);
+    plat_mutex_unlock(&use_lock);
+    *k = (__typeof__(*k)){r, sp->offset, size, sub};
 }
 
 void nvn_pool_flushed(const pool_t *p, uint64_t off, uint64_t size) {
