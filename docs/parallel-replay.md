@@ -315,6 +315,14 @@ The same spot on eight threads: parts of at least 300 us gave 46.8-48.8 fps (20.
 submission, the game's threads waiting 4.9 ms a frame on fences, GPU 10.5 ms); no minimum gave 43.7-46.9 fps with
 3.09 parts. With more than one replay thread, `TOTK_SPLIT_US` now defaults to 300.
 
+### The descriptor memos of #181 merged (Zorkats:descriptor-memos 26ad9b8)
+
+Zorkats's branch keeps the texture descriptor memos across submissions (`TOTK_DESC_KEEP`), reuses written descriptor
+sets within a submission (`DSC`), copies the compiler-constant banks once per submission (`C1`) and keeps each stage's
+NVN 2 origin with the stage memo. Merged here with this branch's per-thread state: `DSC`, `C1`, `ssbo_serial` and the
+stage memo are per recording thread (`DRAW_CTX_OBJS`), a slice still reads a texture memo hit without the texture
+lock, and `tex_info_hit` uses the memo's new index.
+
 ## Plan
 
 1. **Measure and remove the cheap waste** (done here).

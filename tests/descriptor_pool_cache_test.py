@@ -52,6 +52,9 @@ static const VkTexImage images[]={
 static const GfxShaderRes resource={.slot=0,.type=GFX_TEX_2D};
 void rt_fatal(const char *fmt,...) { (void)fmt; abort(); }
 uint64_t vk_mem_gen(void) { return memory_generation; }
+uint64_t vk_mem_pool_gen(void) { return memory_generation; }   // a remap below moves the pool mappings
+int rt_knob(const char *name,const char *def) { (void)name; return atoi(def); }   // every knob at its default
+int rt_ab(void) { return 0; }
 uint64_t vk_usnap_gen(void) { return 1; }
 uint32_t vk_texture_slots_gen(void) { return 7; }
 int vk_exec_par_slice(void) { return 0; }
@@ -120,10 +123,15 @@ static uint64_t ubo_ptr(const VkExec *ex,int st,const GfxShaderRes *r) { (void)e
     range_types = '\n'.join(function(draw, prefix) + suffix for prefix, suffix in (
         ('typedef struct { uint32_t off, len;', ' RsRange;'),
         ('typedef struct { int st; const GfxShaderRes *res;', ' RsPtr;'),
-        ('typedef struct { uint32_t n, bytes; uint8_t sup, c0, ok, np;', ' RsList;')))
+        ('typedef struct { uint32_t n, bytes; uint8_t sup, c0,', ' RsList;')))
+    # TOTK_BIND_STATS's counters, which bind_sig updates only while they are on.
+    bsf_begin = draw.index('enum { BSF_INFO,')
+    bsf = draw[bsf_begin:draw.index('} BSF;', bsf_begin) + len('} BSF;')]
     # Only the fields consumed by bind_sig are needed; pipeline range discovery
     # supplies one original fragment texture handle range, without a GPU pipeline.
     adapters = r'''
+static int bind_stats_on(void) { return 0; }   // TOTK_BIND_STATS off
+static int rs_class(const VkExec *ex,const RsRange *r) { (void)ex; (void)r; abort(); }
 static struct {
     uint64_t h[32],gen;
     uint32_t hn;
@@ -165,9 +173,9 @@ static void expect(VkExec *ex,unsigned type,unsigned image,unsigned sampler,unsi
     CHECK(answers.tex_type[0]==type && answers.img_type[0]==type,"unchanged handles select active-table texture/image types");
     CHECK(!answers.tex_type[1] && !answers.img_type[1],"unqueried slots remain zero");
     VkDescriptorImageInfo out;
-    vk_texture_lock();
-    tex_info_lookup(ex,&resource,HANDLE,0,0,&out);
-    vk_texture_unlock();
+    int held=0;   // tex_info_lookup takes the texture lock only when it looks up, and leaves it to the caller
+    tex_info_lookup(ex,&resource,HANDLE,0,0,vk_texture_slots_gen(),vk_texture_epoch(),vk_sampler_gen(),&held,&out);
+    if (held) vk_texture_unlock();
     CHECK((uintptr_t)out.imageView==image && (uintptr_t)out.sampler==sampler &&
           out.imageLayout==VK_IMAGE_LAYOUT_GENERAL,"sampled descriptor uses active texture and sampler tables");
     CHECK(feedback_scan(ex,(const GfxShader *)&resource)==feedback,"feedback resolves the active image's attachment");
@@ -238,7 +246,7 @@ int main(void) {
     return failures!=0;
 }
 '''
-    return '\n'.join((prelude, ac, serial, sub, fm, td, memo, sm, range_types, adapters,
+    return '\n'.join((prelude, ac, serial, sub, fm, td, memo, sm, range_types, bsf, adapters,
                       'static void descriptor_state(VkExec *ex);', *pieces, selection, tests))
 
 

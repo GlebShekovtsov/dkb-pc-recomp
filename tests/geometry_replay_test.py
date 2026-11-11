@@ -158,9 +158,15 @@ void rc_vkCmdPipelineBarrier2(VkCommandBuffer cb,const VkDependencyInfo *di) {
 }
 '''
     lim = function(draw, 'static struct { uint64_t ubo_max,') + ' LIM;'
+    # ubo_info's compiler-constant memo (C1, c1_info) and the slot-17 parameter block it keeps in the command buffer
+    # state B. The cases below reach neither (slot 17 of a GS stage binds user UBO 14), so B holds only those fields.
+    c1_begin = draw.index('#define C1_SLOTS ')
+    c1 = draw[c1_begin:draw.index('#define C1 (*C1_tp)', c1_begin) + len('#define C1 (*C1_tp)')]   # with its per-thread pointer
+    b17 = 'static struct { uint8_t b17[2][256]; VkBuffer b17_buf[2]; VkDeviceSize b17_off[2]; int b17_valid[2]; } B;'
     memory_helpers = '\n'.join(function(draw, prefix) for prefix in ('static VkDescriptorBufferInfo zero_info(',
         'static int bind_range(', 'static uint32_t written_hash(', 'static void note_written(', 'static p_bind_buf guarded_storage_binding(',
-        'static VkDescriptorBufferInfo ssbo_info(', 'static VkDescriptorBufferInfo ubo_info('))
+        'static VkDescriptorBufferInfo ssbo_info(', 'static VkDescriptorBufferInfo c1_info(', 'static VkDescriptorBufferInfo ubo_info('))
+    memory_helpers = c1 + '\n' + b17 + '\n' + memory_helpers
     barrier_helpers = '\n'.join(function(replay, prefix) for prefix in ('static int has_image(',
         'static VkImageMemoryBarrier2 layout_barrier(', 'static void barrier_to(', 'void vk_exec_barrier('))
     cases = r'''

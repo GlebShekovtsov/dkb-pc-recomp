@@ -65,6 +65,7 @@ def main():
         exe = out / ('fixture' + opt + ('.exe' if os.name == 'nt' else ''))
         command = [args.cc, '-std=gnu11', opt, '-Wall', '-Wextra', '-Werror',
                    '-Wno-missing-field-initializers',  # unchanged production BS/RS initializers
+                   '-Wno-unused-variable', '-Wno-unused-const-variable',  # context statics the binder does not read
                    '-I', str(ROOT / 'runtime'), '-I', str(args.deps / 'include'),
                    '-I', str(args.deps / 'include/vma'), str(src), '-o', str(exe)]
         compiled = subprocess.run(command, capture_output=True, text=True, timeout=60)

@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "nvn_hmap.h"
 #include "vk_exec.h"
 #define MAX_BINDINGS 128
 #define MAX_DESC 1024
@@ -53,13 +54,19 @@ static VkDescriptorBufferInfo ssbo_info(VkExec *ex,int stage,const GfxShaderRes 
 }
 void vk_texture_lock(void) { abort(); }
 void vk_texture_unlock(void) { abort(); }
-static void tex_info(VkExec *ex,const GfxShaderRes *r,uint64_t h,int image,int separate,VkDescriptorImageInfo *out) {
-    (void)ex; (void)r; (void)h; (void)image; (void)separate; (void)out; abort();
+static void tex_info(VkExec *ex,const GfxShaderRes *r,uint64_t h,int image,int separate,uint32_t gen,uint32_t ep,
+                     uint32_t sg,int *locked,VkDescriptorImageInfo *out) {
+    (void)ex; (void)r; (void)h; (void)image; (void)separate; (void)gen; (void)ep; (void)sg; (void)locked; (void)out; abort();
 }
 int vk_exec_par_slice(void) { return 0; }
 static int tex_info_hit(VkExec *ex,const GfxShaderRes *r,uint64_t h,int separate,VkDescriptorImageInfo *out) {
     (void)ex; (void)r; (void)h; (void)separate; (void)out; abort();
 }
+// The descriptor memos' keys: one unchanged descriptor context for every case.
+static void descriptor_state(VkExec *ex) { (void)ex; }
+uint32_t vk_texture_slots_gen(void) { return 0; }
+uint32_t vk_texture_epoch(void) { return 0; }
+uint32_t vk_sampler_gen(void) { return 0; }
 
 // Bounded malloc storage supplies alignment without imposing an array's declared
 // effective type. The real producers decide packet sizes and copy every payload.
@@ -172,6 +179,7 @@ static void consume(void) {
 static void run(const char *name,uint32_t vs,uint32_t fs,int compute,int default_sets) {
     case_name=name;
     memset(&B,0,sizeof B); memset(&DS,0,sizeof DS); memset(&RS,0,sizeof RS);
+    memset(&DSC,0,sizeof DSC);   // no set allocated in an earlier case is reused
     memset(pushed,0,sizeof pushed); memset(written,0,sizeof written);
     memset(allocated,0,sizeof allocated); memset(bound,0,sizeof bound);
     memset(expected,0,sizeof expected); memset(expected_count,0,sizeof expected_count);

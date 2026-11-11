@@ -112,7 +112,8 @@ static uint64_t gpu_writes;  // GPU writes into mirrored textures so far: Tex.gp
 static uint32_t tex_gen = 1;
 // Bumped with tex_gen and whenever a slot is registered: what vk_texture_by_id returns for any slot may have changed.
 static uint32_t slots_gen = 1;
-static uint32_t samp_gen = 1;   // bumped whenever a sampler slot is registered: vk_sampler_by_id may answer otherwise
+// Bumped whenever a sampler slot is registered or replaced: vk_sampler_by_id may answer otherwise.
+static uint32_t samp_gen = 1;
 static uint64_t n_checks;    // draw-binding storage checks (make_fresh_snap) since the last perf line
 // tex_gen per storage address (hashed): a slot resolves through the entries at its own address only (slot_resolve), so
 // a slot's resolution stays valid while its address's generation does. TotK finalizes and initializes transient
@@ -1093,10 +1094,15 @@ static DescSlot *descriptor_slot(const dpool_ref *pool, int id, uint32_t limit, 
 }
 
 static void descriptor_registered(DescSlot *d, uint32_t kind) {
+    // A sampler lookup answers from sampler slots only (vk_sampler_by_id_locked), so a texture registered over a slot
+    // that held no sampler changes no sampler answer. Bananza registers texture descriptors all through a frame, and
+    // bumping samp_gen with each one made every kept texture descriptor look its sampler up again (vk_exec_draw.c TD).
+    int samplers = kind == DESC_SAMPLER || d->kind == DESC_SAMPLER;
     memset(d, 0, sizeof *d);
     if (!++reg_serial) ++reg_serial;
     d->serial = reg_serial, d->kind = kind;
-    slots_gen++, samp_gen++;   // a registration can replace bytes previously used by either kind
+    slots_gen++;   // a registration can replace bytes previously used by either kind
+    if (samplers) samp_gen++;
 }
 
 void vk_texture_register(const dpool_ref *pool, int id, const tex_t *t, const view_t *v) {

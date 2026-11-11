@@ -30,6 +30,8 @@ def fixture(draw):
     warning = draw.index('enum { W_PROGRAM')
     cache = draw.index('#define STAGEM_N ')
     declarations = draw[warning:draw.index(';', warning) + 1]
+    # The per-serial stage cache, after the scan it falls back to.
+    declarations += '\n' + function(draw, 'static int find_stage_scan(')
     declarations += '\n' + draw[cache:draw.index('static int find_stage(', cache)] + '\n'
     providers = r'''
 #include <stdio.h>
@@ -59,7 +61,6 @@ static void warn_once(int kind,const char *format,...) { (void)kind;(void)format
     functions = '\n'.join([
         function(shader, 'int gfx_shader_is_nvn2('),
         function(pipeline, 'uint8_t vk_geometry_input('),
-        function(draw, 'static int find_stage_scan('),
         function(draw, 'static int find_stage('),
         function(draw, 'static int native_gs_on('),
         function(draw, 'static int experimental_geometry_on('),
