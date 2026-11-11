@@ -43,7 +43,7 @@ enum {
     R_SetDepthWriteEnable, R_SetFrontFace, R_SetPrimitiveRestartEnable, R_SetPrimitiveTopology,
     R_SetRasterizerDiscardEnable, R_SetScissorWithCount, R_SetStencilCompareMask, R_SetStencilOp, R_SetStencilReference,
     R_SetStencilTestEnable, R_SetStencilWriteMask, R_SetViewportWithCount, R_WriteTimestamp, R_WriteTimestamp2,
-    R_PushTpl, R_Push, R_VertexInput, R_Bool, R_PolygonMode, R_BlendEnable, R_BlendEquation, R_WriteMask, R_EndCb, R_Crumb, R_Checkpoint, R_Call,
+    R_PushTpl, R_Push, R_VertexInput, R_Bool, R_PolygonMode, R_BlendEnable, R_BlendEquation, R_WriteMask, R_EndCb, R_Crumb, R_Checkpoint,
 };
 
 static uint64_t now_ns(void) { return plat_now_ns(); }
@@ -510,15 +510,6 @@ void rec_crumb(VkCommandBuffer cb, int kind, uint64_t n) {
     pub();
 }
 
-typedef struct { void (*fn)(VkCommandBuffer, void *); void *arg; } A_Call;
-int rec_call(VkCommandBuffer cb, void (*fn)(VkCommandBuffer, void *), void *arg) {
-    if (!OWNED(cb)) return 0;
-    A_Call *a = put(R_Call, sizeof *a);
-    *a = (A_Call){fn, arg};
-    pub();
-    return 1;
-}
-
 typedef struct { const void *marker; } A_Checkpoint;
 void rec_checkpoint(VkCommandBuffer cb, const void *marker) {
     if (!OWNED(cb)) { vk_checkpoint(cb, marker); return; }
@@ -685,7 +676,6 @@ static void exec_packet(uint32_t op, void *p) {
     case R_WriteMask: { A_Targets *a = p; ((PFN_vkCmdSetColorWriteMaskEXT)a->fn)(cb, a->first, a->n, a->v); break; }
     case R_Checkpoint: { A_Checkpoint *a = p; vk_checkpoint(cb, a->marker); break; }
     case R_Crumb: { A_Crumb *a = p; vk_crumb(cb, a->kind, a->n); break; }
-    case R_Call: { A_Call *a = p; a->fn(cb, a->arg); break; }
     case R_EndCb: {
         A_EndCb *a = p;
         if (a->kind) vk_crumb(cb, a->kind, a->n);

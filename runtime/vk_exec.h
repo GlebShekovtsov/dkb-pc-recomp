@@ -151,8 +151,6 @@ void vk_exec_par_hazard(void);
 // As vk_exec_par_hazard for a draw whose effect depends on the order of draws across slices (a storage buffer write):
 // the pass's targets are not sliced again from the next pass on.
 void vk_exec_par_order_hazard(void);
-int vk_exec_par_inflight(void);   // slices of earlier passes may still be recorded (submitting thread)
-void vk_exec_par_wait(void);      // waits until they are
 // vk_exec_xfer.c: 1 while occlusion queries count draws (a sliced pass is not started then).
 int vk_exec_oq_counting(void);
 int vk_exec_oq_begin_outside(VkExec *ex, VkQueryControlFlags *flags, int *open);   // vk_exec_xfer.c, sliced passes

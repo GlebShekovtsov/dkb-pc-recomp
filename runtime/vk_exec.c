@@ -71,11 +71,8 @@ static int pass_secondary;                      // the next vk_exec_pass_begin o
 static int pass_tried, pass_sliced;             // the open pass: par_start looked at it; it has secondary contents
 static int pass_why;                            // why par_start left the open pass alone (PAR_WHY_*), for the log
 static uint32_t pass_draws;                     // draws of the open pass, for par_hist
-#define PAR_MAX_SLICES 1024      // slices in flight; a pass with more draws than the rest hold keeps adding to its last slice
-#define PAR_MAX_OPS (1 << 20)    // collected ops in flight; a full list ends the collection
-#define PAR_MAX_PEND 128         // sliced passes in flight
-// The slices of the passes collected since the last par_settle. Indices run on across passes: a pass's slices may
-// still be recorded while the walk goes on, so nothing is reused before par_settle.
+#define PAR_MAX_SLICES 256       // a pass with more draws than these hold keeps adding to its last slice
+#define PAR_MAX_OPS (1 << 20)    // collected ops of one pass; a full list ends the collection
 static struct {
     int on;
     uint64_t sig;
@@ -83,19 +80,11 @@ static struct {
     int nops;
     VkExec *snap;                                // X before each slice's first op (PAR_MAX_SLICES)
     int start[PAR_MAX_SLICES], end[PAR_MAX_SLICES];   // each slice's ops; end is set when the slice is published
-    uint8_t soq[PAR_MAX_SLICES];                 // the slice's pass has an occlusion query (PC.oq when it started)
-    VkQueryControlFlags soq_flags[PAR_MAX_SLICES];
-    int nslices, first;                          // slices in flight; the first of the pass being collected
+    int nslices;
     int draws, slice_draws, slice_size;
     int oq;                                      // an occlusion query spans the pass: the slices inherit it
     VkQueryControlFlags oq_flags;
 } PC;
-// A sliced pass whose slices the primary has yet to execute: its range of slices, its targets for the ban, and whether
-// the recorder thread executes them (rec_call) once they are recorded.
-typedef struct { int first, n; uint64_t sig; int queued; } ParExec;
-static ParExec par_pend[PAR_MAX_PEND];
-static int npend;
-static int par_defer = -1;                       // DKB_REPLAY_DEFER (1): the walk does not wait for a pass's slices
 
 // A recording thread's secondary command buffers: its own pool (pools are used by one thread at a time) and the ones whose
 // submission completed (the completion thread adds them under lock).
@@ -1118,7 +1107,7 @@ static VkCommandBuffer par_secondary(ParPool *pp) {   // on the thread that owns
 }
 
 // Inherits the open pass: its attachment formats as vkCmdBeginRendering saw them (a slot without a view: UNDEFINED).
-static void par_begin_secondary(const VkExec *ex, int slice, VkCommandBuffer cb) {
+static void par_begin_secondary(const VkExec *ex, VkCommandBuffer cb) {
     VkFormat color[8];
     for (uint32_t i = 0; i < ex->pass_ncolor && i < 8; i++) color[i] = ex->color[i].image ? ex->pass_color[i] : VK_FORMAT_UNDEFINED;
     const VkExecTarget *d = &ex->depth;
@@ -1129,8 +1118,8 @@ static void par_begin_secondary(const VkExec *ex, int slice, VkCommandBuffer cb)
         .stencilAttachmentFormat = d->image && (d->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) ? ex->pass_stencil : VK_FORMAT_UNDEFINED,
         .rasterizationSamples = (VkSampleCountFlagBits)(ex->pass_samples ? ex->pass_samples : 1)};
     VkCommandBufferInheritanceInfo ii = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO, .pNext = &ir,
-                                         .occlusionQueryEnable = PC.soq[slice] ? VK_TRUE : VK_FALSE,
-                                         .queryFlags = PC.soq[slice] ? PC.soq_flags[slice] : 0};
+                                         .occlusionQueryEnable = PC.oq ? VK_TRUE : VK_FALSE,
+                                         .queryFlags = PC.oq ? PC.oq_flags : 0};
     VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT |
                                             VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT,
@@ -1140,7 +1129,6 @@ static void par_begin_secondary(const VkExec *ex, int slice, VkCommandBuffer cb)
 
 static void resolve_rt(VkExec *ex);
 static void par_publish(void);
-static void par_settle(VkExec *ex);
 static void par_start_workers(void);
 static void par_wake_workers(void);
 
@@ -1170,8 +1158,6 @@ static int par_start(VkExec *ex) {
     if (e->draws < PAR_MIN_DRAWS) return pass_why = PAR_WHY_SMALL, par_no[0]++, 0;
     if (e->banned >= PAR_BAN_AFTER) return pass_why = PAR_WHY_BANNED, par_no[1]++, 0;
     if (ex->pass_noatt) return pass_why = PAR_WHY_NOATT, par_no[2]++, 0;
-    // Room for the pass's slices and ops: else the passes in flight are executed first.
-    if (npend == PAR_MAX_PEND || PC.nslices > PAR_MAX_SLICES - 64 || PC.nops > PAR_MAX_OPS / 2) par_settle(ex);
     if (ex->in_pass) {
         par_restart = 1;
         vk_exec_pass_end(ex);
@@ -1197,7 +1183,7 @@ static int par_start(VkExec *ex) {
     // spent as long waiting for the workers as recording its own share.
     int size = par_mode > 1 ? (int)(e->draws / (uint32_t)(3 * par_mode)) : PAR_SLICE_DRAWS;
     size = size < PAR_SLICE_MIN ? PAR_SLICE_MIN : size > PAR_SLICE_DRAWS ? PAR_SLICE_DRAWS : size;
-    PC.on = 1, PC.sig = sig, PC.first = PC.nslices, PC.draws = 0, PC.slice_size = size, PC.slice_draws = size;
+    PC.on = 1, PC.sig = sig, PC.nops = 0, PC.nslices = 0, PC.draws = 0, PC.slice_size = size, PC.slice_draws = size;
     par_t0 = kern_now_ns();
     par_wake_workers();   // they spin while the pass is collected
     return 1;
@@ -1213,18 +1199,6 @@ static void par_op(VkExec *ex, uint32_t op, const void *a) {   // replay of one 
     default: vk_exec_op_draw(ex, op, a); break;
     }
 }
-
-// What recording one slice left: its command buffer, and what the primary's state takes from the slice's copy.
-typedef struct {
-    ParCb cb;
-    uint32_t fb_dirty;
-    int recorded, hazard;
-    ViewEnt *views;      // views the slice made (freed with the submission)
-    int nviews;
-    volatile int done;   // recorded (release): the recorder thread may execute it
-} ParOut;
-
-static ParOut par_out[PAR_MAX_SLICES];
 
 // The op h while collecting: 1 when it was taken (state and bind ops applied to ex, draws only kept), 0 when it ends
 // the collection.
@@ -1247,10 +1221,8 @@ static int par_take(VkExec *ex, const op_hdr *h, const void *a) {
     case OP_DRAW: case OP_DRAW_IDX:
         if (PC.slice_draws >= PC.slice_size && PC.nslices < PAR_MAX_SLICES) {
             // A new slice starts at this draw, from ex as it is now; the one before is complete and goes to the workers.
-            if (PC.nslices > PC.first) par_publish();
+            if (PC.nslices) par_publish();
             PC.snap[PC.nslices] = *ex;
-            PC.soq[PC.nslices] = (uint8_t)PC.oq, PC.soq_flags[PC.nslices] = PC.oq_flags;
-            par_out[PC.nslices].done = 0;
             PC.start[PC.nslices++] = PC.nops;
             PC.slice_draws = 0;
         }
@@ -1264,6 +1236,16 @@ static int par_take(VkExec *ex, const op_hdr *h, const void *a) {
     return 1;
 }
 
+// What recording one slice left: its command buffer, and what the primary's state takes from the slice's copy.
+typedef struct {
+    ParCb cb;
+    uint32_t fb_dirty;
+    int recorded, hazard;
+    ViewEnt *views;      // views the slice made (freed with the submission)
+    int nviews;
+} ParOut;
+
+static ParOut par_out[PAR_MAX_SLICES];
 
 // Records slice i into a secondary command buffer of pp, from the slice's copy of the replay state, into w.
 static void par_rec_note(int worker, int i, uint64_t ns) {   // TOTK_TRACE=perf: who recorded slice i, and how long
@@ -1274,7 +1256,7 @@ static void par_rec_note(int worker, int i, uint64_t ns) {   // TOTK_TRACE=perf:
 
 static void par_record(int i, ParPool *pp, VkExec *w) {
     VkCommandBuffer cb = par_secondary(pp);
-    par_begin_secondary(&PC.snap[i], i, cb);
+    par_begin_secondary(&PC.snap[i], cb);
     *w = PC.snap[i];
     w->cb = cb, w->recorded = 0, w->dirty = VK_EXEC_DIRTY_ALL;
     // Feedback targets: what earlier slices wrote is not known here, so every attachment counts as written and the
@@ -1288,8 +1270,7 @@ static void par_record(int i, ParPool *pp, VkExec *w) {
     par_slice = 0;
     vk_mem_count_quiet(0), vk_usnap_quiet(0);
     if (vkEndCommandBuffer(cb) != VK_SUCCESS) rt_fatal("vk: secondary command buffer end failed");
-    par_out[i] = (ParOut){{pp, cb}, w->fb_dirty, w->recorded, par_hazard, w->views, w->nviews, 0};
-    __atomic_store_n(&par_out[i].done, 1, __ATOMIC_RELEASE);
+    par_out[i] = (ParOut){{pp, cb}, w->fb_dirty, w->recorded, par_hazard, w->views, w->nviews};
 }
 
 // ---- workers (DKB_REPLAY_THREADS=N: N-1 of them; the submitting thread records slices too)
@@ -1308,7 +1289,7 @@ static PlatMutex pw_lock = PLAT_MUTEX_INIT;
 static PlatCond pw_go, pw_idle;
 static int pw_conds;
 static int pw_pub, pw_next, pw_done;
-// A collection is under way or slices are in flight (par_start to the end of par_settle): idle workers spin instead of sleeping on pw_go. A
+// A collection is under way (par_start to the end of par_flush): idle workers spin instead of sleeping on pw_go. A
 // profile on six threads had the workers asleep 83% of the time: a pass is collected in about 0.1 ms, quicker than a
 // sleeping thread wakes up, so the submitting thread had taken most slices itself by the time they ran.
 static volatile int pw_active;
@@ -1378,118 +1359,6 @@ static void par_start_workers(void) {
     rt_log("vk: %d replay slice workers started", par_nworkers);
 }
 
-// The primary's vkCmdExecuteCommands for a sliced pass: on the recorder thread (rec_call) once the workers recorded
-// every slice of it, or on the submitting thread from par_settle.
-static void par_exec_cmds(VkCommandBuffer cb, void *arg) {
-    const ParExec *pe = arg;
-    VkCommandBuffer cbs[PAR_MAX_SLICES];
-    for (int i = 0; i < pe->n; i++) {
-        ParOut *o = &par_out[pe->first + i];
-        for (int k = 0; !__atomic_load_n(&o->done, __ATOMIC_ACQUIRE); k++)
-            if (k < 20000) plat_pause();
-            else plat_yield();
-        cbs[i] = o->cb.cb;
-    }
-    if (pe->n) vkCmdExecuteCommands(cb, (uint32_t)pe->n, cbs);
-}
-
-// Waits until every published slice is recorded; the submitting thread records the ones still untaken when own.
-static void par_wait_slices(int own) {
-    uint64_t t1 = kern_now_ns();
-    plat_mutex_lock(&pw_lock);
-    while (own && pw_next < pw_pub) {
-        int i = pw_next++;
-        plat_mutex_unlock(&pw_lock);
-        uint64_t t = kern_now_ns();
-        par_record(i, &par_main_pool, &par_main_w);
-        par_rec_note(0, i, kern_now_ns() - t);
-        plat_mutex_lock(&pw_lock);
-        pw_done++;
-    }
-    uint64_t t2 = kern_now_ns();
-    while (pw_done < pw_pub) plat_cond_wait(&pw_idle, &pw_lock);
-    plat_mutex_unlock(&pw_lock);
-    par_t_own += t2 - t1, par_t_wait += kern_now_ns() - t2;
-}
-
-int vk_exec_par_inflight(void) { return npend > 0; }
-
-// A draw of the walk stores over a uniform snapshot copy while slices of earlier passes may still bind it: they are
-// recorded first, so they take the copy as the draw order says (vk_exec_draw.c bind_range).
-void vk_exec_par_wait(void) {
-    if (npend) par_wait_slices(0);
-}
-
-// The sliced passes in flight are done: every slice is recorded and executed in the primary, and what the slices left
-// goes to the primary's state (views, counts) and to the ban list. Then the slice and op lists start over.
-static void par_settle(VkExec *ex) {
-    if (!npend) return;
-    par_wait_slices(1);
-    plat_mutex_lock(&pw_lock);
-    pw_pub = pw_next = pw_done = 0;
-    __atomic_store_n(&pw_active, 0, __ATOMIC_RELEASE);
-    plat_mutex_unlock(&pw_lock);
-    uint64_t t3 = kern_now_ns();
-    int queued = 0;
-    for (int p = 0; p < npend; p++) queued |= par_pend[p].queued;
-    if (queued) rec_drain();   // the recorder has made the queued vkCmdExecuteCommands, which read par_out
-    ParDone *done = malloc(sizeof *done + sizeof(ParCb) * (size_t)(PC.nslices ? PC.nslices : 1));
-    if (!done) rt_fatal("vk: out of memory");
-    done->n = 0;
-    for (int p = 0; p < npend; p++) {
-        const ParExec *pe = &par_pend[p];
-        int hazard = 0;
-        for (int i = pe->first; i < pe->first + pe->n; i++) {
-            ParOut *o = &par_out[i];
-            done->cb[done->n++] = o->cb;
-            ex->recorded += o->recorded;
-            if (o->hazard > hazard) hazard = o->hazard;
-            for (int k = 0; k < o->nviews; k++) {   // the slice's views go with the submission like the primary's
-                if (ex->nviews == ex->cap_views) ex->views = par_grow(ex->views, &ex->cap_views, sizeof(ViewEnt));
-                ((ViewEnt *)ex->views)[ex->nviews++] = o->views[k];
-            }
-            free(o->views);
-        }
-        if (!pe->queued && pe->n) {
-            rec_drain();   // the recorder has made every earlier call into the primary
-            par_exec_cmds(ex->cb, (void *)pe);
-        }
-        if (!hazard) continue;
-        ParHist *e = par_find(pe->sig, 1);
-        // A feedback target learned inside a slice is one: its pass restart was dropped, and the next pass attaches
-        // the target in the feedback layout, so a few hazards are expected; a set that keeps having them is left alone.
-        par_no[3]++;
-        if (hazard == 2 && e->banned < PAR_BAN_AFTER) {
-            // A draw of a slice stored into a range a uniform snapshot copy covers: which later bindings take the copy
-            // follows the draw order, which slices recorded at once do not keep.
-            e->banned = PAR_BAN_AFTER;
-            rt_log("vk: a draw of a sliced pass stores over a uniform snapshot copy: those targets are not sliced again");
-        } else if (e->banned < 255 && ++e->banned == PAR_BAN_AFTER)
-            rt_log("vk: a sliced pass needed a pass or barrier change inside a slice %d times: those targets are not sliced again",
-                   PAR_BAN_AFTER);
-    }
-    if (done->n) vk_completion_add(ex->fence, par_done, done);
-    else free(done);
-    npend = 0, PC.nslices = PC.first = 0, PC.nops = 0;
-    par_t_exec += kern_now_ns() - t3;
-}
-
-// While sliced passes are in flight the walk replays only ops that leave what the slices read alone (the pass, state
-// and bind ops, direct draws and barriers); any other op waits for them (par_settle).
-static int par_safe(uint32_t op) {
-    switch (op) {
-    case OP_SET_RT: case OP_BARRIER: case OP_WAIT_SYNC:
-    case OP_VIEWPORTS: case OP_SCISSOR: case OP_DEPTH_RANGE: case OP_STENCIL: case OP_POLY_OFFSET:
-    case OP_BLEND_COLOR: case OP_DEPTH_CLAMP: case OP_RASTER_DISCARD: case OP_PRIM_RESTART:
-    case OP_COPY_STRIDE: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL:
-    case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF:
-    case OP_BIND_UBO: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_PUSH_CONST:
-    case OP_DRAW: case OP_DRAW_IDX:
-        return 1;
-    default: return 0;
-    }
-}
-
 static void par_flush(VkExec *ex) {
     if (!ex) {   // TOTK_TRACE=perf (record_impl): what was sliced since the last line
         if (par_mode > 0)
@@ -1533,27 +1402,68 @@ static void par_flush(VkExec *ex) {
     }
     if (!PC.on) return;
     PC.on = 0;
-    int n = PC.nslices - PC.first;
-    par_passes++, par_slices += (uint64_t)n, par_sliced_draws += (uint64_t)PC.draws;
-    par_t_collect += kern_now_ns() - par_t0;
-    if (n) par_publish();
-    if (par_defer < 0) {
-        const char *e = cfg_get("TOTK_REPLAY_DEFER");
-        par_defer = !(e && *e) || atoi(e) != 0;
-        if (par_mode > 1) rt_log("vk: the walk %s for a sliced pass's slices (TOTK_REPLAY_DEFER=%d)",
-                                 par_defer ? "goes on and the recorder thread waits" : "waits", par_defer);
+    par_passes++, par_slices += (uint64_t)PC.nslices, par_sliced_draws += (uint64_t)PC.draws;
+    uint64_t t1 = kern_now_ns();
+    par_t_collect += t1 - par_t0;
+    if (PC.nslices) par_publish();
+    plat_mutex_lock(&pw_lock);
+    while (pw_next < pw_pub) {   // the submitting thread records slices too
+        int i = pw_next++;
+        plat_mutex_unlock(&pw_lock);
+        uint64_t t = kern_now_ns();
+        par_record(i, &par_main_pool, &par_main_w);
+        par_rec_note(0, i, kern_now_ns() - t);
+        plat_mutex_lock(&pw_lock);
+        pw_done++;
     }
-    ParExec *pe = &par_pend[npend++];
-    *pe = (ParExec){PC.first, n, PC.sig, 0};
-    // The recorder thread executes the slices in the primary once they are recorded, in order with the primary's other
-    // calls, so the walk goes on to the next ops while the workers record. Without the recorder, or with
-    // TOTK_REPLAY_DEFER=0, the walk waits here.
-    pe->queued = n && par_nworkers && par_defer && rec_call(ex->cb, par_exec_cmds, pe);
-    if (!pe->queued) par_settle(ex);
+    uint64_t t2 = kern_now_ns();
+    while (pw_done < pw_pub) plat_cond_wait(&pw_idle, &pw_lock);
+    uint64_t t3 = kern_now_ns();
+    par_t_own += t2 - t1, par_t_wait += t3 - t2;
+    pw_pub = pw_next = pw_done = 0;
+    __atomic_store_n(&pw_active, 0, __ATOMIC_RELEASE);
+    plat_mutex_unlock(&pw_lock);
+    ParDone *done = malloc(sizeof *done + sizeof(ParCb) * (size_t)PC.nslices);
+    VkCommandBuffer *cbs = malloc(sizeof *cbs * (size_t)(PC.nslices ? PC.nslices : 1));
+    if (!done || !cbs) rt_fatal("vk: out of memory");
+    done->n = 0;
+    int hazard = 0;
+    for (int i = 0; i < PC.nslices; i++) {
+        ParOut *o = &par_out[i];
+        done->cb[done->n++] = o->cb;
+        cbs[i] = o->cb.cb;
+        ex->fb_dirty |= o->fb_dirty;
+        ex->recorded += o->recorded;
+        if (o->hazard > hazard) hazard = o->hazard;
+        for (int k = 0; k < o->nviews; k++) {   // the slice's views go with the submission like the primary's
+            if (ex->nviews == ex->cap_views) ex->views = par_grow(ex->views, &ex->cap_views, sizeof(ViewEnt));
+            ((ViewEnt *)ex->views)[ex->nviews++] = o->views[k];
+        }
+        free(o->views);
+    }
+    rec_drain();   // the recorder has made every earlier call into the primary
+    if (PC.nslices) vkCmdExecuteCommands(ex->cb, (uint32_t)PC.nslices, cbs);
+    free(cbs);
     ex->recorded++;
+    vk_completion_add(ex->fence, par_done, done);
+    par_t_exec += kern_now_ns() - t3;
     vk_exec_draw_slice_begin();   // the primary's bindings are undefined after vkCmdExecuteCommands
     ex->dirty = VK_EXEC_DIRTY_ALL;
     vk_exec_pass_end(ex);         // a pass of secondary command buffers takes nothing else
+    if (hazard) {
+        ParHist *e = par_find(PC.sig, 1);
+        // A feedback target learned inside a slice is one: its pass restart was dropped, and the next pass attaches
+        // the target in the feedback layout, so a few hazards are expected; a set that keeps having them is left alone.
+        par_no[3]++;
+        if (hazard == 2 && e->banned < PAR_BAN_AFTER) {
+            // A draw of a slice stored into a range a uniform snapshot copy covers: which later bindings take the copy
+            // follows the draw order, which slices recorded at once do not keep.
+            e->banned = PAR_BAN_AFTER;
+            rt_log("vk: a draw of a sliced pass stores over a uniform snapshot copy: those targets are not sliced again");
+        } else if (e->banned < 255 && ++e->banned == PAR_BAN_AFTER)
+            rt_log("vk: a sliced pass needed a pass or barrier change inside a slice %d times: those targets are not sliced again",
+                   PAR_BAN_AFTER);
+    }
 }
 
 static void walk(VkExec *ex, const op_hdr *h, int depth) {
@@ -1575,7 +1485,6 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
                 h = nvn_op_next(h);
                 continue;
             }
-            if (npend && !par_safe(h->op)) par_settle(ex);
         }
         switch (h->op) {
         case OP_END: return;
@@ -1649,7 +1558,6 @@ static int record_impl(VkCommandBuffer cb, const uint64_t *handles, int n, uint6
     }
     if (par_collecting()) par_end_op[OP_COUNT_]++;
     par_flush(ex);
-    par_settle(ex);
     vk_exec_pass_end(ex);
     x_here = 0;
     if (ex->recorded) vk_exec_barrier(ex);   // later submissions see this one's writes

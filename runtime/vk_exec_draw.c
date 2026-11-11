@@ -1092,10 +1092,7 @@ static int bind_range(VkExec *ex, uint64_t addr, uint64_t size, uint64_t align, 
         *out = (VkDescriptorBufferInfo){sp.buffer, sp.offset, n};
         if (written) {
             // In a slice, a store over a uniform snapshot copy depends on the draw order (vk_usnap.c vk_usnap_drop).
-            // Outside a slice, while slices of earlier passes are recorded, the store waits for them (vk_exec_par_wait).
-            if (vk_exec_par_slice()) {
-                if (vk_usnap_covers(addr, n)) vk_exec_par_order_hazard();
-            } else if (vk_exec_par_inflight() && vk_usnap_covers(addr, n)) vk_exec_par_wait();
+            if (vk_exec_par_slice() && vk_usnap_covers(addr, n)) vk_exec_par_order_hazard();
             vk_mem_gpu_wrote(&sp, n), vk_usnap_drop(addr, n);
         }
         count_use(sp.cls, use, n);
