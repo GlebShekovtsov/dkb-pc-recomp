@@ -293,6 +293,15 @@ go to per-submission bookkeeping (`vk_usnap_begin` 2.7 ms, `vk_mem_mirror_end` 2
 and most of the first two is the CRT's `qsort` over the write lists (`wr_prune`, `copy_ranges`). A second game thread
 that submits a little work spends about 4 ms a frame waiting for `sub_lock` while the main submission replays.
 
+### An inlined sort: replay 13 ms, frame unchanged (af96356)
+
+Eight threads, the hills, standing still: replay 12.8-13.2 ms for 28,400 draws (0.46 us a draw against 0.57 before),
+but the frame stayed at 28.0-28.5 ms (35-35.6 fps). The game's other threads waited 12.4 ms a frame on fences (10.5
+before), the GPU took 13.4 ms, and a submission went to the queue in 1.62 parts: the game waits for the GPU's results
+within the frame, and the GPU started on a submission only once most of its replay was done, so the frame was about the
+replay plus the GPU work. Draws collected for slices did not count towards a command buffer split; from the next commit
+they do, so a split follows a big sliced pass and the GPU starts on it while the rest is replayed.
+
 ## Plan
 
 1. **Measure and remove the cheap waste** (done here).

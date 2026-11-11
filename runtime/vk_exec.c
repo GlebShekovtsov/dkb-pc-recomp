@@ -1492,6 +1492,11 @@ static void par_flush(VkExec *ex) {
     vk_exec_draw_slice_begin();   // the primary's bindings are undefined after vkCmdExecuteCommands
     ex->dirty = VK_EXEC_DIRTY_ALL;
     vk_exec_pass_end(ex);         // a pass of secondary command buffers takes nothing else
+    // The sliced draws count towards the next command buffer split (maybe_split), which the walk asks for after this
+    // op: the GPU can start on a big pass while the rest of the submission is replayed. Collected draws skipped the
+    // walk's count, so a submission of big sliced passes went to the queue in one or two parts, and the game, which
+    // waits for the GPU within the frame, waited for the whole replay and then the whole GPU work.
+    split_draws += PC.draws;
     if (hazard) {
         ParHist *e = par_find(PC.sig, 1);
         // A feedback target learned inside a slice is one: its pass restart was dropped, and the next pass attaches
