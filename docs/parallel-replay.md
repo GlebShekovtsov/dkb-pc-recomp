@@ -249,6 +249,21 @@ submitting thread still records 4.7 ms of slices a frame and waits about 0.5 ms.
 frame rate between 30 and 60 slows the game down (it steps by the present interval it chose), which the tester noticed;
 `DKB_REALTIME=1` makes game time follow the clock.
 
+### Per-draw cost by thread, and passes that no longer wait (830e509 and the next commit)
+
+The draw profile per thread (6 threads, `DKB_DRAW_PROFILE=1`, the hills, 33 fps with the profile on) put a draw of a
+slice at 1.5-1.9 us against 1.3 us for the submitting thread's draws outside slices; every section was slower, the
+descriptor sets (280 against 130 ns), the textures (210 against 85) and the bind signature (185 against 100) most. The
+submitting thread recorded 19% of the slices itself (5.3 ms a frame) and waited 2.1 ms a frame for the workers: each
+of the 13 collections a frame ended with the pass's last slices and a wait for them.
+
+The walk no longer waits at the end of a sliced pass. The primary's `vkCmdExecuteCommands` for the pass goes to the
+recorder thread as a call (`vk_rec.c` `rec_call`), which waits there until the workers recorded each slice, in order
+with the primary's other calls; the walk ends the pass and goes on. Slice and op lists run on across passes until
+`par_settle` takes stock: before any op other than pass, state, bind, direct draw and barrier ops, at the end of the
+submission, and when the lists fill. A draw of the walk that stores over a uniform snapshot copy first waits for the
+slices in flight (`vk_exec_par_wait`), since they may bind that copy. `DKB_REPLAY_DEFER=0` brings back the wait.
+
 ## Plan
 
 1. **Measure and remove the cheap waste** (done here).
