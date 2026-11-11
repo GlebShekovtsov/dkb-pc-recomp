@@ -143,6 +143,18 @@ void vk_exec_draw_new_cb(void);
 // thread, makes its draws use the copy. Threads that never call it share the file's own objects, as before.
 void *vk_exec_draw_ctx_new(void);
 void vk_exec_draw_ctx_use(void *ctx);
+// vk_exec_draw.c: forget the bindings, memos and descriptor-build records of the thread's last command buffer before it
+// records a slice of a sliced pass from a copy of the replay state, and after the primary executed the slices.
+void vk_exec_draw_slice_begin(void);
+// Sliced passes (vk_exec.c par_start): 1 while this thread records a slice; vk_exec_par_hazard marks that the slice
+// needed something only the primary may do (the call is then dropped and the pass's targets are not sliced again).
+int vk_exec_par_slice(void);
+void vk_exec_par_hazard(void);
+// vk_exec_xfer.c: 1 while occlusion queries count draws; a sliced pass's query begins before the pass and ends after
+// it, and its slices inherit it.
+int vk_exec_oq_counting(void);
+int vk_exec_oq_begin_outside(VkExec *ex, VkQueryControlFlags *flags, int *open);
+void vk_exec_oq_pass_ended(VkExec *ex);
 VkBuffer vk_exec_inline_buffer(VkDeviceSize size);
 // vk_exec.c: the stand-in a 3D BC render target is drawn through goes with its image (vk_exec_image_gone).
 void vk_exec_bc_gone(VkImage image);
