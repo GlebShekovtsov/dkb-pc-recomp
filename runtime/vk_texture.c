@@ -157,7 +157,10 @@ static void tex_init(void *p) {
 }
 static void lock(void) {
     if (!__atomic_load_n(&tex_ready, __ATOMIC_ACQUIRE)) plat_once(&tex_once, tex_init, NULL);
+    if (plat_rmutex_trylock(&tex_lock)) return;
+    uint64_t t0 = kern_now_ns();   // contended: TOTK_TRACE=perf counts the long waits (perf_lock_wait)
     plat_rmutex_lock(&tex_lock);
+    if (rt_trace & RT_TRACE_PERF) perf_lock_wait(PERF_LOCK_TEXTURE, kern_now_ns() - t0);
 }
 static void unlock(void) { plat_rmutex_unlock(&tex_lock); }
 

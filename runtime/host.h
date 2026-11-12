@@ -50,6 +50,11 @@ enum { PERF_CNT_PIPE_ASYNC, PERF_CNT_PIPE_SKIP, PERF_CNT_TEX_UP, PERF_CNT_TEX_RE
        PERF_CNT_PIPE_WAIT, PERF_CNT_ONESHOT_WAIT, PERF_CNT_PIPE_BUILT, PERF_CNT_TEX_NEW, PERF_CNT_TEX_ALIAS,
        PERF_CNT_WB, PERF_CNT_WB_SKIP, PERF_CNT_N };
 void perf_count(int kind);
+// TOTK_TRACE=perf: a contended acquire of one of the replay's shared locks waited ns (callers time only after a failed
+// try). The perf line counts the waits over 100 us per lock and the longest: slices of parallel passes stalled for
+// milliseconds now and then, and a lock held by another thread is one cause.
+enum { PERF_LOCK_TEXTURE, PERF_LOCK_POOL, PERF_LOCK_MIRROR, PERF_LOCK_N };
+void perf_lock_wait(int lock, uint64_t ns);
 void perf_present(uint64_t frame);
 void perf_summary_flush(void);                  // prints the frame-time summary of the running period (exit); the 60 s lines come from perf_present
 void gfx_exit_log(void);                        // back end's lines for the exit summary (weak no-op in prof_win.c)

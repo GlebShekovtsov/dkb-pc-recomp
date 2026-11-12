@@ -59,6 +59,10 @@ void plat_mutex_lock(PlatMutex *m) { if (m->p) rt_fatal("nonrecursive lock reent
 void plat_mutex_unlock(PlatMutex *m) { if (!m->p) rt_fatal("unlock without lock\n"); m->p = NULL; }
 void plat_mutex_lock_shared(PlatMutex *m) { plat_mutex_lock(m); }
 void plat_mutex_unlock_shared(PlatMutex *m) { plat_mutex_unlock(m); }
+int plat_mutex_trylock(PlatMutex *m) { if (m->p) return 0; m->p = (void *)1; return 1; }
+int plat_mutex_trylock_shared(PlatMutex *m) { return plat_mutex_trylock(m); }
+uint64_t kern_now_ns(void) { return 0; }
+void perf_lock_wait(int lock, uint64_t ns) { (void)lock; (void)ns; }
 void plat_cond_broadcast(PlatCond *c) { (void)c; }
 void plat_cond_wait(PlatCond *c, PlatMutex *m) { (void)c; (void)m; rt_fatal("unexpected fixture wait\n"); }
 '''
@@ -255,12 +259,12 @@ def source():
 static Tex *entry_of(const tex_t *t) { (void)t; dependencies++; rt_fatal("unexpected image creation\n"); }
 static int make_fresh_snap(Tex *t) { (void)t; dependencies++; rt_fatal("unexpected upload\n"); }
 ''']
-    for text, starts in ((common, ('void plat_rmutex_lock(', 'void plat_rmutex_unlock(', 'void plat_once(')),
+    for text, starts in ((common, ('void plat_rmutex_lock(', 'int plat_rmutex_trylock(', 'void plat_rmutex_unlock(', 'void plat_once(')),
             (core, ('void nvn_called(',)),
             (tex, ('static void tex_init(', 'static void lock(', 'static void unlock(', 'static void log_limited(',
                 'static uint32_t agen_idx(', 'static void make_key(', 'static int same_but_swizzle(',
                 'static uint32_t rgen_idx(', 'static void rgen_bump(')),
-            (memory, ('int vk_mem_descriptor_key(',)),
+            (memory, ('static void pool_lock_shared(', 'int vk_mem_descriptor_key(',)),
             (tex, ('static int descriptor_key(', 'static DescSlot *descriptor_slot(', 'static void descriptor_registered(',
                 'void vk_texture_register(', 'static Tex *slot_resolve(', 'uint64_t vk_texture_slot_token(', 'uint64_t vk_texture_slot_token_stamped(',
                 'uint64_t vk_texture_slot_token_again(',

@@ -86,6 +86,14 @@ static void mirror_retire(void *arg);    // completion thread: destroys a finali
 static void grow(void **arr, int *cap, size_t elem);
 
 static PlatMutex pool_lock = PLAT_MUTEX_INIT;
+// Shared acquires try first and time a contended wait (TOTK_TRACE=perf, perf_lock_wait): a pool imported or mapped on
+// another thread holds the lock exclusively across driver calls, and every draw resolves its buffers under it.
+static void pool_lock_shared(void) {
+    if (plat_mutex_trylock_shared(&pool_lock)) return;
+    uint64_t t0 = kern_now_ns();
+    plat_mutex_lock_shared(&pool_lock);
+    if (rt_trace & RT_TRACE_PERF) perf_lock_wait(PERF_LOCK_POOL, kern_now_ns() - t0);
+}
 // Bumped under pool_lock (exclusive) by every change to the index or a page table: vk_mem_resolve's per-thread hits
 // stay valid while it is unchanged.
 static uint64_t pool_gen = 1;
@@ -340,7 +348,7 @@ int vk_pool_init(pool_t *p) {
     // Reinitializing the same object retires its old backing before installing the new mapping. In particular,
     // descriptors at a reused address must not inherit registrations from a previous storage lifetime.
     int reinit = 0;
-    plat_mutex_lock_shared(&pool_lock);
+    pool_lock_shared();
     for (int i = 0; i < pool_index.n; i++) if (pool_index.e[i].key == p) { reinit = 1; break; }
     plat_mutex_unlock_shared(&pool_lock);
     if (reinit) vk_pool_fini(p);
@@ -544,7 +552,7 @@ int vk_mem_inspect(uint64_t addr, uint64_t size, VkMemInspect *out) {
     if (!addr || !size || addr > UINT64_MAX - size) return 0;
     int ok = 0;
     VkMemInspect result = {0};
-    plat_mutex_lock_shared(&pool_lock);
+    pool_lock_shared();
     // Match bind_range's one-byte resolver candidate, then check the whole request against that same backing.
     const pidx_ent *e = pidx_find(&pool_index, addr, 1);
     const PoolRec *r = e ? e->buf : NULL;
@@ -608,7 +616,7 @@ int vk_mem_descriptor_key(uint64_t addr, uint64_t size, VkDescKey *out) {
     memset(out, 0, sizeof *out);
     if (!addr || !size || addr > UINT64_MAX - size) return 0;
     int ok = 0;
-    plat_mutex_lock_shared(&pool_lock);
+    pool_lock_shared();
     const pidx_ent *e = pidx_find(&pool_index, addr, size);
     const PoolRec *r = e ? e->buf : NULL;
     if (r && r->kind == POOL_IMPORT) {
@@ -661,7 +669,7 @@ int vk_mem_resolve(uint64_t addr, uint64_t size, VkMemSpan *out) {
 // The pool index lookup under the lock; a non-overlapped import or physical pool goes into the address's cache slot.
 static int resolve_locked(uint64_t addr, uint64_t size, VkMemSpan *out) {
     memset(out, 0, sizeof *out);
-    plat_mutex_lock_shared(&pool_lock);
+    pool_lock_shared();
     const pidx_ent *e = pidx_find(&pool_index, (uintptr_t)addr, size);
     PoolRec *r = e ? e->buf : NULL;
     int ok = 0;
@@ -785,7 +793,7 @@ void vk_mem_census(uint64_t frame) {
     Group g[64];
     int ng = 0;
     uint64_t total[4] = {0}, count[4] = {0}, used_n = 0, used_bytes = 0;
-    plat_mutex_lock_shared(&pool_lock);
+    pool_lock_shared();
     for (int i = 0; i < pool_index.n; i++) {
         const PoolRec *r = pool_index.e[i].buf;
         if (r->kind == POOL_IMPORT && r->used) used_n++, used_bytes += r->size;
@@ -1283,7 +1291,7 @@ void vk_mem_gpu_pending(uint64_t addr, uint64_t size) {
 
 void vk_gpu_written(uint64_t addr, uint64_t size) {
     if (shadow_on && size) {
-        plat_mutex_lock_shared(&pool_lock);
+        pool_lock_shared();
         const pidx_ent *e = pidx_find(&pool_index, addr, size);
         PoolRec *r = e ? e->buf : NULL;
         plat_mutex_lock(&shadow_lock);
@@ -1318,7 +1326,7 @@ void vk_mem_dirty_submit(void) {
     uint32_t prev = dirty_sub;   // the submit whose replay noted the bindings
     dirty_sub = prev + 1 ? prev + 1 : 1;
     uint64_t eager[DC_N] = {0}, lazy[DC_N] = {0}, ln[DC_N] = {0}, lb[DC_N] = {0}, untracked = 0, queries = 0;
-    plat_mutex_lock_shared(&pool_lock);
+    pool_lock_shared();
     if (dcap < pool_index.n) {
         dcap = pool_index.n * 2;
         dlist = realloc(dlist, (size_t)dcap * sizeof *dlist);
@@ -1483,7 +1491,10 @@ static PlatMutex mirror_lock = PLAT_MUTEX_INIT;
 static int mem_workers;   // vk_mem_threads: the workers of sliced passes (vk_exec.c) bind mirrors too
 static int mirror_lock_if_shared(void) {
     if (!vk_spec_count() && !__atomic_load_n(&mem_workers, __ATOMIC_ACQUIRE)) return 0;
+    if (plat_mutex_trylock(&mirror_lock)) return 1;
+    uint64_t t0 = kern_now_ns();   // contended: TOTK_TRACE=perf counts the long waits (perf_lock_wait)
     plat_mutex_lock(&mirror_lock);
+    if (rt_trace & RT_TRACE_PERF) perf_lock_wait(PERF_LOCK_MIRROR, kern_now_ns() - t0);
     return 1;
 }
 static void mirror_unlock(int locked) {
@@ -1638,7 +1649,7 @@ static void mirror_create(PoolRec *r) {
     // and gives its part up; it never sees a refusal that turns into a mirror.
     __atomic_add_fetch(&mirror_gen, 1, __ATOMIC_RELEASE);
     if (r->kind != POOL_IMPORT || !r->buf || !n) return ms_set(r, MS_REFUSED);
-    plat_mutex_lock_shared(&pool_lock);
+    pool_lock_shared();
     int i = pidx_upper(&pool_index, r->lo) - 1;
     while (i >= 0 && pool_index.e[i].buf != r) i--;
     int alone = i >= 0 && (i == 0 || pool_index.maxhi[i - 1] <= pool_index.e[i].lo) &&
@@ -1836,7 +1847,7 @@ void nvn_pool_flushed(const pool_t *p, uint64_t off, uint64_t size) {
     if (!vk_mirror_on || !size || !p->mem) return;
     plat_inc64(&m_flush_calls);
     plat_add64(&m_flush_bytes, (int64_t)size);
-    plat_mutex_lock_shared(&pool_lock);
+    pool_lock_shared();
     const pidx_ent *e = pidx_find(&pool_index, (uintptr_t)p->mem, 0);
     PoolRec *r = e && e->key == p ? e->buf : NULL;
     if (r && ms_get(r) == MS_ON) {
@@ -1880,7 +1891,7 @@ void vk_mem_mirror_begin(void) {
     mepoch = vk_texture_epoch();
     uint64_t q = 0, run0 = 0, run1 = 0;
     int have = 0;
-    plat_mutex_lock_shared(&pool_lock);
+    pool_lock_shared();
     plat_mutex_lock(&gen_lock);
     ww_ep++;
     uint64_t b0 = ww_bytes;
@@ -1980,7 +1991,7 @@ static int verify_record(VkCommandBuffer cb, uint64_t fence) {
     VJob *j = calloc(1, sizeof *j);
     if (!j) rt_fatal("vk: out of memory");
     uint64_t left = VERIFY_BYTES, dst = 0;
-    plat_mutex_lock_shared(&pool_lock);
+    pool_lock_shared();
     for (int tries = 0; nm && left && j->n < VERIFY_SAMPLES && tries <= nm; tries++) {
         if (ver_i >= nm) ver_i = 0, ver_off = 0;
         PoolRec *r = mlist[ver_i];
@@ -2463,7 +2474,7 @@ void vk_mem_collect(void) {
 
 void vk_mem_stats(VkMemStats *s) {
     memset(s, 0, sizeof *s);
-    plat_mutex_lock_shared(&pool_lock);
+    pool_lock_shared();
     for (int i = 0; i < pool_index.n; i++) {
         const PoolRec *r = pool_index.e[i].buf;
         if (r->kind == POOL_IMPORT) s->imported_pools++;

@@ -66,6 +66,9 @@ void rt_fatal(const char *fmt, ...) { va_list ap; va_start(ap, fmt); vfprintf(st
 uint32_t plat_thread_id(void) { return 1; }
 void plat_mutex_lock(PlatMutex *m) { if (m->p) rt_fatal("nonrecursive lock reentered\n"); m->p = (void *)1; }
 void plat_mutex_unlock(PlatMutex *m) { if (!m->p) rt_fatal("unlock without lock\n"); m->p = NULL; }
+int plat_mutex_trylock(PlatMutex *m) { if (m->p) return 0; m->p = (void *)1; return 1; }
+uint64_t kern_now_ns(void) { return 0; }
+void perf_lock_wait(int lock, uint64_t ns) { (void)lock; (void)ns; }
 void plat_cond_broadcast(PlatCond *c) { (void)c; }
 void plat_cond_wait(PlatCond *c, PlatMutex *m) { (void)c; (void)m; rt_fatal("unexpected fixture wait\n"); }
 // The replay side the marking reports to.
@@ -173,7 +176,7 @@ def source(root):
         'static uint64_t wb_limit', 'static int wb_trace', 'static int wb_cfg_read')]
     parts += [statement(common, 'static PlatMutex once_lock'), statement(common, 'static PlatCond once_done'), STUBS]
     parts += [typedef(memory, 'MRange'), statement(memory, 'static MRange *pend'), statement(memory, 'static int npend')]
-    parts += [function(common, name) for name in ('plat_rmutex_lock', 'plat_rmutex_unlock', 'plat_once')]
+    parts += [function(common, name) for name in ('plat_rmutex_lock', 'plat_rmutex_trylock', 'plat_rmutex_unlock', 'plat_once')]
     parts += [function(tex, name) for name in (
         'tex_init', 'lock', 'unlock', 'agen_idx', 'tex_gen_bump', 'make_key', 'owned_lower', 'own_add', 'rel_append',
         'sweep_released', 'fills_no_page', 'wb_cfg_init', 'vk_texture_gpu_written_ready')]
