@@ -58,6 +58,7 @@ typedef struct { uint64_t sig; uint32_t draws; uint8_t banned; } ParHist;
 static ParHist par_hist[PAR_HIST];
 static int par_mode = -1;                       // DKB_REPLAY_THREADS: 0 off, else the threads (stage A: 1)
 static uint64_t par_t_collect, par_t_own, par_t_wait, par_t_exec;   // ns on the submitting thread (TOTK_TRACE=perf)
+static uint64_t par_wait_max, par_wait_long;   // the longest wait for the workers at a pass end, and waits over 200 us
 static uint64_t par_t0;
 static volatile int64_t par_rec[2][3];          // slices recorded by the submitting thread [0] and workers [1]: count, draws, ns
                         // the collection's start
@@ -1924,10 +1925,26 @@ static void par_op(VkExec *ex, uint32_t op, const void *a) {   // replay of one 
 // shrink towards the end and the last one, which the submitting thread records after the collection while the workers
 // finish theirs, is short. With slices of a third of the pass per thread, the submitting thread recorded the last slice
 // of each of the busy area's 13 sliced passes a frame, 4.6 ms a frame, and waited 1.4 ms more for the workers.
+// TOTK_SLICE_MIN (default PAR_SLICE_MIN) and TOTK_SLICE_DIV (default 1: a share of 1/N of what is left, N recording
+// threads) tune the sizes, read once: the slices the workers still record when the submitting thread has taken the last
+// one set how long it waits at the pass end (1.2-1.8 ms a frame on six threads in the hills of Bananza 3.2.0).
+static int par_slice_min = -1, par_slice_div;
 static int par_size(void) {
     if (par_mode <= 1) return PAR_SLICE_DRAWS;
-    int size = (PC.expect - PC.draws) / par_mode;
-    return size < PAR_SLICE_MIN ? PAR_SLICE_MIN : size > PAR_SLICE_DRAWS ? PAR_SLICE_DRAWS : size;
+    if (par_slice_min < 0) {
+        const char *m = cfg_get("TOTK_SLICE_MIN"), *d = cfg_get("TOTK_SLICE_DIV");
+        par_slice_min = m && *m ? atoi(m) : PAR_SLICE_MIN;
+        par_slice_div = d && *d ? atoi(d) : 1;
+        if (par_slice_min < 8) par_slice_min = 8;
+        if (par_slice_min > PAR_SLICE_DRAWS) par_slice_min = PAR_SLICE_DRAWS;
+        if (par_slice_div < 1) par_slice_div = 1;
+        if (par_slice_div > 8) par_slice_div = 8;
+        if (par_slice_min != PAR_SLICE_MIN || par_slice_div != 1)
+            rt_log("vk: slices of at least %d draws, a 1/%d share of what is left per thread (TOTK_SLICE_MIN, TOTK_SLICE_DIV)",
+                   par_slice_min, par_slice_div);
+    }
+    int size = (PC.expect - PC.draws) / (par_mode * par_slice_div);
+    return size < par_slice_min ? par_slice_min : size > PAR_SLICE_DRAWS ? PAR_SLICE_DRAWS : size;
 }
 
 static int par_take(VkExec *ex, const op_hdr *h, const void *a) {
@@ -2111,8 +2128,9 @@ static void par_flush(VkExec *ex) {
         }
         if (par_mode > 0)
             rt_log("perf: sliced passes on the submitting thread: collecting %.1f ms, own slices %.1f ms, waiting for workers "
-                   "%.1f ms, executing %.1f ms; draws of unsliced passes: under 64 %llu, 64-255 %llu, 256-1023 %llu, 1024 "
-                   "and more %llu", par_t_collect / 1e6, par_t_own / 1e6, par_t_wait / 1e6, par_t_exec / 1e6,
+                   "%.1f ms (longest %.0f us, %llu over 200 us), executing %.1f ms; draws of unsliced passes: under 64 %llu, "
+                   "64-255 %llu, 256-1023 %llu, 1024 and more %llu", par_t_collect / 1e6, par_t_own / 1e6, par_t_wait / 1e6,
+                   par_wait_max / 1e3, (unsigned long long)par_wait_long, par_t_exec / 1e6,
                    (unsigned long long)par_unsliced[0], (unsigned long long)par_unsliced[1],
                    (unsigned long long)par_unsliced[2], (unsigned long long)par_unsliced[3]);
         if (par_mode > 0) {
@@ -2125,6 +2143,7 @@ static void par_flush(VkExec *ex) {
                    r[1][1] ? r[1][2] / 1e3 / (double)r[1][1] : 0.0);
         }
         par_t_collect = par_t_own = par_t_wait = par_t_exec = 0;
+        par_wait_max = par_wait_long = 0;
         memset(par_unsliced, 0, sizeof par_unsliced);
         par_restarts = 0;
         memset(par_end_op, 0, sizeof par_end_op), memset(par_no, 0, sizeof par_no);
@@ -2151,6 +2170,8 @@ static void par_flush(VkExec *ex) {
     while (pw_done < pw_pub) plat_cond_wait(&pw_idle, &pw_lock);
     uint64_t t3 = kern_now_ns();
     par_t_own += t2 - t1, par_t_wait += t3 - t2;
+    if (t3 - t2 > par_wait_max) par_wait_max = t3 - t2;
+    par_wait_long += t3 - t2 > 200000;
     pw_pub = pw_next = pw_done = 0;
     __atomic_store_n(&pw_active, 0, __ATOMIC_RELEASE);
     plat_mutex_unlock(&pw_lock);

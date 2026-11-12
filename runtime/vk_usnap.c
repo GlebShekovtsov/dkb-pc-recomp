@@ -56,6 +56,7 @@ static struct {
     int nwr, cwr;
     // since the last summary
     uint64_t subs, regions, bytes, copy_ns, hits, drops, inflight, refused, off_subs;
+    uint64_t cols, t_collect, t_sort, t_merge, t_copy;   // ranges collected, and the time of each step (summary)
 } U;
 
 // The helper threads (vk_spec.h) look regions up in vk_usnap_find while the replay thread drops some of them
@@ -221,10 +222,13 @@ static void summary(void) {
     double s = U.subs ? (double)U.subs : 1.0;
     rt_log("vk_usnap: %llu submissions with a snapshot, %llu without; per submission %.0f ranges, %.1f KiB copied in "
            "%.3f ms, %.0f uniform bindings from the copy, %.1f dropped by GPU writes, %.1f left out (GPU writes in "
-           "flight), %.1f refused (not an imported pool)",
+           "flight), %.1f refused (not an imported pool); %.0f bindings collected; ms: collect %.3f, sort and prune %.3f, "
+           "merge %.3f, copy %.3f",
            (unsigned long long)U.subs, (unsigned long long)U.off_subs, U.regions / s, U.bytes / s / 1024.0,
-           U.copy_ns / s / 1e6, U.hits / s, U.drops / s, U.inflight / s, U.refused / s);
+           U.copy_ns / s / 1e6, U.hits / s, U.drops / s, U.inflight / s, U.refused / s, U.cols / s, U.t_collect / s / 1e6,
+           U.t_sort / s / 1e6, U.t_merge / s / 1e6, U.t_copy / s / 1e6);
     U.subs = U.off_subs = U.regions = U.bytes = U.copy_ns = U.hits = U.drops = U.inflight = U.refused = 0;
+    U.cols = U.t_collect = U.t_sort = U.t_merge = U.t_copy = 0;
 }
 
 void vk_usnap_begin(const uint64_t *handles, int n, uint64_t fence) {
@@ -239,8 +243,11 @@ void vk_usnap_begin(const uint64_t *handles, int n, uint64_t fence) {
     U.ncol = 0;
     for (int i = 0; i < n; i++)
         if (handles[i]) collect(nvn_op_first(handles[i]), 0);
+    uint64_t t1 = kern_now_ns();
     sort_col();
     wr_prune();
+    uint64_t t2 = kern_now_ns();
+    U.cols += (uint64_t)U.ncol, U.t_collect += t1 - t0, U.t_sort += t2 - t1;
     // merge, keeping only what lies wholly in one imported pool and no GPU write in flight touches
     U.nreg = 0;
     uint64_t total = 0;
@@ -262,13 +269,17 @@ void vk_usnap_begin(const uint64_t *handles, int n, uint64_t fence) {
         U.reg[U.nreg++] = (Reg){lo, hi, total, 0};
         total += (hi - lo + ALIGN - 1) & ~(uint64_t)(ALIGN - 1);
     }
+    uint64_t t3 = kern_now_ns();
+    U.t_merge += t3 - t2;
     if (!U.nreg) return;
     if (!(U.arena = arena_get(total))) return;
     for (int i = 0; i < U.nreg; i++)
         memcpy(U.arena->map + U.reg[i].off, (const void *)(uintptr_t)U.reg[i].lo, U.reg[i].hi - U.reg[i].lo);
     vmaFlushAllocation(vk_ctx()->vma, U.arena->alloc, 0, total);   // a no-op on coherent memory
     U.on = 1;
-    U.subs++, U.regions += (uint64_t)U.nreg, U.bytes += total, U.copy_ns += kern_now_ns() - t0;
+    uint64_t t4 = kern_now_ns();
+    U.t_copy += t4 - t3;
+    U.subs++, U.regions += (uint64_t)U.nreg, U.bytes += total, U.copy_ns += t4 - t0;
 }
 
 void vk_usnap_end(uint64_t fence) {
