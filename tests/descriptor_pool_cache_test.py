@@ -68,6 +68,11 @@ uint64_t vk_texture_slot_token(const dpool_ref *pool,int id) {
     if (id!=257 || id>=(int)pool->count) return 0;
     return (pool->addr+32u*(unsigned)id)^memory_generation^(uint64_t)address_generation<<40;
 }
+uint64_t vk_texture_slot_token_stamped(const dpool_ref *pool,int id,VkSlotStamp *st) {
+    if (st) memset(st,0,sizeof *st);   // never checked again without the lock: every check reads the token anew
+    return vk_texture_slot_token(pool,id);
+}
+uint64_t vk_texture_slot_token_again(const VkSlotStamp *st) { (void)st; return 0; }
 const VkTexImage *vk_texture_by_id_locked(const dpool_ref *pool,int id,view_t *view,int *has_view) {
     if (!locked) abort();
     lookup_count++;

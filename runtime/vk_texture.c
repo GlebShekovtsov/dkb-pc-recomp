@@ -126,6 +126,22 @@ static uint32_t reg_serial;
 
 static uint32_t agen_idx(uint64_t addr) { return (uint32_t)(addr * 0x9E3779B97F4A7C15ull >> 52); }
 
+// A generation per descriptor slot (hashed by the DescSlot's address), bumped before the slot is registered again and
+// when it is retired. While it stays, the slot's serial, kind and texture address stay, so its token
+// (vk_texture_slot_token) differs only in its address generation, which is read atomically: vk_texture_slot_token_again
+// answers without the texture lock. Bananza registers descriptors all through a frame (slots_gen moves about 160 times a
+// frame), and every move made each replay thread read its tokens again under the lock: with eight threads recording
+// slices of parallel passes, a fifth of their time went to waiting for it there.
+#define RGEN_N 4096
+static uint32_t rgen[RGEN_N];
+
+static uint32_t rgen_idx(const void *d) { return (uint32_t)((uintptr_t)d * 0x9E3779B97F4A7C15ull >> 52); }
+
+static void rgen_bump(const void *d) {   // texture lock held
+    uint32_t *g = &rgen[rgen_idx(d)];
+    __atomic_store_n(g, *g + 1, __ATOMIC_RELEASE);
+}
+
 static void tex_gen_bump(uint64_t addr) {
     if (!++tex_gen) tex_gen = 1;
     slots_gen++;
@@ -1158,6 +1174,7 @@ static void descriptor_registered(DescSlot *d, uint32_t kind) {
     static int mode = -1;
     if (mode < 0) mode = rt_knob("DESC_SAMP_GEN", "0");
     int samplers = kind == DESC_SAMPLER || d->kind == DESC_SAMPLER;
+    rgen_bump(d);   // before the slot changes: a token checked against the old generation is no longer taken
     memset(d, 0, sizeof *d);
     if (!++reg_serial) ++reg_serial;
     d->serial = reg_serial, d->kind = kind;
@@ -1231,14 +1248,26 @@ void vk_texture_lock(void) { lock(); }
 void vk_texture_unlock(void) { unlock(); }
 uint32_t vk_texture_slots_gen(void) { return slots_gen; }
 
-uint64_t vk_texture_slot_token(const dpool_ref *pool, int id) {
+uint64_t vk_texture_slot_token(const dpool_ref *pool, int id) { return vk_texture_slot_token_stamped(pool, id, NULL); }
+
+uint64_t vk_texture_slot_token_stamped(const dpool_ref *pool, int id, VkSlotStamp *st) {
     // tex_lock is recursive: callers may already hold it, or may be checking a cache before acquiring it.
     lock();
     DescSlot *d = descriptor_slot(pool, id, 1u << 20, 0);
-    uint64_t token = d && d->kind == DESC_TEXTURE ? (uint64_t)d->serial << 32 |
-        __atomic_load_n(&agen[agen_idx((uintptr_t)d->u.tex.t.mem)], __ATOMIC_ACQUIRE) : 0;
+    int tex = d && d->kind == DESC_TEXTURE;
+    uint32_t aidx = tex ? agen_idx((uintptr_t)d->u.tex.t.mem) : 0;
+    uint64_t token = tex ? (uint64_t)d->serial << 32 | __atomic_load_n(&agen[aidx], __ATOMIC_ACQUIRE) : 0;
+    if (st) {
+        *st = (VkSlotStamp){0};
+        if (tex) st->serial = d->serial, st->ridx = rgen_idx(d), st->rgen = rgen[st->ridx], st->aidx = aidx, st->valid = 1;
+    }
     unlock();
     return token;
+}
+
+uint64_t vk_texture_slot_token_again(const VkSlotStamp *st) {
+    if (!st->valid || __atomic_load_n(&rgen[st->ridx], __ATOMIC_ACQUIRE) != st->rgen) return 0;
+    return (uint64_t)st->serial << 32 | __atomic_load_n(&agen[st->aidx], __ATOMIC_ACQUIRE);
 }
 uint32_t vk_sampler_gen(void) { return __atomic_load_n(&samp_gen, __ATOMIC_RELAXED); }
 
@@ -2117,7 +2146,11 @@ void vk_texture_descriptors_retire(uint64_t addr, uint64_t size, uint64_t storag
         }
         gone[n++] = key;
     }
-    for (uint32_t i = 0; i < n; i++) free(nvn_hm_del(&descriptors, &gone[i]));
+    for (uint32_t i = 0; i < n; i++) {
+        DescSlot *d = nvn_hm_del(&descriptors, &gone[i]);
+        if (d) rgen_bump(d);
+        free(d);
+    }
     if (n) slots_gen++, samp_gen++;
     free(gone);
     unlock();

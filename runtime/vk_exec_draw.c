@@ -393,7 +393,7 @@ typedef struct DrawCtx {
     uint64_t wait_frame, wait_left_ns;   // prepare_draw: the frame the full-screen wait budget belongs to, what is left
     struct { int on, filtered; uint64_t filter; unsigned records; } GCL;   // geometry_context_log; on -1: not read yet
     // token_of: slot tokens by texture id, with the pool, slot generation and memory generation they were read under.
-    struct { uint64_t pool, mg, tok; uint32_t id, sg; } tk[256];
+    struct { uint64_t pool, mg, tok; uint32_t id, sg; VkSlotStamp st; } tk[256];
     int slice;                           // a slice thread's context (vk_exec_draw_slice_ctx)
     // The texture descriptors the context's last graphics build wrote into bind_d, and what they derive from
     // (tex_repeat): the pipeline (so the same bindings sit at the same places), the sampled handles, the descriptor
@@ -1092,6 +1092,9 @@ static uint64_t stage_origin(DrawCtx *dc, const prog_t *p, int nvn_stage) {
 // Each context keeps the tokens while the slot and memory generations stay: a token changes only with a registration or
 // an entry change, which bump vk_texture_slots_gen, or with a remapped pool (vk_mem_gen). A profile on eight threads
 // had 7% of the slices' recording, and then 4% of the submitting thread's replay, waiting for the texture lock here.
+// When the slot generation moved (Bananza registers descriptors all through a frame), the token is checked again without
+// the lock while its own slot was not registered again (vk_texture_slot_token_again); a later profile still had a fifth
+// of the slices' time waiting for the lock in the locked read.
 static uint64_t token_of(const VkExec *ex, uint64_t h) {
     if (!h) return 1;
     DrawCtx *const dc = DC_OF(ex);
@@ -1099,9 +1102,14 @@ static uint64_t token_of(const VkExec *ex, uint64_t h) {
     uint32_t sg = vk_texture_slots_gen();
     uint64_t mg = vk_mem_gen();
     typeof(dc->tk[0]) *k = &dc->tk[(id ^ id >> 8) & 255];
-    if (k->tok && k->pool == ex->tex_pool.addr && k->id == (uint32_t)id && k->sg == sg && k->mg == mg) return k->tok;
-    uint64_t t = vk_texture_slot_token(&ex->tex_pool, id);
-    *k = (typeof(*k)){ex->tex_pool.addr, mg, t, (uint32_t)id, sg};
+    if (k->tok && k->pool == ex->tex_pool.addr && k->id == (uint32_t)id && k->mg == mg) {
+        if (k->sg == sg) return k->tok;
+        uint64_t t = vk_texture_slot_token_again(&k->st);
+        if (t) return k->tok = t, k->sg = sg, t;
+    }
+    VkSlotStamp st;
+    uint64_t t = vk_texture_slot_token_stamped(&ex->tex_pool, id, &st);
+    *k = (typeof(*k)){ex->tex_pool.addr, mg, t, (uint32_t)id, sg, st};
     return t;
 }
 

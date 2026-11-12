@@ -66,7 +66,8 @@ static DrawCtx ctx;   // the replay thread's: c0_lay NULL (NVN 1), the bank memo
     kinds = next(line for line in texture.splitlines() if line.startswith('enum { DESC_TEXTURE = 1'))
     gens = '\n'.join(line for line in texture.splitlines()
                      if line.startswith(('static uint32_t slots_gen', 'static uint32_t samp_gen',
-                                         'static uint32_t reg_serial')))
+                                         'static uint32_t reg_serial', '#define RGEN_N', 'static uint32_t rgen[')))
+    gens += '\n' + function(texture, 'static uint32_t rgen_idx(') + '\n' + function(texture, 'static void rgen_bump(')
     registered = function(texture, 'static void descriptor_registered(')
     tests = r'''
 static void c0_cases(VkExec *ex) {

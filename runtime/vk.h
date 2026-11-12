@@ -442,6 +442,11 @@ uint32_t vk_texture_slots_gen(void);
 // its storage address is created, dropped, released or taken back into use. Unlocked; read it before the lookup it
 // guards (a lookup may create an entry). 0 when the slot was never registered: nothing is kept under 0.
 uint64_t vk_texture_slot_token(const dpool_ref *pool, int id);
+// What a token was read from, so that it can be checked again without the texture lock: vk_texture_slot_token_again
+// gives the slot's token while it was not registered again or retired since (the address generation read anew), else 0.
+typedef struct { uint32_t serial, ridx, rgen, aidx, valid; } VkSlotStamp;
+uint64_t vk_texture_slot_token_stamped(const dpool_ref *pool, int id, VkSlotStamp *st);
+uint64_t vk_texture_slot_token_again(const VkSlotStamp *st);
 uint32_t vk_sampler_gen(void);                      // changes whenever a sampler slot is registered
 void vk_texture_gpu_written(const tex_t *t);        // rendered or copied into by the GPU: no re-upload from storage
 // The same for a part the helper thread recorded (vk_spec.h): _ready asks, on the helper, whether the marking can wait
