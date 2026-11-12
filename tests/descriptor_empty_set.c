@@ -67,6 +67,9 @@ int vk_exec_par_slice(void) { return 0; }
 static int tex_info_hit(VkExec *ex,const GfxShaderRes *r,uint64_t h,int separate,VkDescriptorImageInfo *out) {
     (void)ex; (void)r; (void)h; (void)separate; (void)out; abort();
 }
+typedef struct { const GfxShaderRes *r; VkDescSlot *o; int st, img; uint32_t cnt; } TexPend;
+static int tex_repeat(VkExec *ex,const VkPipeInfo *info,const TexPend *tp,int n) { (void)ex; (void)info; (void)tp; (void)n; return 0; }
+static void tex_repeat_forget(void) {}
 
 // Bounded malloc storage supplies alignment without imposing an array's declared
 // effective type. The real producers decide packet sizes and copy every payload.

@@ -2272,6 +2272,57 @@ static void write_set(const VkPipeInfo *info, uint32_t s, VkDescriptorSet set, c
 // The descriptors go into one packed array d, a VkDescSlot per descriptor in binding order, which a set's update
 // template reads directly (VkPipeInfo.tpl); write structs are filled only when a set has no template.
 
+typedef struct { const GfxShaderRes *r; VkDescSlot *o; int st, img; uint32_t cnt; } TexPend;
+
+// The texture descriptors the thread's last graphics build wrote into bind_resources' d, and what they derive from:
+// the pipeline (so the same bindings sit at the same places in d), the sampled handles, the descriptor context and
+// generations tex_info keys its memo on, and the attachments in the feedback layout, which set the image layout.
+// TOTK_TEX_REPEAT=0 turns the check off.
+static _Thread_local struct {
+    const VkPipeInfo *info;
+    uint64_t serial, pass, h[MAX_DESC];
+    uint32_t gen, ep, sg, nh;
+    int nfbl;
+    VkImage fbl[9];
+} TR;
+
+static int tex_repeat_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = cfg_get("TOTK_TEX_REPEAT");
+        on = !(e && *e && !strcmp(e, "0"));
+    }
+    return on;
+}
+
+static void tex_repeat_forget(void) { TR.info = NULL; }
+
+// 1: the n texture bindings in tp hold the same descriptors as the last build wrote, which are still in d. 0: they must
+// be looked up; the key is kept, and the lookups that follow fill d for the next draw. Storage images note their
+// binding with every lookup, so a draw with any is always looked up.
+static int tex_repeat(VkExec *ex, const VkPipeInfo *info, const TexPend *tp, int n) {
+    if (!tex_repeat_on()) return 0;
+    uint64_t h[MAX_DESC];
+    uint32_t nh = 0;
+    for (int t = 0; t < n; t++) {
+        if (tp[t].img) return tex_repeat_forget(), 0;
+        for (uint32_t k = 0; k < tp[t].cnt; k++) {
+            int slot = tp[t].r->slot + (int)k;
+            h[nh++] = slot >= 0 && slot < 128 ? ex->tex[tp[t].st][slot] : 0;
+        }
+    }
+    descriptor_state(ex);   // a new descriptor context bumps descriptor_serial
+    uint32_t gen = vk_texture_slots_gen(), ep = vk_texture_epoch(), sg = vk_sampler_gen();
+    if (TR.info == info && TR.nh == nh && TR.serial == descriptor_serial && TR.gen == gen && TR.ep == ep && TR.sg == sg &&
+        TR.pass == ex->pass_serial && TR.nfbl == ex->nfbl && !memcmp(TR.fbl, ex->fbl_img, sizeof(VkImage) * (size_t)ex->nfbl) &&
+        !memcmp(TR.h, h, sizeof(uint64_t) * nh))
+        return 1;
+    TR.info = info, TR.nh = nh, TR.serial = descriptor_serial, TR.gen = gen, TR.ep = ep, TR.sg = sg;
+    TR.pass = ex->pass_serial, TR.nfbl = ex->nfbl;
+    memcpy(TR.fbl, ex->fbl_img, sizeof TR.fbl), memcpy(TR.h, h, sizeof(uint64_t) * nh);
+    return 0;
+}
+
 static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
     static _Thread_local VkWriteDescriptorSet w[MAX_BINDINGS];   // per recording thread (parallel passes)
     static _Thread_local VkDescSlot d[MAX_DESC];
@@ -2305,7 +2356,6 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
     }
     uint32_t nd = 0;
     int tex_locked = 0;
-    typedef struct { const GfxShaderRes *r; VkDescSlot *o; int st, img; uint32_t cnt; } TexPend;
     static _Thread_local TexPend tp[MAX_BINDINGS];   // per recording thread, like w and d
     int ntp = 0;
     for (uint32_t i = 0; i < info->n_bindings; i++) {
@@ -2365,6 +2415,16 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
             else w[i].pTexelBufferView = &bv[nd];
         }
         nd += cnt;
+    }
+    // A draw with the same pipeline as the last build, the same sampled texture handles and nothing changed that a
+    // texture descriptor derives from finds them in d already (tex_repeat): in the hills region of Bananza 3.2.0 four
+    // programs make 70% of the draws in runs of thousands, and only buffer bindings change between those draws.
+    if (ntp && gfx && tex_repeat(ex, info, tp, ntp)) {
+        DP_MARK(DP_SIG);
+        ntp = 0;
+        DP_MARK(DP_TEX);
+    } else if (!ntp || !gfx) {
+        tex_repeat_forget();   // this build writes d without texture lookups: nothing in it is the last build's any more
     }
     if (ntp) {
         // tex_info looks up with the texture lock held: once for the draw's texture bindings. A slice of a parallel pass
