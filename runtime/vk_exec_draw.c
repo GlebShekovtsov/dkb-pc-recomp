@@ -431,7 +431,7 @@ static void c0_lay_set(VkExec *ex, const GfxShader *cs) {
 // a recording thread (vk_exec_draw_slices_begin), up to SPARE_POOLS_MAX: with six threads and 16 spares the workers
 // created pools in the frame, a profile put 17% of their time in kernel calls under vkAllocateDescriptorSets.
 #define SPARE_POOLS 16
-#define SPARE_POOLS_MAX 64
+#define SPARE_POOLS_MAX 256
 #define SPARE_CHUNKS 16
 DRAW_SHARED PlatMutex spare_lock DRAW_SHARED_INIT(PLAT_MUTEX_INIT);
 DRAW_SHARED VkDescriptorPool spare_pool[SPARE_POOLS_MAX];
@@ -2109,8 +2109,14 @@ static void tex_info(VkExec *ex, const GfxShaderRes *r, uint64_t h, int storage,
 }
 
 #ifndef VK_EXEC_DRAW_HELPER   // draw_main's counts
+#define SLICE_THREADS 16
+static DrawCtx *slice_ctx[SLICE_THREADS];   // the slice threads' contexts (vk_exec_draw_slices_begin)
 void vk_exec_pool_counts(uint64_t *created, uint64_t *taken) {   // TOTK_TRACE=perf, replay thread
     *created = draw_main.pools_created, *taken = draw_main.pools_taken;
+    for (int k = 0; k < SLICE_THREADS; k++)   // and the slice threads' (read while they may record: a trace count)
+        if (slice_ctx[k])
+            *created += __atomic_load_n(&slice_ctx[k]->pools_created, __ATOMIC_RELAXED),
+            *taken += __atomic_load_n(&slice_ctx[k]->pools_taken, __ATOMIC_RELAXED);
 }
 #endif
 
@@ -4145,9 +4151,6 @@ VkExecFrame *vk_exec_draw_helper_frame(int k) { return &helper_ctx[k]->helper_fr
 // translator and a context of its own, made from the replay thread's like a helper's. Each slice starts from a copy of
 // the replay state (vk_exec_draw_rebase forgets what the context derived from the one before). The submitting thread
 // makes and refreshes the contexts while no slice is recorded.
-#define SLICE_THREADS 16
-static DrawCtx *slice_ctx[SLICE_THREADS];
-
 // Submitting thread, at the start of a sliced pass: contexts for threads 0 to threads-1 (made the first time), each
 // with the inline uniform updates noted so far (no update op is collected into a sliced pass, so they hold for it).
 // The spare descriptor pools grow with the threads that record: each takes pools of its own for every submission.
@@ -4163,7 +4166,12 @@ void vk_exec_draw_slices_begin(int threads) {
         upd_take(slice_ctx[k]);
     }
     if (!made) return;
+    // TOTK_SPARE_POOLS sets the count instead (up to SPARE_POOLS_MAX). With six threads, slices of 177 to 453 draws
+    // took up to 3 ms, about 500 slices a minute over 1 ms: a thread that finds no spare creates a pool, a driver
+    // allocation of milliseconds, and every recording thread takes pools of its own for each submission in flight.
     int n = SPARE_POOLS + 8 * (threads > 1 ? threads - 1 : 0);
+    const char *e = cfg_get("TOTK_SPARE_POOLS");
+    if (e && *e && atoi(e) > 0) n = atoi(e);
     plat_mutex_lock(&spare_lock);
     spare_pools = n > SPARE_POOLS_MAX ? SPARE_POOLS_MAX : n;
     plat_mutex_unlock(&spare_lock);
