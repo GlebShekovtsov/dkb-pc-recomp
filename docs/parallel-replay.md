@@ -346,3 +346,21 @@ submission, the game's threads waiting 4.9 ms a frame on fences, GPU 10.5 ms); n
 
 Each stage is a commit that keeps the game working; stage 3 onward is checked in game on the RX 9070 XT before the
 next starts.
+
+### Where eight threads wait on the per-thread draw contexts (b0da3d7)
+
+`DKB_REPLAY_THREADS=8`, the hills, standing still. `DKB_DRAW_PROFILE` now logs the slices' contexts apart from the
+replay thread's: a sliced draw took about 2,000 ns against about 700 on one thread, and every section grew, most of all
+the pipeline lookup (230-390 ns against 45), the sets (330 against 55), the storage buffers (230 against 38) and the
+textures (180 against 12). A `TOTK_PROFILE_CHAINS` profile of the same build put 21% of the samples under `par_record`
+in waits for the texture lock, almost all in `vk_texture_slot_token`: Bananza registers descriptors all through a frame,
+`vk_texture_slots_gen` moves about 160 times a frame, and after every move each thread read the token of every slot
+it checked again under the lock (`slot_still` from `feedback_scan` and the texture memo). Another 7% waited for
+`mirror_lock` in `vk_mem_gpu_wrote`; the driver's push descriptors and draws took about 10%.
+
+- A descriptor slot now has a generation of its own (`vk_texture.c` `rgen`, hashed by the slot's address), bumped
+  before the slot is registered again and when it is retired. A token read under the lock comes with a stamp, and
+  `vk_texture_slot_token_again` gives the token again without the lock while the slot's generation stays (its address
+  generation is read anew).
+- A thread recording slices adds its write-back ranges to a list of its own, which `vk_mem_mirror_end` moves into the
+  submission's list.

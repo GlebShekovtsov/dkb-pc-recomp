@@ -1532,6 +1532,38 @@ static void mirror_mode(int discrete) {
            mode ? "pools used as buffers get a device-local mirror" : "every CPU-visible pool is imported host memory");
 }
 
+static void range_add(MRange **a, int *n, int *cap, PoolRec *r, uint64_t off, uint64_t size);
+
+// The write-back ranges a thread recording slices of parallel passes adds (vk_mem_count_quiet on), in a list of its own
+// that vk_mem_mirror_end moves into wbl: every slice of a submission is recorded before its end, so the lists are not
+// written then. With eight threads adding to wbl under mirror_lock, a profile had 7% of the slices' time waiting for
+// the lock in vk_mem_gpu_wrote.
+typedef struct WbLocal { MRange *a; int n, cap; struct WbLocal *next; } WbLocal;
+static WbLocal *wb_locals;   // every thread's, added under mirror_lock and kept until exit
+static _Thread_local WbLocal *wb_mine;
+
+static void wb_local_add(PoolRec *r, uint64_t off, uint64_t size) {
+    if (!wb_mine) {
+        WbLocal *w = calloc(1, sizeof *w);
+        if (!w) rt_fatal("vk: out of memory");
+        plat_mutex_lock(&mirror_lock);
+        w->next = wb_locals;
+        __atomic_store_n(&wb_locals, w, __ATOMIC_RELEASE);
+        plat_mutex_unlock(&mirror_lock);
+        wb_mine = w;
+    }
+    range_add(&wb_mine->a, &wb_mine->n, &wb_mine->cap, r, off, size);
+}
+
+static void wb_locals_take(void) {   // replay thread, no slice being recorded
+    plat_mutex_lock(&mirror_lock);
+    for (WbLocal *w = wb_locals; w; w = w->next) {
+        for (int i = 0; i < w->n; i++) range_add(&wbl, &nwbl, &cwbl, w->a[i].r, w->a[i].off, w->a[i].size);
+        w->n = 0;
+    }
+    plat_mutex_unlock(&mirror_lock);
+}
+
 static void range_add(MRange **a, int *n, int *cap, PoolRec *r, uint64_t off, uint64_t size) {
     if (*n && (*a)[*n - 1].r == r && (*a)[*n - 1].off + (*a)[*n - 1].size == off) {
         (*a)[*n - 1].size += size;
@@ -1791,9 +1823,12 @@ void vk_mem_gpu_wrote(const VkMemSpan *sp, uint64_t size) {
     __typeof__(seen[0]) *k = &seen[((uintptr_t)r >> 6 ^ sp->offset >> 4) & 127];
     uint32_t sub = __atomic_load_n(&msub, __ATOMIC_RELAXED);
     if (k->r == r && k->sub == sub && k->off == sp->offset && k->size >= size) return;
-    int locked = mirror_lock_if_shared();
-    range_add(&wbl, &nwbl, &cwbl, r, sp->offset, size);
-    mirror_unlock(locked);
+    if (count_quiet) wb_local_add(r, sp->offset, size);
+    else {
+        int locked = mirror_lock_if_shared();
+        range_add(&wbl, &nwbl, &cwbl, r, sp->offset, size);
+        mirror_unlock(locked);
+    }
     *k = (__typeof__(*k)){r, sp->offset, size, sub};
 }
 
@@ -1981,6 +2016,7 @@ static int verify_record(VkCommandBuffer cb, uint64_t fence) {
 int vk_mem_mirror_end(VkCommandBuffer cb, uint64_t fence) {
     if (!vk_mirror_on) return 0;
     int rec = 0;
+    if (__atomic_load_n(&wb_locals, __ATOMIC_ACQUIRE)) wb_locals_take();
     if (nwbl) {
         mbarrier(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
                  VK_ACCESS_2_TRANSFER_READ_BIT);
@@ -2492,6 +2528,7 @@ void vk_mem_shutdown(void) {
     for (int i = 0; i < pool_index.n; i++) destroy_rec(c, pool_index.e[i].buf);
     pool_index.n = 0;
     nm = npend = nwbl = 0;   // mirrors went with their pools
+    for (WbLocal *w = wb_locals; w; w = w->next) w->n = 0;
     plat_mutex_lock(&shadow_lock);
     nstouch = nspend = nsblocked = spend_dirty = 0;   // shadows too
     s_live_n = s_live_bytes = 0;
