@@ -189,24 +189,70 @@ static void sort_col(void) {
 
 // Keeps the GPU writes of submissions that are not done, merged into disjoint ranges sorted by lo (the terrain rewrites
 // one block before every draw: hundreds of equal entries), each with the newest fence among its parts.
+// The ranges the last prune left are sorted already: only those added since (about 7,400 a submission on six threads in
+// the hills of Bananza 3.2.0) are sorted, by an LSD radix sort on (lo - lowest) / 16 like sort_col, and merged with
+// them. Sorting the whole list again took about 0.38 ms a submission.
+static int nwr_sorted;   // U.wr[0, nwr_sorted) is the last prune's: sorted by lo and disjoint
+
+static void sort_new_writes(Wrote *a, int n, Wrote **tmp, size_t *cap) {
+    if (n < 2) return;
+    uint64_t lo = UINT64_MAX, hi = 0;
+    for (int i = 0; i < n; i++) {
+        if (a[i].lo < lo) lo = a[i].lo;
+        if (a[i].lo > hi) hi = a[i].lo;
+    }
+    if (*cap < (size_t)n) {
+        Wrote *t = realloc(*tmp, (size_t)n * sizeof *t);
+        if (!t) rt_fatal("vk_usnap: out of memory");
+        *tmp = t, *cap = (size_t)n;
+    }
+    if ((hi - lo) / 16 >> (3 * RADIX_BITS)) {   // a span over 128 GiB: the merge sort
+        sort_wrote(a, (size_t)n, tmp, cap);
+        return;
+    }
+    Wrote *src = a, *dst = *tmp;
+    for (int pass = 0; pass < 3; pass++) {
+        int shift = pass * RADIX_BITS, count[1 << RADIX_BITS] = {0};
+        for (int i = 0; i < n; i++) count[(src[i].lo - lo) / 16 >> shift & ((1 << RADIX_BITS) - 1)]++;
+        for (int k = 0, sum = 0; k < 1 << RADIX_BITS; k++) {
+            int c = count[k];
+            count[k] = sum, sum += c;
+        }
+        for (int i = 0; i < n; i++) dst[count[(src[i].lo - lo) / 16 >> shift & ((1 << RADIX_BITS) - 1)]++] = src[i];
+        Wrote *t = src;
+        src = dst, dst = t;
+    }
+    if (src != a) memcpy(a, src, (size_t)n * sizeof *a);   // three passes end in tmp
+}
+
 static void wr_prune(void) {
     uint64_t done = vk_sync_fence_done();
-    int n = 0;
-    for (int i = 0; i < U.nwr; i++)
-        if (U.wr[i].fence > done) U.wr[n++] = U.wr[i];
-    static Wrote *sbuf;   // the replaying thread's (vk_usnap_begin)
-    static size_t scap;
-    sort_wrote(U.wr, (size_t)n, &sbuf, &scap);
+    int old = nwr_sorted < U.nwr ? nwr_sorted : U.nwr, nold = 0, nnew = 0;
+    static Wrote *fresh, *out, *tmp;   // the replaying thread's (vk_usnap_begin)
+    static size_t cfresh, cout, ctmp;
+    if (cfresh < (size_t)(U.nwr - old) || cout < (size_t)U.nwr) {
+        size_t c = (size_t)U.nwr + 1024;
+        Wrote *f = realloc(fresh, c * sizeof *f), *o = f ? realloc(out, c * sizeof *o) : NULL;
+        if (!f || !o) rt_fatal("vk_usnap: out of memory");
+        fresh = f, out = o, cfresh = cout = c;
+    }
+    for (int i = old; i < U.nwr; i++)
+        if (U.wr[i].fence > done) fresh[nnew++] = U.wr[i];
+    for (int i = 0; i < old; i++)
+        if (U.wr[i].fence > done) U.wr[nold++] = U.wr[i];   // stays sorted
+    sort_new_writes(fresh, nnew, &tmp, &ctmp);
     int m = 0;
-    for (int i = 0; i < n; i++) {
-        if (m && U.wr[i].lo <= U.wr[m - 1].hi) {
-            if (U.wr[i].hi > U.wr[m - 1].hi) U.wr[m - 1].hi = U.wr[i].hi;
-            if (U.wr[i].fence > U.wr[m - 1].fence) U.wr[m - 1].fence = U.wr[i].fence;
+    for (int a = 0, b = 0; a < nold || b < nnew;) {
+        const Wrote *w = b >= nnew || (a < nold && U.wr[a].lo <= fresh[b].lo) ? &U.wr[a++] : &fresh[b++];
+        if (m && w->lo <= out[m - 1].hi) {
+            if (w->hi > out[m - 1].hi) out[m - 1].hi = w->hi;
+            if (w->fence > out[m - 1].fence) out[m - 1].fence = w->fence;
         } else {
-            U.wr[m++] = U.wr[i];
+            out[m++] = *w;
         }
     }
-    U.nwr = m;
+    memcpy(U.wr, out, (size_t)m * sizeof *out);
+    U.nwr = nwr_sorted = m;
 }
 static int wr_hits(uint64_t lo, uint64_t hi) {   // wr_prune ran: disjoint, sorted
     int a = 0, b = U.nwr;

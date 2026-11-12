@@ -61,6 +61,7 @@ static uint64_t par_t_collect, par_t_own, par_t_wait, par_t_exec;   // ns on the
 static uint64_t par_wait_max, par_wait_long;   // the longest wait for the workers at a pass end, and waits over 200 us
 static uint64_t par_t0;
 static volatile int64_t par_rec[2][3];          // slices recorded by the submitting thread [0] and workers [1]: count, draws, ns
+static volatile int64_t par_slow[2], par_slow_ns, par_slow_draws;   // slices over 1 ms by each, the longest and its draws
                         // the collection's start
 static uint64_t par_unsliced[4];                // draws of unsliced passes: under 64, under 256, under 1024, more
 static uint64_t par_restarts;                   // passes a clear opened that were opened again for slices
@@ -2003,6 +2004,14 @@ static void par_rec_note(int worker, int i, uint64_t ns) {   // TOTK_TRACE=perf:
     int end = PC.end[i], draws = 0;
     for (int k = PC.start[i]; k < end; k++) draws += PC.ops[k]->op == OP_DRAW || PC.ops[k]->op == OP_DRAW_IDX;
     plat_add64(&par_rec[worker][0], 1), plat_add64(&par_rec[worker][1], draws), plat_add64(&par_rec[worker][2], (int64_t)ns);
+    // Slices that took over 1 ms, and the longest with its draws: a pass end waited up to 3 ms for a worker even with
+    // slices of at most 128 draws, so a slice can stall (a lock, a driver call, the thread descheduled).
+    if (ns > 1000000) {
+        plat_add64(&par_slow[worker], 1);
+        int64_t m = __atomic_load_n(&par_slow_ns, __ATOMIC_RELAXED);
+        while ((int64_t)ns > m && !__atomic_compare_exchange_n(&par_slow_ns, &m, (int64_t)ns, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
+        if ((int64_t)ns >= m) __atomic_store_n(&par_slow_draws, draws, __ATOMIC_RELAXED);
+    }
 }
 
 static void par_record(int i, ParPool *pp, VkExec *w, struct DrawCtx *dc) {
@@ -2142,10 +2151,13 @@ static void par_flush(VkExec *ex) {
             int64_t r[2][3];
             for (int k = 0; k < 2; k++)
                 for (int j = 0; j < 3; j++) r[k][j] = plat_xchg64(&par_rec[k][j], 0);
+            int64_t s0 = plat_xchg64(&par_slow[0], 0), s1 = plat_xchg64(&par_slow[1], 0);
+            int64_t sn = plat_xchg64(&par_slow_ns, 0), sd = plat_xchg64(&par_slow_draws, 0);
             rt_log("perf: slices recorded by the submitting thread %lld (%lld draws, %.2f us a draw), by the workers %lld "
-                   "(%lld draws, %.2f us a draw)", (long long)r[0][0], (long long)r[0][1],
+                   "(%lld draws, %.2f us a draw); over 1 ms: %lld by the submitting thread, %lld by the workers, the longest "
+                   "%.0f us for %lld draws", (long long)r[0][0], (long long)r[0][1],
                    r[0][1] ? r[0][2] / 1e3 / (double)r[0][1] : 0.0, (long long)r[1][0], (long long)r[1][1],
-                   r[1][1] ? r[1][2] / 1e3 / (double)r[1][1] : 0.0);
+                   r[1][1] ? r[1][2] / 1e3 / (double)r[1][1] : 0.0, (long long)s0, (long long)s1, sn / 1e3, (long long)sd);
         }
         par_t_collect = par_t_own = par_t_wait = par_t_exec = 0;
         par_wait_max = par_wait_long = 0;
