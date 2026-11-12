@@ -1040,6 +1040,60 @@ int vk_exec_read_buffer(VkExec *ex, uint64_t addr, uint64_t size, void *out) {
 
 static uint64_t draws_total;   // draws and dispatches walked since the start (vk_exec_draws_total)
 
+// DKB_DRAW_TOP=1: which programs the replay's draws use, to find what a busy area draws the most. Every 1,000,000 draws
+// the log lists the 16 programs with the most draws: their share, the NVN 2 origins of their vertex and fragment stages
+// (the names TOTK_DUMP and DKB_SKIP_VS / DKB_SKIP_FS use), and how many draws in a row use them on average (long runs of
+// one program are what batching or dynamic offsets could make cheaper). Counted on the replaying thread, sliced draws
+// included; off, one flag test per draw.
+#define TOP_N 4096
+static int top_on = -1;
+static struct { uint64_t serial, vs, fs, draws, runs; } top_tab[TOP_N];
+static uint64_t top_draws, top_last;
+static int top_used;
+
+static int top_cmp(const void *a, const void *b) {
+    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;   // the draws field, first after the 3 keys
+    return x < y ? 1 : x > y ? -1 : 0;
+}
+
+static void top_log(void) {
+    static struct { uint64_t draws, serial, vs, fs, runs; } s[TOP_N];
+    int n = 0;
+    for (int i = 0; i < TOP_N; i++)
+        if (top_tab[i].draws) s[n++] = (typeof(s[0])){top_tab[i].draws, top_tab[i].serial, top_tab[i].vs, top_tab[i].fs, top_tab[i].runs};
+    qsort(s, (size_t)n, sizeof s[0], top_cmp);   // once per 1,000,000 draws
+    rt_log("draw top: %llu draws, %d programs; the most used:", (unsigned long long)top_draws, n);
+    uint64_t sum = 0;
+    for (int i = 0; i < n && i < 16; i++) {
+        sum += s[i].draws;
+        rt_log("draw top:   %5.1f%% (%5.1f%% so far)  vs %016llx fs %016llx  %.1f draws a run", 100.0 * s[i].draws / top_draws,
+               100.0 * sum / top_draws, (unsigned long long)s[i].vs, (unsigned long long)s[i].fs,
+               s[i].runs ? (double)s[i].draws / s[i].runs : 0.0);
+    }
+    memset(top_tab, 0, sizeof top_tab);
+    top_draws = 0, top_used = 0, top_last = 0;
+}
+
+static void top_note(const VkExec *ex) {
+    if (top_on < 0) {
+        const char *e = cfg_get("TOTK_DRAW_TOP");
+        top_on = e && *e && strcmp(e, "0") != 0;
+        if (top_on) rt_log("draw top: counting the draws by program (DKB_DRAW_TOP)");
+    }
+    if (!top_on || !ex->prog) return;
+    uint64_t serial = ex->prog->serial ? ex->prog->serial : (uint64_t)(uintptr_t)ex->prog;
+    uint32_t i = (uint32_t)(serial * 0x9E3779B97F4A7C15ull >> 52) % TOP_N;
+    for (int k = 0; k < 8 && top_tab[i].draws && top_tab[i].serial != serial; k++) i = (i + 1) % TOP_N;
+    if (top_tab[i].serial != serial) {
+        if (top_tab[i].draws) return;   // the probe is full: a rare program goes uncounted
+        top_tab[i].serial = serial, top_used++;
+        top_tab[i].vs = vk_exec_stage_origin(ex->prog, 0), top_tab[i].fs = vk_exec_stage_origin(ex->prog, 1);
+    }
+    top_tab[i].draws++;
+    if (serial != top_last) top_tab[i].runs++, top_last = serial;
+    if (++top_draws >= 1000000) top_log();
+}
+
 uint64_t vk_exec_draws_total(void) { return draws_total; }
 
 // The fixed-function and pool state ops: they only change VkExec (the draws record what they set).
@@ -1275,6 +1329,7 @@ static int par_take(VkExec *ex, const op_hdr *h, const void *a) {
         }
         PC.slice_draws++, PC.draws++;
         vk_exec_frame.draws_seen++;
+        top_note(ex);
         break;
     default:
         return 0;
@@ -1557,7 +1612,7 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
         case OP_BARRIER: vk_exec_barrier(ex); break;
         case OP_WAIT_SYNC: break;   // submit preparation waited before any replay/snapshot; source may be gone
         case OP_DRAW: case OP_DRAW_IDX: case OP_DISPATCH: case OP_UPDATE_UB: case OP_DRAW_IDX_IND: case OP_DISPATCH_IND:
-            if (h->op == OP_DRAW || h->op == OP_DRAW_IDX || h->op == OP_DRAW_IDX_IND) vk_exec_frame.draws_seen++, split_draws++;
+            if (h->op == OP_DRAW || h->op == OP_DRAW_IDX || h->op == OP_DRAW_IDX_IND) vk_exec_frame.draws_seen++, split_draws++, top_note(ex);
             if (h->op == OP_DISPATCH || h->op == OP_DISPATCH_IND) vk_exec_frame.dispatches++, split_draws++;
             draws_total += h->op != OP_UPDATE_UB;
 

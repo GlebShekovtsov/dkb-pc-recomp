@@ -147,6 +147,8 @@ void vk_exec_draw_slice_begin(void);
 // nothing), and the worker's switch to it (on the worker).
 void *vk_exec_draw_ctx_new(void);
 void vk_exec_draw_ctx_use(void *ctx);
+// vk_exec_draw.c: the NVN 2 origin (dump name) of a program's stage (0 vertex, 1 fragment), or 0.
+uint64_t vk_exec_stage_origin(const prog_t *p, int nvn_stage);
 void vk_exec_draw_spare_threads(int threads);   // spare descriptor pools for this many recording threads
 int vk_exec_par_slice(void);
 void vk_exec_par_hazard(void);

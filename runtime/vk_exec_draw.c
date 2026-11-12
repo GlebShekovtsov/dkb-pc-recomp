@@ -868,6 +868,8 @@ static uint64_t stage_origin(const prog_t *p, int nvn_stage) {
     return p && find_stage_origin(p, nvn_stage, &ctl, &code, &len, &o) ? o : 0;
 }
 
+uint64_t vk_exec_stage_origin(const prog_t *p, int nvn_stage) { return stage_origin(p, nvn_stage); }
+
 // Texture and image types of a stage's first 32 slots, each kept with the handle and the generation and slot token it
 // was looked up under: a slot is looked up again, a hash probe, only when the handle changed or its slot may resolve
 // otherwise (slot_still).
