@@ -69,6 +69,7 @@ void plat_mutex_unlock(PlatMutex *m) { if (!m->p) rt_fatal("unlock without lock\
 int plat_mutex_trylock(PlatMutex *m) { if (m->p) return 0; m->p = (void *)1; return 1; }
 uint64_t kern_now_ns(void) { return 0; }
 void perf_lock_wait(int lock, uint64_t ns) { (void)lock; (void)ns; }
+const char *cfg_get(const char *key) { (void)key; return NULL; }   // TOTK_LOCK_HOLDS: off
 void plat_cond_broadcast(PlatCond *c) { (void)c; }
 void plat_cond_wait(PlatCond *c, PlatMutex *m) { (void)c; (void)m; rt_fatal("unexpected fixture wait\n"); }
 // The replay side the marking reports to.
@@ -177,8 +178,11 @@ def source(root):
     parts += [statement(common, 'static PlatMutex once_lock'), statement(common, 'static PlatCond once_done'), STUBS]
     parts += [typedef(memory, 'MRange'), statement(memory, 'static MRange *pend'), statement(memory, 'static int npend')]
     parts += [function(common, name) for name in ('plat_rmutex_lock', 'plat_rmutex_trylock', 'plat_rmutex_unlock', 'plat_once')]
+    parts += ['#define HOLD_SITES 16\n#define lock() lock_at(0)', typedef(tex, 'HoldSite')] + [statement(tex, name) for name in (
+        'static int holds_on', 'static _Thread_local uint64_t hold_t0', 'static _Thread_local void *hold_ra',
+        'static PlatMutex holds_lock', 'static HoldSite holds')]
     parts += [function(tex, name) for name in (
-        'tex_init', 'lock', 'unlock', 'agen_idx', 'tex_gen_bump', 'make_key', 'owned_lower', 'own_add', 'rel_append',
+        'tex_init', 'hold_note', 'lock_at', 'unlock', 'agen_idx', 'tex_gen_bump', 'make_key', 'owned_lower', 'own_add', 'rel_append',
         'sweep_released', 'fills_no_page', 'wb_cfg_init', 'vk_texture_gpu_written_ready')]
     parts += [statement(tex, 'static void gpu_written_entry(Tex *e);')]
     parts += [function(tex, name) for name in ('vk_texture_gpu_written_late', 'gpu_written_entry', 'vk_texture_release')]
