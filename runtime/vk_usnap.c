@@ -57,6 +57,7 @@ static struct {
     // since the last summary
     uint64_t subs, regions, bytes, copy_ns, hits, drops, inflight, refused, off_subs;
     uint64_t cols, t_collect, t_sort, t_merge, t_copy;   // ranges collected, and the time of each step (summary)
+    uint64_t wr_added;   // GPU write ranges added to wr (vk_usnap_drop), for the summary
 } U;
 
 // The helper threads (vk_spec.h) look regions up in vk_usnap_find while the replay thread drops some of them
@@ -222,13 +223,13 @@ static void summary(void) {
     double s = U.subs ? (double)U.subs : 1.0;
     rt_log("vk_usnap: %llu submissions with a snapshot, %llu without; per submission %.0f ranges, %.1f KiB copied in "
            "%.3f ms, %.0f uniform bindings from the copy, %.1f dropped by GPU writes, %.1f left out (GPU writes in "
-           "flight), %.1f refused (not an imported pool); %.0f bindings collected; ms: collect %.3f, sort and prune %.3f, "
+           "flight), %.1f refused (not an imported pool); %.0f bindings collected, %.0f GPU write ranges added; ms: collect %.3f, sort and prune %.3f, "
            "merge %.3f, copy %.3f",
            (unsigned long long)U.subs, (unsigned long long)U.off_subs, U.regions / s, U.bytes / s / 1024.0,
-           U.copy_ns / s / 1e6, U.hits / s, U.drops / s, U.inflight / s, U.refused / s, U.cols / s, U.t_collect / s / 1e6,
+           U.copy_ns / s / 1e6, U.hits / s, U.drops / s, U.inflight / s, U.refused / s, U.cols / s, U.wr_added / s, U.t_collect / s / 1e6,
            U.t_sort / s / 1e6, U.t_merge / s / 1e6, U.t_copy / s / 1e6);
     U.subs = U.off_subs = U.regions = U.bytes = U.copy_ns = U.hits = U.drops = U.inflight = U.refused = 0;
-    U.cols = U.t_collect = U.t_sort = U.t_merge = U.t_copy = 0;
+    U.cols = U.t_collect = U.t_sort = U.t_merge = U.t_copy = U.wr_added = 0;
 }
 
 void vk_usnap_begin(const uint64_t *handles, int n, uint64_t fence) {
@@ -334,9 +335,21 @@ int vk_usnap_covers(uint64_t addr, uint64_t n) {
     return i < U.nreg && U.reg[i].lo < addr + n;
 }
 
+// The ranges a thread dropped in this submission: a draw that stores into a buffer drops its range at every bind,
+// and the terrain stores into the same block before each of its draws. A range dropped again in the same submission
+// changes nothing (its regions are marked already, and U.wr has it with this fence), so it skips the lock and the
+// list. With an entry for every bind, the sort and prune before each snapshot took about 0.38 ms a submission on six
+// threads in the hills of Bananza 3.2.0, four times the copy.
+static _Thread_local struct { uint64_t addr, n, fence; } dropped_memo[64];
+
 void vk_usnap_drop(uint64_t addr, uint64_t n) {
     if (!U.mode || !n) return;
+    uint64_t fence = __atomic_load_n(&U.fence, __ATOMIC_RELAXED);
+    typeof(dropped_memo[0]) *k = &dropped_memo[(addr >> 4 ^ addr >> 12 ^ n) & 63];
+    if (k->addr == addr && k->n == n && k->fence == fence) return;
+    *k = (typeof(*k)){addr, n, fence};
     plat_mutex_lock(&drop_lock);
+    U.wr_added++;
     if (U.nwr == U.cwr) U.wr = grow(U.wr, &U.cwr, sizeof *U.wr);
     U.wr[U.nwr++] = (Wrote){addr, addr + n, U.fence};
     if (U.on)

@@ -1925,26 +1925,31 @@ static void par_op(VkExec *ex, uint32_t op, const void *a) {   // replay of one 
 // shrink towards the end and the last one, which the submitting thread records after the collection while the workers
 // finish theirs, is short. With slices of a third of the pass per thread, the submitting thread recorded the last slice
 // of each of the busy area's 13 sliced passes a frame, 4.6 ms a frame, and waited 1.4 ms more for the workers.
-// TOTK_SLICE_MIN (default PAR_SLICE_MIN) and TOTK_SLICE_DIV (default 1: a share of 1/N of what is left, N recording
-// threads) tune the sizes, read once: the slices the workers still record when the submitting thread has taken the last
-// one set how long it waits at the pass end (1.2-1.8 ms a frame on six threads in the hills of Bananza 3.2.0).
-static int par_slice_min = -1, par_slice_div;
+// TOTK_SLICE_MIN (default PAR_SLICE_MIN), TOTK_SLICE_MAX (default PAR_SLICE_DRAWS) and TOTK_SLICE_DIV (default 1: a
+// share of 1/N of what is left, N recording threads) tune the sizes, read once: the slices the workers still record
+// when the submitting thread has taken the last one set how long it waits at the pass end (1.2-1.8 ms a frame on six
+// threads in the hills of Bananza 3.2.0). Most of that wait came in about two waits a frame of 0.5 to 3 ms, as long as
+// a slice of up to 1024 draws: a pass shorter than its expected count leaves its first, biggest slices for the end.
+static int par_slice_min = -1, par_slice_div, par_slice_max;
 static int par_size(void) {
     if (par_mode <= 1) return PAR_SLICE_DRAWS;
     if (par_slice_min < 0) {
-        const char *m = cfg_get("TOTK_SLICE_MIN"), *d = cfg_get("TOTK_SLICE_DIV");
+        const char *m = cfg_get("TOTK_SLICE_MIN"), *d = cfg_get("TOTK_SLICE_DIV"), *x = cfg_get("TOTK_SLICE_MAX");
         par_slice_min = m && *m ? atoi(m) : PAR_SLICE_MIN;
+        par_slice_max = x && *x ? atoi(x) : PAR_SLICE_DRAWS;
+        if (par_slice_max < 16) par_slice_max = 16;
+        if (par_slice_max > PAR_SLICE_DRAWS) par_slice_max = PAR_SLICE_DRAWS;
         par_slice_div = d && *d ? atoi(d) : 1;
         if (par_slice_min < 8) par_slice_min = 8;
-        if (par_slice_min > PAR_SLICE_DRAWS) par_slice_min = PAR_SLICE_DRAWS;
+        if (par_slice_min > par_slice_max) par_slice_min = par_slice_max;
         if (par_slice_div < 1) par_slice_div = 1;
         if (par_slice_div > 8) par_slice_div = 8;
-        if (par_slice_min != PAR_SLICE_MIN || par_slice_div != 1)
-            rt_log("vk: slices of at least %d draws, a 1/%d share of what is left per thread (TOTK_SLICE_MIN, TOTK_SLICE_DIV)",
-                   par_slice_min, par_slice_div);
+        if (par_slice_min != PAR_SLICE_MIN || par_slice_div != 1 || par_slice_max != PAR_SLICE_DRAWS)
+            rt_log("vk: slices of %d to %d draws, a 1/%d share of what is left per thread (TOTK_SLICE_MIN, TOTK_SLICE_MAX, "
+                   "TOTK_SLICE_DIV)", par_slice_min, par_slice_max, par_slice_div);
     }
     int size = (PC.expect - PC.draws) / (par_mode * par_slice_div);
-    return size < par_slice_min ? par_slice_min : size > PAR_SLICE_DRAWS ? PAR_SLICE_DRAWS : size;
+    return size < par_slice_min ? par_slice_min : size > par_slice_max ? par_slice_max : size;
 }
 
 static int par_take(VkExec *ex, const op_hdr *h, const void *a) {
