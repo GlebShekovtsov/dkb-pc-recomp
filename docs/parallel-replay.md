@@ -381,3 +381,28 @@ each): eight threads 41.9 fps median (41.2-43.8 quartiles) against 40.9 (40.2-41
 worker 1.85 us against 2.03, replay 14.8 ms against 15.4. Six threads did better than eight on this 8-core, 16-thread
 CPU: 44.9 fps, 1.43 us a sliced draw; with `TOTK_DYN_UBO=1`, six threads gave 46.0 fps, five 44.7 and eight 44.4.
 `TOTK_ONE_PER_CORE=1` gave 26 fps: it leaves the process eight logical processors for the game and the slices.
+
+### Stalls in slices: the texture lock across a guest read's GPU wait
+
+With six threads in the hills (RX 9070 XT), the pass ends waited for the workers about 1.2 ms a frame, mostly in about
+two waits a frame of 0.5 to 3 ms, and about 500 slices a minute took over 1 ms, the longest about 3 ms for a few hundred
+draws. Smaller slices (a cap of 128 to 256 draws, a smaller minimum, a smaller share per thread) and more spare
+descriptor pools (none was created in the frame once the perf line counted the slice threads' pools) changed nothing.
+
+Timing the contended acquires of the shared locks (`perf_lock_wait`, always on with `TOTK_TRACE=perf`) put the waits on
+the texture lock: about 117 waits over 100 us every 60 frames, about 200 ms of thread time, up to 4.4 ms. Timing the
+holds by caller (`TOTK_LOCK_HOLDS=1`) found one holder: `vk_be_guest_read` through `vk_texture_write_back`, about 1.4
+times a frame for 1.2 ms on average and up to 4.5 ms, against a few hundred long holds in all for every other caller. A
+game thread's read of GPU-written texture storage read each texture back with `vk_upload_flush(1)`, waiting under the
+lock for every GPU job queued so far. `write_back_unlocked` queues the copies under the lock, waits for the GPU without
+it and writes the storage under it again (`TOTK_WB_UNLOCKED=0` restores the old path). With it the texture lock waits
+fell from 130 to 19 per 60 frames, the longest wait at a pass end from 3.3 ms to 0.4 ms and the longest slice from 4.3
+to 1.8 ms; the frame rate stayed the same (43.9 fps both, same session), since the stalled workers mostly overlapped
+the submitting thread's own collection and slices.
+
+The uniform snapshot spent 0.38 ms a submission sorting the GPU write ranges of the submissions in flight (about 7,400
+new ones a submission); `wr_prune` now sorts only those added since the last prune and merges them in (0.24 ms,
+`tests/usnap_prune_test.py`). The vk_usnap summary times its steps.
+
+The GPU time of the same spot moved between sessions (11.0 to 13.1 ms with the same build), so builds are compared in
+one session only.

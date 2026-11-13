@@ -480,6 +480,12 @@ area = "tools"
 cmd = ["{python}", "tests/msort_test.py", "--cc", "{cc}", "--out", "{out}"]
 
 [[test]]
+name = "usnap-prune"
+tier = 1
+area = "gfx"
+cmd = ["{python}", "tests/usnap_prune_test.py", "--cc", "{cc}", "--out", "{out}"]
+
+[[test]]
 name = "nan-guard-spirv"
 tier = 1
 area = "shaders"

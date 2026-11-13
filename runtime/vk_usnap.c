@@ -56,6 +56,8 @@ static struct {
     int nwr, cwr;
     // since the last summary
     uint64_t subs, regions, bytes, copy_ns, hits, drops, inflight, refused, off_subs;
+    uint64_t cols, t_collect, t_sort, t_merge, t_copy;   // ranges collected, and the time of each step (summary)
+    uint64_t wr_added;   // GPU write ranges added to wr (vk_usnap_drop), for the summary
 } U;
 
 // The helper threads (vk_spec.h) look regions up in vk_usnap_find while the replay thread drops some of them
@@ -187,24 +189,70 @@ static void sort_col(void) {
 
 // Keeps the GPU writes of submissions that are not done, merged into disjoint ranges sorted by lo (the terrain rewrites
 // one block before every draw: hundreds of equal entries), each with the newest fence among its parts.
+// The ranges the last prune left are sorted already: only those added since (about 7,400 a submission on six threads in
+// the hills of Bananza 3.2.0) are sorted, by an LSD radix sort on (lo - lowest) / 16 like sort_col, and merged with
+// them. Sorting the whole list again took about 0.38 ms a submission.
+static int nwr_sorted;   // U.wr[0, nwr_sorted) is the last prune's: sorted by lo and disjoint
+
+static void sort_new_writes(Wrote *a, int n, Wrote **tmp, size_t *cap) {
+    if (n < 2) return;
+    uint64_t lo = UINT64_MAX, hi = 0;
+    for (int i = 0; i < n; i++) {
+        if (a[i].lo < lo) lo = a[i].lo;
+        if (a[i].lo > hi) hi = a[i].lo;
+    }
+    if (*cap < (size_t)n) {
+        Wrote *t = realloc(*tmp, (size_t)n * sizeof *t);
+        if (!t) rt_fatal("vk_usnap: out of memory");
+        *tmp = t, *cap = (size_t)n;
+    }
+    if ((hi - lo) / 16 >> (3 * RADIX_BITS)) {   // a span over 128 GiB: the merge sort
+        sort_wrote(a, (size_t)n, tmp, cap);
+        return;
+    }
+    Wrote *src = a, *dst = *tmp;
+    for (int pass = 0; pass < 3; pass++) {
+        int shift = pass * RADIX_BITS, count[1 << RADIX_BITS] = {0};
+        for (int i = 0; i < n; i++) count[(src[i].lo - lo) / 16 >> shift & ((1 << RADIX_BITS) - 1)]++;
+        for (int k = 0, sum = 0; k < 1 << RADIX_BITS; k++) {
+            int c = count[k];
+            count[k] = sum, sum += c;
+        }
+        for (int i = 0; i < n; i++) dst[count[(src[i].lo - lo) / 16 >> shift & ((1 << RADIX_BITS) - 1)]++] = src[i];
+        Wrote *t = src;
+        src = dst, dst = t;
+    }
+    if (src != a) memcpy(a, src, (size_t)n * sizeof *a);   // three passes end in tmp
+}
+
 static void wr_prune(void) {
     uint64_t done = vk_sync_fence_done();
-    int n = 0;
-    for (int i = 0; i < U.nwr; i++)
-        if (U.wr[i].fence > done) U.wr[n++] = U.wr[i];
-    static Wrote *sbuf;   // the replaying thread's (vk_usnap_begin)
-    static size_t scap;
-    sort_wrote(U.wr, (size_t)n, &sbuf, &scap);
+    int old = nwr_sorted < U.nwr ? nwr_sorted : U.nwr, nold = 0, nnew = 0;
+    static Wrote *fresh, *out, *tmp;   // the replaying thread's (vk_usnap_begin)
+    static size_t cfresh, cout, ctmp;
+    if (cfresh < (size_t)(U.nwr - old) || cout < (size_t)U.nwr) {
+        size_t c = (size_t)U.nwr + 1024;
+        Wrote *f = realloc(fresh, c * sizeof *f), *o = f ? realloc(out, c * sizeof *o) : NULL;
+        if (!f || !o) rt_fatal("vk_usnap: out of memory");
+        fresh = f, out = o, cfresh = cout = c;
+    }
+    for (int i = old; i < U.nwr; i++)
+        if (U.wr[i].fence > done) fresh[nnew++] = U.wr[i];
+    for (int i = 0; i < old; i++)
+        if (U.wr[i].fence > done) U.wr[nold++] = U.wr[i];   // stays sorted
+    sort_new_writes(fresh, nnew, &tmp, &ctmp);
     int m = 0;
-    for (int i = 0; i < n; i++) {
-        if (m && U.wr[i].lo <= U.wr[m - 1].hi) {
-            if (U.wr[i].hi > U.wr[m - 1].hi) U.wr[m - 1].hi = U.wr[i].hi;
-            if (U.wr[i].fence > U.wr[m - 1].fence) U.wr[m - 1].fence = U.wr[i].fence;
+    for (int a = 0, b = 0; a < nold || b < nnew;) {
+        const Wrote *w = b >= nnew || (a < nold && U.wr[a].lo <= fresh[b].lo) ? &U.wr[a++] : &fresh[b++];
+        if (m && w->lo <= out[m - 1].hi) {
+            if (w->hi > out[m - 1].hi) out[m - 1].hi = w->hi;
+            if (w->fence > out[m - 1].fence) out[m - 1].fence = w->fence;
         } else {
-            U.wr[m++] = U.wr[i];
+            out[m++] = *w;
         }
     }
-    U.nwr = m;
+    memcpy(U.wr, out, (size_t)m * sizeof *out);
+    U.nwr = nwr_sorted = m;
 }
 static int wr_hits(uint64_t lo, uint64_t hi) {   // wr_prune ran: disjoint, sorted
     int a = 0, b = U.nwr;
@@ -221,10 +269,13 @@ static void summary(void) {
     double s = U.subs ? (double)U.subs : 1.0;
     rt_log("vk_usnap: %llu submissions with a snapshot, %llu without; per submission %.0f ranges, %.1f KiB copied in "
            "%.3f ms, %.0f uniform bindings from the copy, %.1f dropped by GPU writes, %.1f left out (GPU writes in "
-           "flight), %.1f refused (not an imported pool)",
+           "flight), %.1f refused (not an imported pool); %.0f bindings collected, %.0f GPU write ranges added; ms: collect %.3f, sort and prune %.3f, "
+           "merge %.3f, copy %.3f",
            (unsigned long long)U.subs, (unsigned long long)U.off_subs, U.regions / s, U.bytes / s / 1024.0,
-           U.copy_ns / s / 1e6, U.hits / s, U.drops / s, U.inflight / s, U.refused / s);
+           U.copy_ns / s / 1e6, U.hits / s, U.drops / s, U.inflight / s, U.refused / s, U.cols / s, U.wr_added / s, U.t_collect / s / 1e6,
+           U.t_sort / s / 1e6, U.t_merge / s / 1e6, U.t_copy / s / 1e6);
     U.subs = U.off_subs = U.regions = U.bytes = U.copy_ns = U.hits = U.drops = U.inflight = U.refused = 0;
+    U.cols = U.t_collect = U.t_sort = U.t_merge = U.t_copy = U.wr_added = 0;
 }
 
 void vk_usnap_begin(const uint64_t *handles, int n, uint64_t fence) {
@@ -239,8 +290,11 @@ void vk_usnap_begin(const uint64_t *handles, int n, uint64_t fence) {
     U.ncol = 0;
     for (int i = 0; i < n; i++)
         if (handles[i]) collect(nvn_op_first(handles[i]), 0);
+    uint64_t t1 = kern_now_ns();
     sort_col();
     wr_prune();
+    uint64_t t2 = kern_now_ns();
+    U.cols += (uint64_t)U.ncol, U.t_collect += t1 - t0, U.t_sort += t2 - t1;
     // merge, keeping only what lies wholly in one imported pool and no GPU write in flight touches
     U.nreg = 0;
     uint64_t total = 0;
@@ -262,13 +316,17 @@ void vk_usnap_begin(const uint64_t *handles, int n, uint64_t fence) {
         U.reg[U.nreg++] = (Reg){lo, hi, total, 0};
         total += (hi - lo + ALIGN - 1) & ~(uint64_t)(ALIGN - 1);
     }
+    uint64_t t3 = kern_now_ns();
+    U.t_merge += t3 - t2;
     if (!U.nreg) return;
     if (!(U.arena = arena_get(total))) return;
     for (int i = 0; i < U.nreg; i++)
         memcpy(U.arena->map + U.reg[i].off, (const void *)(uintptr_t)U.reg[i].lo, U.reg[i].hi - U.reg[i].lo);
     vmaFlushAllocation(vk_ctx()->vma, U.arena->alloc, 0, total);   // a no-op on coherent memory
     U.on = 1;
-    U.subs++, U.regions += (uint64_t)U.nreg, U.bytes += total, U.copy_ns += kern_now_ns() - t0;
+    uint64_t t4 = kern_now_ns();
+    U.t_copy += t4 - t3;
+    U.subs++, U.regions += (uint64_t)U.nreg, U.bytes += total, U.copy_ns += t4 - t0;
 }
 
 void vk_usnap_end(uint64_t fence) {
@@ -326,6 +384,7 @@ int vk_usnap_covers(uint64_t addr, uint64_t n) {
 void vk_usnap_drop(uint64_t addr, uint64_t n) {
     if (!U.mode || !n) return;
     plat_mutex_lock(&drop_lock);
+    U.wr_added++;
     if (U.nwr == U.cwr) U.wr = grow(U.wr, &U.cwr, sizeof *U.wr);
     U.wr[U.nwr++] = (Wrote){addr, addr + n, U.fence};
     if (U.on)
