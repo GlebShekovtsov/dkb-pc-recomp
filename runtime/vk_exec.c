@@ -2299,15 +2299,16 @@ static void par_flush(VkExec *ex) {
 }
 
 // TOTK_SLICE_DEFER (0: off), read once.
+// TOTK_SLICE_DEFER: 1 defers every sliced pass, ab only in the B blocks of TOTK_AB (decided as each pass opens, so a
+// pass deferred before a switch still settles), 0 or unset never.
 static int par_defer_on(void) {
     static int mode = -1;
     if (mode < 0) {
-        const char *e = cfg_get("TOTK_SLICE_DEFER");
-        mode = e && *e && atoi(e) > 0;
-        if (mode) rt_log("vk: sliced passes are deferred: the walk goes on while the workers record their slices "
-                         "(TOTK_SLICE_DEFER=1)");
+        mode = rt_knob("SLICE_DEFER", "0");
+        if (mode) rt_log("vk: sliced passes are deferred%s: the walk goes on while the workers record their slices "
+                         "(TOTK_SLICE_DEFER)", mode == 2 ? " in the B blocks" : "");
     }
-    return mode;
+    return RT_KNOB_ON(mode);
 }
 
 static int par_pending(void) { return PD.on; }
