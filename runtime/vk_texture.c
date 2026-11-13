@@ -155,11 +155,61 @@ static void tex_init(void *p) {
     __atomic_store_n(&tex_ready, 1, __ATOMIC_RELEASE);
     return;
 }
-static void lock(void) {
-    if (!__atomic_load_n(&tex_ready, __ATOMIC_ACQUIRE)) plat_once(&tex_once, tex_init, NULL);
-    plat_rmutex_lock(&tex_lock);
+// TOTK_LOCK_HOLDS=1 (diagnostic, off by default) times every outermost hold of tex_lock and keeps, by the return
+// address of the function that took it (the caller's call site, as an exe offset for totk.map), the holds over 200 us:
+// with TOTK_TRACE=perf the slices of parallel passes waited about 3 ms a frame for this lock, up to 3 ms at a time.
+#define HOLD_SITES 16
+static int holds_on = -1;
+static _Thread_local uint64_t hold_t0;
+static _Thread_local void *hold_ra;
+static PlatMutex holds_lock = PLAT_MUTEX_INIT;
+typedef struct { void *ra; uint64_t n, ns, max; } HoldSite;
+static HoldSite holds[HOLD_SITES];
+
+static void hold_note(void *ra, uint64_t ns) {
+    plat_mutex_lock(&holds_lock);
+    int k = 0;
+    while (k < HOLD_SITES && holds[k].ra && holds[k].ra != ra) k++;
+    if (k == HOLD_SITES) k = HOLD_SITES - 1;   // full: the last slot takes the rest
+    if (!holds[k].ra) holds[k].ra = ra;
+    holds[k].n++, holds[k].ns += ns;
+    if (ns > holds[k].max) holds[k].max = ns;
+    plat_mutex_unlock(&holds_lock);
 }
-static void unlock(void) { plat_rmutex_unlock(&tex_lock); }
+
+static void holds_log(uint64_t frame) {
+    if (holds_on <= 0) return;
+    char line[1200];
+    size_t o = 0;
+    line[0] = 0;
+    plat_mutex_lock(&holds_lock);
+    for (int k = 0; k < HOLD_SITES && holds[k].ra && o < sizeof line - 80; k++)
+        o += (size_t)snprintf(line + o, sizeof line - o, " exe+%#llx %llu (%.1f ms, longest %.0f us);",
+                              (unsigned long long)((uintptr_t)holds[k].ra - plat_exe_base()), (unsigned long long)holds[k].n,
+                              holds[k].ns / 1e6, holds[k].max / 1e3);
+    memset(holds, 0, sizeof holds);
+    plat_mutex_unlock(&holds_lock);
+    rt_log("perf: frame %llu: texture lock held over 200 us, by caller:%s", (unsigned long long)frame, o ? line : " none");
+}
+
+static void lock_at(void *ra) {
+    if (!__atomic_load_n(&tex_ready, __ATOMIC_ACQUIRE)) plat_once(&tex_once, tex_init, NULL);
+    if (!plat_rmutex_trylock(&tex_lock)) {
+        uint64_t t0 = kern_now_ns();   // contended: TOTK_TRACE=perf counts the long waits (perf_lock_wait)
+        plat_rmutex_lock(&tex_lock);
+        if (rt_trace & RT_TRACE_PERF) perf_lock_wait(PERF_LOCK_TEXTURE, kern_now_ns() - t0);
+    }
+    if (holds_on < 0) holds_on = cfg_get("TOTK_LOCK_HOLDS") && atoi(cfg_get("TOTK_LOCK_HOLDS")) > 0;
+    if (holds_on && tex_lock.depth == 1) hold_t0 = kern_now_ns(), hold_ra = ra;
+}
+#define lock() lock_at(__builtin_return_address(0))
+static void unlock(void) {
+    if (holds_on > 0 && tex_lock.depth == 1) {
+        uint64_t ns = kern_now_ns() - hold_t0;
+        if (ns > 200000) hold_note(hold_ra, ns);
+    }
+    plat_rmutex_unlock(&tex_lock);
+}
 
 static uint32_t umax(uint32_t a, uint32_t b) { return a > b ? a : b; }
 static uint32_t mip(uint32_t v, unsigned lv) { return umax(v >> lv, 1); }
@@ -1342,6 +1392,7 @@ void vk_texture_new_submit(void) {
         ru_n = ru_bytes = ru_ns = ru_wt_n = ru_wt_bytes = ru_wt_ns = n_hash_kept = 0;
         uint64_t ck, calls, untr;
         vk_mem_snap_stats(&ck, &calls, &untr);
+        holds_log(f * 60);
         rt_log("perf: frame %llu: binding storage checks %llu (texture %llu), write-watch snapshot queries %llu, untracked %llu",
                (unsigned long long)f * 60, (unsigned long long)ck, (unsigned long long)n_checks, (unsigned long long)calls,
                (unsigned long long)untr);
@@ -1646,7 +1697,13 @@ uint64_t vk_texture_dirty_fence(uint64_t addr, uint64_t size) {
 // a stale map or stale resource bytes (wrong textures in the distance). Every hit is checked before any is written
 // back, since a write-back is itself a CPU write to storage another hit may share; the hits then go back oldest render
 // first, so where two descriptors share storage the newer render wins.
+static int wb_pending(const Tex *e);
+static int wb_queue(Tex *e);
+static uint64_t wb_pending_seq(const Tex *e);
+static int write_back_unlocked(uint64_t addr, uint64_t size);
+
 void vk_texture_write_back(uint64_t addr, uint64_t size) {
+    if (write_back_unlocked(addr, size)) return;
     lock();
     Tex **hit = malloc(sizeof *hit * (size_t)(nowned + 1));
     if (!hit) rt_fatal("vk: out of memory for a texture write-back");
@@ -1736,6 +1793,13 @@ static int wb_pending(const Tex *e) {   // a copy of e's newest render is alread
     return 0;
 }
 
+static uint64_t wb_pending_seq(const Tex *e) {   // the upload batch that holds that copy (0: not flushed yet)
+    uint64_t s = 0;
+    for (int i = 0; i < nwbp; i++)
+        if (wbp[i].e == e && wbp[i].gseq == e->gpu_seq && wbp[i].seq > s) s = wbp[i].seq;
+    return s;
+}
+
 // Queues the copies of e's levels and layers; 0 (nothing queued) when one of them cannot go asynchronously.
 static int wb_queue(Tex *e) {
     const nvn_texdesc *d = &e->t.d;
@@ -1759,6 +1823,58 @@ static int wb_queue(Tex *e) {
             }
             if (wb_record(e, &g, &r, &wbp[nwbp])) wbp[nwbp++].seq = 0;
         }
+    return 1;
+}
+
+// A guest read of GPU-written storage, done without holding tex_lock across the GPU wait (TOTK_WB_UNLOCKED, on by
+// default; 0 waits under the lock as before, ab switches with TOTK_AB's blocks). The synchronous write-back read each
+// texture back with vk_upload_flush(1), waiting under the lock for every GPU job queued so far: on six threads in the
+// hills of Bananza 3.2.0 a game thread held the lock that way about 1.4 times a frame, 1.2 ms on average and up to
+// 4.5 ms, while the slices of parallel passes waited for it (TOTK_LOCK_HOLDS). Here the copies are queued under the
+// lock as the asynchronous write-back does (wb_queue), the GPU is waited for without it, and vk_texture_wb_poll writes
+// the completed copies to the storage under it, before the read goes on. Textures wb_queue cannot copy (ASTC, packed
+// depth-stencil) are written back under the lock as before. 0: off, the caller writes back itself.
+static int write_back_unlocked(uint64_t addr, uint64_t size) {
+    static int mode = -1;
+    if (mode < 0) mode = rt_knob("WB_UNLOCKED", "1");
+    if (!RT_KNOB_ON(mode)) return 0;
+    lock();
+    Tex **hit = malloc(sizeof *hit * (size_t)(nowned + 1));
+    if (!hit) rt_fatal("vk: out of memory for a texture write-back");
+    int n = owned_dirty(addr, size, hit), k = 0, first = nwbp;
+    for (int i = 0; i < n; i++) {
+        uint32_t now;
+        if (storage_rewritten(hit[i], hit[i]->gpu_gen, &now) == 1) hit[i]->gpu_dirty = 0;
+        else hit[k++] = hit[i];
+    }
+    for (int i = 1; i < k; i++)
+        for (int j = i; j > 0 && hit[j - 1]->gpu_seq > hit[j]->gpu_seq; j--) {
+            Tex *x = hit[j];
+            hit[j] = hit[j - 1], hit[j - 1] = x;
+        }
+    uint64_t wait = 0;
+    for (int i = 0; i < k; i++) {
+        if (wb_pending(hit[i])) {   // queued by an earlier read: wait for its batch too
+            uint64_t s = wb_pending_seq(hit[i]);
+            if (s > wait) wait = s;
+            continue;
+        }
+        if (wb_queue(hit[i])) continue;
+        write_back(hit[i]);   // not copyable this way: under the lock, as before
+        perf_count(PERF_CNT_WB);
+    }
+    if (nwbp > first) {
+        uint64_t seq = vk_upload_flush(0);
+        for (int i = first; i < nwbp; i++) wbp[i].seq = seq;
+        if (seq > wait) wait = seq;
+    }
+    for (int i = k; i < n; i++) perf_count(PERF_CNT_WB_SKIP);
+    free(hit);
+    unlock();
+    if (wait) {
+        while (!vk_upload_done(wait)) vk_upload_flush(1);   // waits for the batches flushed so far, without tex_lock
+        vk_texture_wb_poll();
+    }
     return 1;
 }
 

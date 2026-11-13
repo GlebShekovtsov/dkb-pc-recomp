@@ -33,6 +33,11 @@ static unsigned resolve_calls, shadow_calls, mirror_calls, cache_calls, use_call
 #define CHECK(c) do { checks++; if (!(c)) { failures++; fprintf(stderr,"inspect check line %d\n",__LINE__); } } while(0)
 void plat_mutex_lock_shared(PlatMutex *m) { CHECK(!m->p); m->p=(void*)1; locks++; }
 void plat_mutex_unlock_shared(PlatMutex *m) { CHECK(m->p==(void*)1); m->p=NULL; unlocks++; }
+// The try fails, so every shared acquire goes through the counted plat_mutex_lock_shared (pool_lock_shared).
+int plat_mutex_trylock_shared(PlatMutex *m) { (void)m; return 0; }
+unsigned rt_trace;
+uint64_t kern_now_ns(void) { return 0; }
+void perf_lock_wait(int lock, uint64_t ns) { (void)lock; (void)ns; }
 '''
 
 FIXTURE = r'''
@@ -173,7 +178,8 @@ def main():
     pieces = [PRELUDE, statement(memory, 'enum { POOL_IMPORT'), statement(memory, 'enum { MS_NONE'),
               typedef(memory, 'VPage'), typedef(memory, 'PoolRec'),
               function(memory, 'static inline int ms_get('),   # the mirror state's atomic load
-              statement(memory, 'static PlatMutex pool_lock'), statement(memory, 'static pidx pool_index'),
+              statement(memory, 'static PlatMutex pool_lock'), function(memory, 'static void pool_lock_shared('),
+              statement(memory, 'static pidx pool_index'),
               function(memory, 'static int rec_class('), inspect, FIXTURE]
     out = ROOT / 'build/tests/vk-memory-inspect'
     out.mkdir(parents=True, exist_ok=True)

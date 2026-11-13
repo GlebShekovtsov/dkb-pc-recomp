@@ -296,6 +296,28 @@ static void ab_frame(uint64_t frame, uint64_t d, uint64_t rep, int side) {
            ra > 0 ? 100 * (rb - ra) / ra : 0);
 }
 
+static volatile int64_t lock_waits[PERF_LOCK_N][3];   // waits over 100 us: count, total ns, longest ns
+
+void perf_lock_wait(int lock, uint64_t ns) {
+    if (ns < 100000 || lock < 0 || lock >= PERF_LOCK_N) return;
+    plat_add64(&lock_waits[lock][0], 1), plat_add64(&lock_waits[lock][1], (int64_t)ns);
+    int64_t m = __atomic_load_n(&lock_waits[lock][2], __ATOMIC_RELAXED);
+    while ((int64_t)ns > m && !__atomic_compare_exchange_n(&lock_waits[lock][2], &m, (int64_t)ns, 0, __ATOMIC_RELAXED,
+                                                            __ATOMIC_RELAXED)) {}
+}
+
+static void lock_waits_log(uint64_t frame) {
+    static const char *const name[PERF_LOCK_N] = {"texture", "memory pools", "mirror"};
+    char line[300];
+    size_t o = 0;
+    for (int i = 0; i < PERF_LOCK_N; i++) {
+        int64_t n = plat_xchg64(&lock_waits[i][0], 0), t = plat_xchg64(&lock_waits[i][1], 0), m = plat_xchg64(&lock_waits[i][2], 0);
+        o += (size_t)snprintf(line + o, sizeof line - o, "%s%s %lld (%.1f ms, longest %.0f us)", i ? ", " : "", name[i],
+                              (long long)n, t / 1e6, m / 1e3);
+    }
+    rt_log("perf: frame %llu: lock waits over 100 us: %s", (unsigned long long)frame, line);
+}
+
 void perf_present(uint64_t frame) {
     static uint64_t last, sum, max, n, win_start, ab_b;
     static int64_t win_prev[PERF_CNT_N];
@@ -336,6 +358,7 @@ void perf_present(uint64_t frame) {
     last = now;
     if (!win_start) win_start = now;
     if (frame % 60) return;
+    lock_waits_log(frame);
     uint64_t span = now - win_start;
     int64_t win[PERF_CNT_N];
     for (int i = 0; i < PERF_CNT_N; i++) {
