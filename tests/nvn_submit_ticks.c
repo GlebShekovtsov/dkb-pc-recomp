@@ -35,6 +35,7 @@ static void state_reset(VkExec *ex) { memset(ex,0,sizeof *ex); }
 void vk_dump_init(void) {}
 void vk_exec_pass_end(VkExec *ex) { ex->in_pass=0; }
 static void par_flush(VkExec *ex) { (void)ex; }
+static int par_settle(VkExec *ex, int wait) { (void)ex; (void)wait; return 1; }   // no deferred pass here
 static int par_mode;
 static int par_threads(void) { return par_mode; }
 static int npiece __attribute__((unused));   // vk_exec.c only assigns it now

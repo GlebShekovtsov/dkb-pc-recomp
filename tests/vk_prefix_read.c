@@ -70,6 +70,7 @@ void vk_usnap_begin(const uint64_t *handles, int n, uint64_t f) {
 void vk_usnap_end(uint64_t f) { NEED(!x_here && f == X.fence); snapshot_end++; }
 void vk_exec_pass_end(VkExec *ex) { NEED(ex == &X); ex->in_pass = 0; }
 static void par_flush(VkExec *ex) { (void)ex; }
+static int par_settle(VkExec *ex, int wait) { (void)ex; (void)wait; return 1; }   // no deferred pass here
 static int par_mode;
 static int par_threads(void) { return par_mode; }
 static int npiece __attribute__((unused));   // vk_exec.c only assigns it now

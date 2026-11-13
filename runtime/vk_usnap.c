@@ -40,7 +40,7 @@ typedef struct Arena {
 } Arena;
 
 typedef struct { uint64_t lo, hi; } Rng;
-typedef struct { uint64_t lo, hi, off; int dropped; } Reg;
+typedef struct { uint64_t lo, hi, off; uint32_t dropped; } Reg;   // dropped: the drop's sequence number (0: none)
 typedef struct { uint64_t lo, hi, fence; } Wrote;
 
 static struct {
@@ -346,15 +346,24 @@ static int first_above(uint64_t a) {
 }
 
 static _Thread_local int find_quiet;
+// Deferred sliced passes (vk_exec.c TOTK_SLICE_DEFER): the slices of a pass are recorded while the replay thread goes on
+// with the ops after it, whose drops a binding of the pass must not see (on the GPU the pass runs before them). Every
+// drop takes a sequence number; a thread that set a limit sees only the drops up to it, until it drops something itself
+// (its own later draws must see that, as the walk would; such a pass is not sliced again anyway: vk_usnap_covers).
+static uint32_t drop_seq;              // drop_lock
+static _Thread_local uint32_t find_limit;
 
 void vk_usnap_quiet(int on) { find_quiet = on; }
+uint32_t vk_usnap_seq(void) { return __atomic_load_n(&drop_seq, __ATOMIC_ACQUIRE); }
+void vk_usnap_limit(uint32_t seq) { find_limit = seq; }
 
 int vk_usnap_find(uint64_t addr, uint64_t n, uint64_t align, VkDescriptorBufferInfo *out) {
     if (!U.on || !n) return 0;
     int i = first_above(addr);
     if (i >= U.nreg) return 0;
     const Reg *r = &U.reg[i];
-    if (__atomic_load_n(&r->dropped, __ATOMIC_ACQUIRE) || addr < r->lo || addr + n > r->hi) return 0;
+    uint32_t d = __atomic_load_n(&r->dropped, __ATOMIC_ACQUIRE);
+    if ((d && (!find_limit || d <= find_limit)) || addr < r->lo || addr + n > r->hi) return 0;
     uint64_t off = r->off + (addr - r->lo);
     if (off % align) return 0;
     *out = (VkDescriptorBufferInfo){U.arena->buf, off, n};
@@ -385,11 +394,14 @@ void vk_usnap_drop(uint64_t addr, uint64_t n) {
     if (!U.mode || !n) return;
     plat_mutex_lock(&drop_lock);
     U.wr_added++;
+    uint32_t seq = __atomic_add_fetch(&drop_seq, 1, __ATOMIC_RELEASE);
+    if (!seq) seq = __atomic_add_fetch(&drop_seq, 1, __ATOMIC_RELEASE);   // 0 means not dropped
+    find_limit = 0;   // this thread sees its own drops from now on
     if (U.nwr == U.cwr) U.wr = grow(U.wr, &U.cwr, sizeof *U.wr);
     U.wr[U.nwr++] = (Wrote){addr, addr + n, U.fence};
     if (U.on)
         for (int i = first_above(addr); i < U.nreg && U.reg[i].lo < addr + n; i++)
-            if (!U.reg[i].dropped) __atomic_store_n(&U.reg[i].dropped, 1, __ATOMIC_RELEASE), U.drops++, gen_bump();
+            if (!U.reg[i].dropped) __atomic_store_n(&U.reg[i].dropped, seq, __ATOMIC_RELEASE), U.drops++, gen_bump();
     plat_mutex_unlock(&drop_lock);
 }
 
