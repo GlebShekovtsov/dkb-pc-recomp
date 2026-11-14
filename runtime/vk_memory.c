@@ -2454,11 +2454,6 @@ static int ninflight, cap_inflight;
 static Batch *spare;                  // completed batches whose command buffer and fence are reused
 static int nspare, cap_spare;
 static uint64_t next_seq, done_seq;   // batches handed out / completed (all batches up to done_seq)
-// Fences a vk_upload_flush(1) waits on without cmd_lock (upload_wait_unlocked): a spare batch whose fence is here is not
-// reused, since vkResetFences must not run while another thread waits on the fence. Under cmd_lock.
-#define WAIT_PINS 32
-static VkFence pinned[WAIT_PINS];
-static int npinned;
 static Dead *dead;
 static int ndead, cap_dead;
 static uint64_t tl_protected;         // newest submission being recorded or submitted; guards deferred destruction
@@ -2534,12 +2529,8 @@ VkCommandBuffer vk_upload_begin(void) {
     }
     retire(c, 0);
     memset(&open_b, 0, sizeof open_b);
-    int sp = nspare - 1;   // the newest spare whose fence no thread waits on
-    for (int i = 0; sp >= 0 && i < npinned; i++)
-        if (pinned[i] == spare[sp].fence) sp--, i = -1;
-    if (sp >= 0) {
-        Batch s = spare[sp];
-        spare[sp] = spare[--nspare];
+    if (nspare) {
+        Batch s = spare[--nspare];
         open_b.cb = s.cb, open_b.fence = s.fence, open_b.stg = s.stg, open_b.cap = s.cap, open_b.ts = s.ts;
         vkResetCommandBuffer(open_b.cb, 0);
         vkResetFences(c->device, 1, &open_b.fence);
@@ -2616,13 +2607,6 @@ void *vk_staging(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc) {
     return info.pMappedData;
 }
 
-// TOTK_UPLOAD_WAIT_UNLOCKED (1 by default; 0 waits under cmd_lock as before, ab alternates with TOTK_AB).
-static int upload_wait_unlocked(void) {
-    static int mode = -1;
-    if (mode < 0) mode = rt_knob("UPLOAD_WAIT_UNLOCKED", "1");
-    return RT_KNOB_ON(mode);
-}
-
 uint64_t vk_upload_flush(int wait) {
     plat_once(&cmd_once, cmd_init, NULL);
     plat_rmutex_lock(&cmd_lock);
@@ -2648,31 +2632,7 @@ uint64_t vk_upload_flush(int wait) {
         inflight[ninflight++] = open_b;
         open_active = 0;
     }
-    if (c && wait && upload_wait_unlocked()) {
-        // Without cmd_lock: the GPU wait of a game thread's read (vk_texture.c write_back_unlocked, about 1.9 ms a frame
-        // in the hills) held every other upload flush, among them the replay thread's at each part it submits
-        // (vk_sync.c split_impl, vk_sync_split_insert), 5% of its samples in a TOTK_PROFILE_RENDER profile there.
-        // Batches complete in order, so the newest in flight up to seq covers the rest; its fence is pinned meanwhile.
-        uint64_t w0 = ninflight && done_seq < seq ? kern_now_ns() : 0;
-        while (ninflight && done_seq < seq && npinned < WAIT_PINS) {
-            int k = 0;
-            while (k + 1 < ninflight && inflight[k + 1].seq <= seq) k++;
-            VkFence f = inflight[k].fence;
-            pinned[npinned++] = f;
-            plat_rmutex_unlock(&cmd_lock);
-            VkResult w = vkWaitForFences(c->device, 1, &f, VK_TRUE, UINT64_MAX);
-            plat_rmutex_lock(&cmd_lock);
-            for (int i = 0; i < npinned; i++)
-                if (pinned[i] == f) { pinned[i] = pinned[--npinned]; break; }
-            if (w != VK_SUCCESS && w != VK_TIMEOUT) {
-                vk_device_fault_report(w);
-                rt_fatal("vk: upload wait failed (%d)", (int)w);
-            }
-            retire(c, 0);
-        }
-        if (w0) plat_add64(&up_wait_ns, (int64_t)(kern_now_ns() - w0));
-    }
-    if (c && wait) {   // under cmd_lock: TOTK_UPLOAD_WAIT_UNLOCKED=0, or every pin taken
+    if (c && wait) {
         uint64_t w0 = ninflight && done_seq < seq ? kern_now_ns() : 0;
         while (ninflight && done_seq < seq) {
             // A lost device returns at once and its fence never signals: without this check the loop spins forever
