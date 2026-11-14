@@ -350,8 +350,11 @@ static _Thread_local int find_quiet;
 // with the ops after it, whose drops a binding of the pass must not see (on the GPU the pass runs before them). Every
 // drop takes a sequence number; a thread that set a limit sees only the drops up to it, until it drops something itself
 // (its own later draws must see that, as the walk would; such a pass is not sliced again anyway: vk_usnap_covers).
+// The numbers wrap after 2^32 drops (about 40 hours at 30,000 a frame), so a drop counts as made by the limit when it is
+// at most 2^31 before it (dropped_by).
 static uint32_t drop_seq;              // drop_lock
 static _Thread_local uint32_t find_limit;
+static int dropped_by(uint32_t d, uint32_t limit) { return d && (!limit || (int32_t)(d - limit) <= 0); }
 
 void vk_usnap_quiet(int on) { find_quiet = on; }
 uint32_t vk_usnap_seq(void) { return __atomic_load_n(&drop_seq, __ATOMIC_ACQUIRE); }
@@ -363,7 +366,7 @@ int vk_usnap_find(uint64_t addr, uint64_t n, uint64_t align, VkDescriptorBufferI
     if (i >= U.nreg) return 0;
     const Reg *r = &U.reg[i];
     uint32_t d = __atomic_load_n(&r->dropped, __ATOMIC_ACQUIRE);
-    if ((d && (!find_limit || d <= find_limit)) || addr < r->lo || addr + n > r->hi) return 0;
+    if (dropped_by(d, find_limit) || addr < r->lo || addr + n > r->hi) return 0;
     uint64_t off = r->off + (addr - r->lo);
     if (off % align) return 0;
     *out = (VkDescriptorBufferInfo){U.arena->buf, off, n};

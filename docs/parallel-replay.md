@@ -406,3 +406,45 @@ new ones a submission); `wr_prune` now sorts only those added since the last pru
 
 The GPU time of the same spot moved between sessions (11.0 to 13.1 ms with the same build), so builds are compared in
 one session only.
+
+### Deferred sliced passes: 40.5 to 43.9 fps (`TOTK_SLICE_DEFER`)
+
+With six threads the submitting thread still recorded about an eighth of the slices itself (about 290 ms of every 60
+frames) and waited for the workers at each pass end, while the ops after the pass waited for it. With
+`TOTK_SLICE_DEFER=1` (off by default; `ab` alternates it with `TOTK_AB`) the walk goes on instead:
+
+- `par_start` (`par_defer_begin`) sends what the walk recorded so far to the queue and opens the pass in a primary
+  command buffer of its own (`PD.pp`); the walk records into a part of its own again (`par_defer_opened`).
+- At the collection's end `par_defer_flush` takes the CPU side of the pass end at the pass's place in the walk
+  (`pass_history`, `pass_targets_written`, split out of `vk_exec_pass_end`), and the walk replays the next ops.
+- `par_settle` puts the recorded slices into `PD.pp`, ends the pass (3D BC stand-ins are copied back as in
+  `vk_exec_pass_end`) and inserts `PD.pp` into the queue ahead of the walk's part (`vk_sync_split_insert`).
+  `maybe_split` tries this at every op without blocking, and no part after the pass is submitted before it. The next
+  sliced pass, a read of GPU memory (`vk_exec_read_buffer`) and the submission's end wait for it; the submitting
+  thread records the slices no worker took.
+- One pass is deferred at a time (the workers' queue and `PC` hold one), and none while occlusion queries count: the
+  query would stay open in the pass's buffer while the walk goes on.
+- The ops after the pass may drop uniform snapshot copies (`vk_usnap_drop`) while its slices are recorded, and on the
+  GPU those writes come after the pass. Every drop is numbered, and a slice sees only the drops made before its pass
+  (`vk_usnap_limit`), until it drops one itself (`tests/usnap_seq_test.py`, which also covers the numbers wrapping).
+- A slice that stores over a snapshot copy still bans its pass's targets (`vk_exec_par_order_hazard`), but the walk
+  may already have bound that copy for draws after the pass, which it would not have done had it waited. That is one
+  frame at most, the first time a target set shows it.
+
+The perf line of the sliced passes counts the deferred passes and how many went to the queue without a wait.
+
+Hills, six threads, `TOTK_DYN_UBO=1`, RX 9070 XT, one run with `TOTK_SLICE_DEFER=ab` (about 26,950 draws a frame in
+both blocks, 112 and 113 windows of 60 frames):
+
+| | off | deferred |
+|---|---|---|
+| fps (quartiles) | 40.0 / 40.5 / 41.0 | 43.2 / 43.9 / 44.3 |
+| lowest window | 32.7 | 39.4 |
+| replay | 16.07 ms | 15.16 ms |
+
+Each of the five deferred blocks was above the blocks next to it. A 50-minute run of free play in the Hilltop and
+Canyon layers with it on showed no error and no glitch; 97% of its windows were at 55 fps or more.
+
+What is left in that run under 30 fps is the full map: one of its draws samples an image that needs a depth twin, so
+its targets are banned from slicing (9734269) and its 22,000 draws a frame go on one thread (replay 28-30 ms, 24 fps).
+Twins copied before such a pass begins would let it be sliced; not done yet.
