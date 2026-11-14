@@ -2190,6 +2190,16 @@ static void tex_info(VkExec *ex, const GfxShaderRes *r, uint64_t h, int storage,
 
 // Before the pipeline lookup of a draw: the compare-sampled colour images of its shaders that need a depth twin and
 // have none for this pass (and are not its attachments) are copied between ending the pass and opening it again.
+// Slot tokens (token_of: the descriptor's registration and its memory's generation) whose image needs no twin: a
+// depth image, a format the driver compares, or one too big. twin_prepare looks a compared texture up under the texture
+// lock on every draw that samples it, and most of them are real depth images: 3.7% of the render thread's samples in
+// the hills of Bananza 3.2.0 went to that lock. A token names one registration of one image, so the answer holds while
+// the token does. Per thread (the slices have their own); a token that needs a twin is looked up every time.
+#define TWIN_NONE 64
+static _Thread_local uint64_t twin_none[TWIN_NONE];
+static int twin_none_has(uint64_t tok) { return tok > 1 && twin_none[(tok * 0x9E3779B97F4A7C15ull) >> 58] == tok; }
+static void twin_none_add(uint64_t tok) { if (tok > 1) twin_none[(tok * 0x9E3779B97F4A7C15ull) >> 58] = tok; }
+
 static void twin_prepare(VkExec *ex, const GfxShader *vs, const GfxShader *fs) {
     DrawCtx *const dc = DC_OF(ex);
     if (!ex->in_pass || (!twin_df(VK_FORMAT_R32_SFLOAT) && !twin_df(VK_FORMAT_R16_UNORM))) return;
@@ -2209,11 +2219,16 @@ static void twin_prepare(VkExec *ex, const GfxShader *vs, const GfxShader *fs) {
                 int slot = res[r].slot + k;
                 uint64_t h = slot >= 0 && slot < 128 ? ex->tex[st][slot] : 0;
                 if (!h) continue;
+                uint64_t tok = token_of(ex, h);
+                if (twin_none_has(tok)) continue;
                 if (!locked) vk_texture_lock(), locked = 1;
                 const VkTexImage *img = vk_texture_by_id_locked(&ex->tex_pool, (int)(h & 0xfffff), NULL, NULL);
                 VkFormat df = img ? twin_format(img) : VK_FORMAT_UNDEFINED;
-                if (!df || n == TWINS || (VkDeviceSize)img->width * img->height * (img->layers ? img->layers : 1) * 4 > TWIN_MAX)
+                if (img && (!df || (VkDeviceSize)img->width * img->height * (img->layers ? img->layers : 1) * 4 > TWIN_MAX)) {
+                    twin_none_add(tok);
                     continue;
+                }
+                if (!df || n == TWINS) continue;
                 int skip = 0;
                 for (int i = 0; i < n; i++) skip |= seen[i] == img->image;
                 for (uint32_t i = 0; i < 9; i++) {
