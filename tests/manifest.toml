@@ -9,6 +9,12 @@ area = "tools"
 cmd = ["{python}", "tests/check_content_test.py"]
 
 [[test]]
+name = "dkb-ps-prompts"
+tier = 0
+area = "tools"
+cmd = ["{python}", "tests/dkb_ps_prompts_test.py"]
+
+[[test]]
 name = "nup-extract"
 tier = 0
 area = "tools"

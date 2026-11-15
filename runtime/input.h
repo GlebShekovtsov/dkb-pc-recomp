@@ -25,6 +25,10 @@ int input_overlay_gate(int *held, uint64_t *buttons);   // L3+R3: 1 in the poll 
 int input_pad_read(uint64_t *buttons, int32_t *lx, int32_t *ly);
 // The gamepad layout in effect (PAD_LAYOUT_*, input_map.h; TOTK_PAD_LAYOUT, live); -1 without a gamepad. Any thread.
 int input_pad_layout(void);
+// romfs.c overlay_init, at start: 1 when a PlayStation pad (DualShock 3 or 4, DualSense) is connected, for the
+// PlayStation button prompts (pad_prompts = auto). Starts SDL's gamepad subsystem if input has not yet; 0 with
+// TOTK_INPUT=none or when SDL cannot start.
+int input_sony_pad_present(void);
 // The label on a face button of the open gamepad (input_map.h PAD_SOUTH..PAD_NORTH, as SDL reports it); PAD_LABEL_NONE for another
 // button, an unknown label or no gamepad. Any thread.
 enum { PAD_LABEL_NONE, PAD_LABEL_A, PAD_LABEL_B, PAD_LABEL_X, PAD_LABEL_Y, PAD_LABEL_CROSS, PAD_LABEL_CIRCLE,

@@ -35,6 +35,8 @@ NUP_SELECT = ('latest', 'base')
 EXE = '.exe' if os.name == 'nt' else ''
 CHUNK = 8 << 20
 WIDE_SIZES = ('2560x1080', '3440x1440', '3840x1600', '5120x2160', '3840x1080', '5120x1440')
+# The PlayStation prompt overlays and the pad layout each is made for (runtime/romfs.c ps_prompts_init).
+PS_FOLDERS = {'romfs-patches-ps': 'xbox', 'romfs-patches-ps-nintendo': 'nintendo'}
 WIDE_FOLDERS = tuple(f'romfs-patches-{size}{suffix}' for size in WIDE_SIZES for suffix in ('', '-hud-edges'))
 COMMIT_WARN_GIB = 24   # the game commits about 14 GB; README asks for 16 GB of RAM plus a large page file
 
@@ -359,7 +361,7 @@ def preflight(layout, options, dest, temp, rep):
                            *([layout.tools / 'extract_nup.py'] if nup_arg else []),
                            layout.tools / 'dkb_shader_census.py',
                            layout.tools / 'dkb_wide_layout.py', layout.tools / 'ultrawide_layout.py',
-                           layout.runtime / 'nvn2_lower.cpp', layout.tools / 'data' / f'expected-{game}.json')
+                           layout.tools / 'dkb_ps_prompts.py', layout.runtime / 'nvn2_lower.cpp', layout.tools / 'data' / f'expected-{game}.json')
                if not p.is_file()]
     if layout.deps:
         missing += [p for p in (layout.deps / 'include', layout.deps / 'lib') if not p.is_dir()]
@@ -805,6 +807,50 @@ class WideLayouts(Step):
         return {'outputs': {name: tree_key(ctx.dest / name) for name in WIDE_FOLDERS}}
 
 
+class PadPrompts(Step):
+    """The PlayStation button prompts (tools/dkb_ps_prompts.py): one overlay per pad layout, from the user's font."""
+    id = 'dkb_prompts'
+
+    def key(self, ctx):
+        return digest(ctx.keys['dkb_data'], ctx.info['game'], PS_FOLDERS, source_key(ctx.layout, 'tools/dkb_ps_prompts.py'))
+
+    def current(self, ctx, record):
+        try:
+            return (set(record.get('outputs', {})) == set(PS_FOLDERS) and
+                    all((ctx.dest / name / 'manifest.tsv').is_file() and
+                        tree_key(ctx.dest / name) == record['outputs'][name] for name in PS_FOLDERS))
+        except OSError:
+            return False
+
+    def verify(self, ctx, record):
+        return self.current(ctx, record)
+
+    def run(self, ctx):
+        plain_outputs(ctx)
+        staged = ctx.temp / 'build' / 'ps-prompts'
+        owned_dir(ctx, staged)
+        try:
+            for name, layout in PS_FOLDERS.items():
+                run_tool(ctx, self.id, [ctx.layout.python, ctx.layout.tools / 'dkb_ps_prompts.py',
+                                        '--romfs', ctx.dest / 'romfs', '--out', staged / name, '--layout', layout,
+                                        '--installer-workspace', ctx.temp], name=f'{self.id}-{layout}')
+        except InstallError as error:
+            if error.id != 'dkb.tool_failed':   # path/ownership failures still stop setup
+                raise
+            ctx.reporter.warning('warn.dkb_prompts_failed', code=error.params.get('code'),
+                                 log=str(error.params.get('log')))
+            # Optional: the Switch prompts stay. Nothing is published and nothing recorded, so the next setup retries.
+            return {'prepared': False}
+        plain_outputs(ctx)
+        for name in PS_FOLDERS:   # each manifest last, as WideLayouts
+            folder = staged / name
+            for source in sorted(folder.rglob('*')):
+                if source.is_file() and source.name != 'manifest.tsv':
+                    copy_file(source, ctx.dest / name / source.relative_to(folder))
+            copy_file(folder / 'manifest.tsv', ctx.dest / name / 'manifest.tsv')
+        return {'outputs': {name: tree_key(ctx.dest / name) for name in PS_FOLDERS}}
+
+
 class Prepare(Step):
     id = 'dkb_verify'
 
@@ -836,7 +882,7 @@ class Cleanup(Step):
 
 
 def all_steps():
-    return [Check(), Data(), Translator(), Lift(), Compile(), Shaders(), WideLayouts(), Prepare(), Cleanup()]
+    return [Check(), Data(), Translator(), Lift(), Compile(), Shaders(), WideLayouts(), PadPrompts(), Prepare(), Cleanup()]
 
 
 def cancel(*_):

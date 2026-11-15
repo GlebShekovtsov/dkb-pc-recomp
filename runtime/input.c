@@ -695,6 +695,23 @@ int input_pad_layout(void) {
     return (int)plat_cas32(&pad_layout_shown, 0, 0);
 }
 
+int input_sony_pad_present(void) {
+    const char *e = cfg_get("TOTK_INPUT");
+    if (e && !strcmp(e, "none")) return 0;
+    // SDL_Init counts its callers, so start() initialising the subsystem again later is harmless; the game's pads are
+    // enumerated by the time it returns (XInput, raw input and HIDAPI enumerate at init).
+    if (!SDL_Init(SDL_INIT_GAMEPAD)) return 0;
+    int n = 0, sony = 0;
+    SDL_JoystickID *ids = SDL_GetGamepads(&n);
+    for (int i = 0; ids && i < n && !sony; i++) {
+        SDL_GamepadType t = SDL_GetGamepadTypeForID(ids[i]);
+        sony = t == SDL_GAMEPAD_TYPE_PS3 || t == SDL_GAMEPAD_TYPE_PS4 || t == SDL_GAMEPAD_TYPE_PS5;
+        if (sony) rt_log("input: PlayStation pad at start: \"%s\"", SDL_GetGamepadNameForID(ids[i]));
+    }
+    SDL_free(ids);
+    return sony;
+}
+
 int input_pad_label(int pad_id) {
     if (pad_id < PAD_SOUTH || pad_id > PAD_NORTH) return PAD_LABEL_NONE;
     return (int)plat_cas32(&pad_labels[pad_id - PAD_SOUTH], 0, 0);

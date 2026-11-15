@@ -227,6 +227,8 @@
  "step.dkb_shaders": "Translating the game's shaders (once, a few minutes)",
  "step.dkb_wide": "Preparing ultrawide backgrounds and HUD layouts",
  "warn.dkb_wide_failed": "Ultrawide layout generation failed (exit code {code}); setup will continue without installing new overlays. Existing overlays are unchanged. Details: {log}. Rerun setup to retry.",
+ "step.dkb_prompts": "Preparing PlayStation button prompts",
+ "warn.dkb_prompts_failed": "PlayStation button prompts could not be prepared (exit code {code}); setup will continue and the game keeps the Switch prompts. Details: {log}. Rerun setup to retry.",
  "step.dkb_verify": "Checking the completed installation",
  "phase.check.dkb_base": "Checking the ExeFS checksums",
  "phase.check.dkb_hash": "Checking the RomFS source files",
@@ -237,5 +239,6 @@
  "phase.compile.dkb_run": "Compiling dkb.exe",
  "phase.dkb_shaders.dkb_run": "Translating the shader stages found in the game files",
  "phase.dkb_verify.dkb_run": "Running the installed program's self-checks",
- "phase.dkb_wide.dkb_run": "Preparing centered and edge HUD layouts for each ultrawide resolution"
+ "phase.dkb_wide.dkb_run": "Preparing centered and edge HUD layouts for each ultrawide resolution",
+ "phase.dkb_prompts.dkb_run": "Drawing the PlayStation symbols into the game's button font"
 }

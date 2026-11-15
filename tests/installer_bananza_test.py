@@ -65,6 +65,14 @@ for size in a[a.index('--presets')+1:]:
         (folder/'manifest.tsv').write_text('resource.bin\\t%d\\t%s\\t%s\\n' %
                                           (len(raw), hashlib.sha256(raw).hexdigest(), '0'*64))
 ''')
+        (self.root / 'tools/dkb_ps_prompts.py').write_text('''
+import hashlib, pathlib, sys
+a=sys.argv; out=pathlib.Path(a[a.index('--out')+1])
+assert out.is_relative_to(pathlib.Path(a[a.index('--installer-workspace')+1])/'build')
+assert a[a.index('--layout')+1] in ('xbox','nintendo')
+out.mkdir(parents=True); raw=('synthetic '+a[a.index('--layout')+1]).encode(); (out/'resource.bin').write_bytes(raw)
+(out/'manifest.tsv').write_text('resource.bin\\t%d\\t%s\\t%s\\n' % (len(raw), hashlib.sha256(raw).hexdigest(), '0'*64))
+''')
         (self.root / 'tools/romfs_index.py').write_text('# synthetic fixture')
         (self.root / 'recomp/gen.py').write_text('''
 import json, pathlib, sys
@@ -187,7 +195,7 @@ assert '--full-build' in a and pathlib.Path(a[a.index('--expected')+1]).name=='e
         self.assertEqual(code, 0, events)
         state = b.statefile.load(self.dest, b.STATE)
         self.assertEqual(state['game'], 'dkb100')
-        self.assertEqual(set(state['steps']), {'dkb_data','dkb_translator','lift','compile','dkb_shaders','dkb_wide','dkb_verify'})
+        self.assertEqual(set(state['steps']), {'dkb_data','dkb_translator','lift','compile','dkb_shaders','dkb_wide','dkb_prompts','dkb_verify'})
         self.assertEqual((self.dest/'exefs/main').read_bytes(), (self.exefs/'main').read_bytes())
         self.assertTrue((self.dest/('dkb'+b.EXE)).is_file())
         self.assertFalse((self.dest/'build.ninja').exists())
@@ -197,7 +205,7 @@ assert '--full-build' in a and pathlib.Path(a[a.index('--expected')+1]).name=='e
         self.assertEqual(code, 0, events)
         self.assertEqual(self.calls, [])
         self.assertEqual({e['step'] for e in events if e['type']=='step' and e['state']=='skipped'},
-                         {'dkb_data','dkb_translator','lift','compile','dkb_shaders','dkb_wide','dkb_verify'})
+                         {'dkb_data','dkb_translator','lift','compile','dkb_shaders','dkb_wide','dkb_prompts','dkb_verify'})
 
     def test_wide_presets_install_both_variants_and_repair_without_rebuild(self):
         self.assertEqual(self.run_install()[0], 0)
@@ -367,7 +375,7 @@ assert '--full-build' in a and pathlib.Path(a[a.index('--expected')+1]).name=='e
                      if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name) and
                      n.targets[0].id in ('TOOLS_FILES', 'DKB_TOOLS_FILES')}
         packaged = constants['TOOLS_FILES'] + constants['DKB_TOOLS_FILES']
-        self.assertTrue({'dkb_wide_layout.py', 'ultrawide_layout.py'} <= set(packaged))
+        self.assertTrue({'dkb_wide_layout.py', 'ultrawide_layout.py', 'dkb_ps_prompts.py'} <= set(packaged))
         menu = (ROOT / 'runtime/ui/menu.cpp').read_text(encoding='utf-8')
         sizes = re.search(r'static const char \*const wide\[\] = \{([^}]+)\}', menu)
         self.assertIsNotNone(sizes)
@@ -572,7 +580,7 @@ assert '--full-build' in a and pathlib.Path(a[a.index('--expected')+1]).name=='e
         (self.romfs/'other.bin').write_bytes(b'a changed source')
         self.calls.clear()
         self.assertEqual(self.run_install()[0], 0)
-        self.assertEqual([step for step, _ in self.calls], ['dkb_data','lift','compile','dkb_shaders','dkb_shaders','dkb_shaders','dkb_wide','dkb_verify'])
+        self.assertEqual([step for step, _ in self.calls], ['dkb_data','lift','compile','dkb_shaders','dkb_shaders','dkb_shaders','dkb_wide','dkb_prompts','dkb_prompts','dkb_verify'])
 
     def test_source_mutation_during_pack_is_not_installed(self):
         def mutate(ctx, step, command):

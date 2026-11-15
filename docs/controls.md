@@ -49,6 +49,19 @@ The buttons change at once, but the game reads its UI archive and fonts once at 
 
 Without the folder (an install made by an older setup, or one where the setup could not prepare it and showed a warning) the menu says the files are missing, the log has `RomFS overlay: pad_layout = xbox_prompts, but ...`, and the Switch prompts stay; running the setup again on the install folder writes it. In a source build, `.venv-py314\Scripts\python tools\make_romfs_patches.py --version <ver> --xbox-prompts` writes `build\<ver>\romfs-patches-xbox`.
 
+## PlayStation button prompts (Bananza)
+
+With a DualShock 4 or DualSense pad connected when the game starts, Bananza shows PlayStation symbols in its button prompts: a cross, circle, square and triangle for the face buttons, L1, R1, L2 and R2 for the shoulder buttons and triggers, and the Options and Create marks for + and -. `pad_prompts` in `dkb.ini` chooses: `auto` (default) as above, `playstation` always, `switch` never. The game reads its fonts once at boot, so a pad connected later, or a changed setting, takes effect at the next start. The log says `RomFS overlay: PlayStation button prompts` when they are on.
+
+Which button each symbol names follows `pad_layout`, as the buttons do:
+
+- `auto` (a Sony pad counts as `xbox`) and `xbox`: Switch A is the bottom button, so A shows the cross, B the circle, X the square and Y the triangle. The face-button diamonds that point at one button point at the bottom one for A, and so on.
+- `nintendo` and `xbox_prompts`: Switch A is the right button, so A shows the circle, B the cross, X the triangle and Y the square.
+
+As with the Xbox prompts, a button remapped with a `bind_` line keeps the symbol of the Switch button it was.
+
+Every prompt is a glyph of one font, `scft/NinDev-HardKey.bfotf`, the same in each `Font/Font*.Nin_Ounce_NVN2.bfarc.zs`: an irregular plate with the button's letter cut out of it (`tools/dkb_prompt_survey.py` found it). The setup runs `tools/dkb_ps_prompts.py`, which keeps each plate of the user's own font and cuts the PlayStation symbol into it instead of the letter: the symbols, the 1 and the 2 are drawn by the tool, and the L and R are the game's, from its ZL and ZR glyphs. It writes `romfs-patches-ps` and `romfs-patches-ps-nintendo` next to `romfs-index.bin`; `runtime/romfs.c` (`ps_prompts_init`) loads one of them next to the other overlays, which replace no Font archive. The D-pad, the sticks, Home and the controller pictures stay as the game draws them.
+
 ## Window keys
 
 | Key | Gamepad | Action |

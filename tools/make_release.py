@@ -116,7 +116,7 @@ RUNTIME_SUFFIXES = {'.h', '.inc', '.ico'}   # .ico: the installer window icon
 GAME = 'totk'
 GAMES = {'totk': dict(lifted=('v121', 'v143'), name='TotK-Setup'), 'dkb': dict(lifted=('dkb100',), name='DKB-Setup')}
 DKB_TOOLS_FILES = ['build_xlate.py', 'dkb_pack_romfs.py', 'dkb_shader_census.py', 'dkb_wide_layout.py',
-                   'extract_nup.py']   # extract_nup: .nup input
+                   'extract_nup.py', 'dkb_ps_prompts.py', 'dkb_prompt_survey.py']   # extract_nup: .nup input
 DKB_TOOLS_DIRS = ['vendor/ryujinx', 'xlate']   # translator identity hashes these
 
 PROBES = ['--probe-kernel', '--probe-vkexec', '--probe-nvn-tex', '--probe-shader']

@@ -381,6 +381,39 @@ static int xbox_prompts_active;   // and overlay_init loaded it
 int romfs_xbox_prompts_ready(void) { return xbox_prompts_ready; }
 int romfs_xbox_prompts_active(void) { return xbox_prompts_active; }
 
+// Bananza's PlayStation button prompts (tools/dkb_ps_prompts.py): the button font of each Font archive with a cross,
+// circle, square and triangle, L1 to R2, Options and Create. pad_prompts = auto (default) takes them when a DualShock or
+// DualSense pad is connected at start, playstation always, switch never. The game reads its fonts once at boot, so a
+// pad connected later changes them at the next start. Which face button each symbol goes on follows pad_layout:
+// romfs-patches-ps for auto and xbox (Switch A on the bottom button, the cross), romfs-patches-ps-nintendo for
+// nintendo and xbox_prompts (Switch A on the right one, the circle). They replace only the Font archives, so they load
+// next to the other overlays (the wide layouts replace Layout archives); a mod that replaces a Font archive as well
+// stops the start with both names (overlay_init).
+static int ps_prompts_active;
+int romfs_ps_prompts_active(void) { return ps_prompts_active; }
+
+static void ps_prompts_init(void) {
+    const char *want = cfg_value("TOTK_PAD_PROMPTS");
+    int on = !strcasecmp(want, "playstation") || (!strcasecmp(want, "auto") && input_sony_pad_present());
+    if (!on) return;
+    const char *layout = cfg_value("TOTK_PAD_LAYOUT");
+    int nintendo = !strcasecmp(layout, "nintendo") || !strcasecmp(layout, "xbox_prompts");
+    char dir[2100], manifest[2200];
+    if (snprintf(dir, sizeof dir, "%s/romfs-patches-ps%s", index_dir, nintendo ? "-nintendo" : "") >= (int)sizeof dir) return;
+    snprintf(manifest, sizeof manifest, "%s/manifest.tsv", dir);
+    if (!plat_file_exists(manifest)) {
+        rt_log("RomFS overlay: PlayStation prompts wanted (pad_prompts = %s), but %s is missing (run the setup again); "
+               "Switch prompts stay", want, manifest);
+        return;
+    }
+    size_t before = noverlay;
+    ps_prompts_active = overlay_load(dir, 1) && noverlay > before;
+    rt_log("RomFS overlay: %s", ps_prompts_active ? "PlayStation button prompts" : "PlayStation prompts failed their check; Switch prompts stay");
+    if (ps_prompts_active)
+        rt_log("RomFS overlay: PlayStation prompts for pad_layout = %s: Switch A is the %s", layout,
+               nintendo ? "circle (right button)" : "cross (bottom button)");
+}
+
 static void overlay_init(void) {
     // TOTK_ROMFS_PATCHES unset: romfs-patches next to romfs-index.bin if it has a manifest (tools/make_romfs_patches.py).
     // A game resolution that is not 16:9 takes romfs-patches-<w>x<h> instead when it is there: the same overlay with
@@ -441,6 +474,7 @@ static void overlay_init(void) {
     const char *dirs[2] = {patches, cfg_get("TOTK_ROMFS_MODS")};
     for (int i = 0; i < 2; i++)
         if (dirs[i] && *dirs[i] && strcmp(dirs[i], "0")) overlay_load(dirs[i], 0);
+    if (!rt_game_version) ps_prompts_init();
     heapdef_overlay();
     added_init();
     if (noverlay) qsort(overlays, noverlay, sizeof *overlays, overlay_order);

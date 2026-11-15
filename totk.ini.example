@@ -241,6 +241,10 @@
 # labels (A with B, X with Y; it loads romfs-patches-xbox, docs/controls.md, "Xbox button prompts"). The bind_ lines
 # below apply on top. Changes while the game runs take effect at once; the xbox_prompts prompts at the next start.
 # pad_layout = auto
+# Bananza: the button prompts for a PlayStation pad (cross, circle, square, triangle, L1 to R2, Options, Create;
+# docs/controls.md, "PlayStation button prompts"). auto takes them when a DualShock or DualSense pad is connected at
+# start, playstation always, switch never. The game reads its fonts at boot, so a change takes effect at the next start.
+# pad_prompts = auto
 # Gamepad stick dead zone in percent of full deflection (0 to 50). Raise it for a stick that drifts: inside the circle
 # the stick reads centred, and the rest of its travel is scaled to start there.
 # stick_deadzone = 8

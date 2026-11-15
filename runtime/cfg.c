@@ -41,7 +41,7 @@ static const char *const known[] = {
     "GPU_INDEX", "GPU_NAME", "HDR", "HDR_GAME_NITS", "HDR_NATIVE", "HDR_PEAK_NITS", "HDR_SHOULDER", "HDR_TRACE", "HDR_UI_NITS", "HEAP_LAZY", "HIGHFPS_FIX", "HOST_PROPS_CACHE", "INPUT", "INPUT_RECORD", "INPUT_SCRIPT", "LANG", "LIB_PREBUILD",
     "LIB_PREBUILD_KEEP", "LIB_PREBUILD_THREADS", "LIST_RESTART", "LOCALE", "LOD_GUARD", "MEMORY", "MEM_REPORT", "MENU_LANG", "MENU_THEME", "MENU_TEST",
     "MENU_TEST_DIR", "MENU_TEST_SET", "MINIMAL_LAYOUT", "MIRROR_GAP", "MOTION", "MOUSE_CAMERA", "MOUSE_SENS", "MOVIE_HOST", "MOVIE_PACE", "MVK_UPSCALE_BLIT", "NAN_GUARD", "NATIVE_GS", "NX2_READ_NOWAIT",
-    "NVN2_MODE_TRACE", "NVN2_MODE_TRACE_START_MS", "NVN2_MODE_TRACE_DURATION_MS", "ONE_PER_CORE", "OPERATION_MODE", "OUTPUT_RES", "PAD_LAYOUT", "PATCH_OUTPUT", "PATCH_SCENE", "PERF_OVERLAY", "PERF_SLOW_GPU_MS", "PERF_SLOW_MS", "PIPELINE_CACHE", "PIPE_MEMO", "PIPE_PREBUILD", "PIPE_SKIP", "PIPE_SYNC", "PIPE_WAIT", "POOL_FINI_WAIT", "POOL_LAZY",
+    "NVN2_MODE_TRACE", "NVN2_MODE_TRACE_START_MS", "NVN2_MODE_TRACE_DURATION_MS", "ONE_PER_CORE", "OPERATION_MODE", "OUTPUT_RES", "PAD_LAYOUT", "PAD_PROMPTS", "PATCH_OUTPUT", "PATCH_SCENE", "PERF_OVERLAY", "PERF_SLOW_GPU_MS", "PERF_SLOW_MS", "PIPELINE_CACHE", "PIPE_MEMO", "PIPE_PREBUILD", "PIPE_SKIP", "PIPE_SYNC", "PIPE_WAIT", "POOL_FINI_WAIT", "POOL_LAZY",
     "PRESENT_HOLD", "PREWARM_XLATE", "PROBE_MOVIE", "PROBE_MOVIE_SHOT", "PROFILE", "PROFILE_CHAINS", "PROFILE_DIR", "PROFILE_FRAMES",
     "PROFILE_MAIN", "PROFILE_RENDER", "PROFILE_REPLAY", "PUSH_SKIP", "PUSH_STAGE", "RDOC", "RDOC_DIR", "RDOC_DLL", "REALTIME", "REC_BEGIN", "REC_END", "REC_SUBMIT", "REEXEC",
     "RENDER_SCALE", "SCENE_RES", "REPLAY_ASYNC", "REPLAY_HELPERS", "REPLAY_PAR", "REPLAY_THREADS",
@@ -68,7 +68,7 @@ static const struct { const char *key, *section; } sections[] = {
     {"MENU_THEME", "menu"}, {"MENU_LANG", "language"}, {"LANG", "language"}, {"OPERATION_MODE", "language"},
     {"VOLUME", "audio"}, {"AUDIO_CHANNELS", "audio"},
     {"MOTION", "input"}, {"RUMBLE_STRENGTH", "input"}, {"RUMBLE_CURVE", "input"}, {"RUMBLE_TRIGGERS", "input"},
-    {"PAD_LAYOUT", "input"}, {"STICK_DEADZONE", "input"}, {"MOUSE_CAMERA", "input"}, {"MOUSE_SENS", "input"}, {"INPUT_RECORD", "input"},
+    {"PAD_LAYOUT", "input"}, {"PAD_PROMPTS", "input"}, {"STICK_DEADZONE", "input"}, {"MOUSE_CAMERA", "input"}, {"MOUSE_SENS", "input"}, {"INPUT_RECORD", "input"},
     {"BIND_A", "input"}, {"BIND_B", "input"}, {"BIND_X", "input"}, {"BIND_Y", "input"}, {"BIND_LCLICK", "input"},
     {"BIND_RCLICK", "input"}, {"BIND_L", "input"}, {"BIND_R", "input"}, {"BIND_ZL", "input"}, {"BIND_ZR", "input"},
     {"BIND_PLUS", "input"}, {"BIND_MINUS", "input"}, {"BIND_LEFT", "input"}, {"BIND_UP", "input"},
@@ -133,7 +133,7 @@ static const CfgMeta metas[] = {
     // Sound, Controls, Menu
     {"VOLUME", "100", "0..100", LIVE}, {"AUDIO_CHANNELS", "auto", "auto|stereo|5.1", RESTART},
     {"MOTION", "1", "0|1", LIVE}, {"RUMBLE_STRENGTH", "130", "0..300", LIVE}, {"RUMBLE_CURVE", "0.6", "0.2..1.5", LIVE},
-    {"RUMBLE_TRIGGERS", "0", "0|1", LIVE}, {"PAD_LAYOUT", "auto", "auto|nintendo|xbox|xbox_prompts", LIVE},
+    {"RUMBLE_TRIGGERS", "0", "0|1", LIVE}, {"PAD_LAYOUT", "auto", "auto|nintendo|xbox|xbox_prompts", LIVE}, {"PAD_PROMPTS", "auto", "auto|switch|playstation", RESTART},
     {"STICK_DEADZONE", "8", "0..50", LIVE}, {"MOUSE_CAMERA", "0", "0|1", LIVE}, {"MOUSE_SENS", "1", "0..10", LIVE},
     {"MENU_LANG", "", "en|ru", LIVE}, {"MENU_THEME", "dk", "dk|classic", LIVE},
     // Advanced: scheduling
