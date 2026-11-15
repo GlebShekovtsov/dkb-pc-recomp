@@ -698,17 +698,34 @@ int input_pad_layout(void) {
 int input_sony_pad_present(void) {
     const char *e = cfg_get("TOTK_INPUT");
     if (e && !strcmp(e, "none")) return 0;
-    // SDL_Init counts its callers, so start() initialising the subsystem again later is harmless; the game's pads are
-    // enumerated by the time it returns (XInput, raw input and HIDAPI enumerate at init).
-    if (!SDL_Init(SDL_INIT_GAMEPAD)) return 0;
-    int n = 0, sony = 0;
-    SDL_JoystickID *ids = SDL_GetGamepads(&n);
-    for (int i = 0; ids && i < n && !sony; i++) {
-        SDL_GamepadType t = SDL_GetGamepadTypeForID(ids[i]);
-        sony = t == SDL_GAMEPAD_TYPE_PS3 || t == SDL_GAMEPAD_TYPE_PS4 || t == SDL_GAMEPAD_TYPE_PS5;
-        if (sony) rt_log("input: PlayStation pad at start: \"%s\"", SDL_GetGamepadNameForID(ids[i]));
+    // SDL_Init counts its callers, so start() initialising the subsystem again later is harmless.
+    if (!SDL_Init(SDL_INIT_GAMEPAD)) {
+        rt_log("input: PlayStation prompts: SDL gamepad init failed (%s)", SDL_GetError());
+        return 0;
     }
-    SDL_free(ids);
+    // A pad is not always listed right after SDL_Init: a DualSense on Bluetooth showed up only at the input thread's
+    // first scan, so the prompts stayed Switch. Poll for up to PAD_WAIT_MS until one is listed (a start without a pad
+    // waits that long once).
+    enum { PAD_WAIT_MS = 800, PAD_POLL_MS = 20 };
+    int n = 0, sony = 0, waited = 0;
+    char seen[160] = "";
+    for (;;) {
+        SDL_UpdateGamepads();
+        SDL_JoystickID *ids = SDL_GetGamepads(&n);
+        for (int i = 0; ids && i < n && !sony; i++) {
+            SDL_GamepadType t = SDL_GetGamepadTypeForID(ids[i]);
+            sony = t == SDL_GAMEPAD_TYPE_PS3 || t == SDL_GAMEPAD_TYPE_PS4 || t == SDL_GAMEPAD_TYPE_PS5;
+            const char *name = SDL_GetGamepadNameForID(ids[i]);
+            snprintf(seen, sizeof seen, "%s", name ? name : "?");
+        }
+        SDL_free(ids);
+        if (n > 0 || waited >= PAD_WAIT_MS) break;
+        plat_sleep_ms(PAD_POLL_MS);
+        waited += PAD_POLL_MS;
+    }
+    if (sony) rt_log("input: PlayStation pad at start: \"%s\" (after %d ms)", seen, waited);
+    else if (n) rt_log("input: no PlayStation pad at start (\"%s\"): Switch prompts", seen);
+    else rt_log("input: no gamepad listed within %d ms of start: Switch prompts", waited);
     return sony;
 }
 
