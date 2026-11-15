@@ -362,7 +362,8 @@ def port_version():
     return version
 
 
-def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=None, make_lib=False):
+def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=None, make_lib=False,
+               content_keys=False):
     """build.ninja text, and the object lists per module. With prebuilt the generated objects already exist in
     out/obj and are link inputs without a compile edge. runtime_lib: a prebuilt library replaces the runtime objects
     except INSTALL_SIDE. make_lib: build only that library, from the runtime objects except INSTALL_SIDE."""
@@ -430,19 +431,23 @@ def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=
         sources = [p for p in sources if p.name in INSTALL_SIDE] + [out / 'modules.c']
     else:
         sources += [out / 'modules.c']
-    # An install compiles INSTALL_SIDE from the release's runtime folder into objects an earlier install left. Ninja
-    # compares times, and a release unpacked from a zip carries the archive's times (local time without a zone), which
-    # can be older than those objects: a changed romfs.c was not compiled again and the PlayStation prompts never
-    # loaded. The hash of each such source and of the runtime headers goes on its command line, which ninja does
-    # compare, so new contents always compile.
-    headers = hashlib.sha256(b''.join(h.read_bytes() for h in sorted(RUNTIME.glob('*.h')))).hexdigest()[:16] \
-        if runtime_lib and not make_lib else None
+    # An install compiles the runtime from the release's folder (Bananza all of it, --full-build; TotK INSTALL_SIDE)
+    # into the objects an earlier install left, and ninja decides by file times. A release unpacked from a zip carries
+    # the archive's times, written in UTC and read as local time without a zone, so sources made less than the zone's
+    # offset after the last install look older than its objects: a changed romfs.c was not compiled again and the
+    # PlayStation prompts never loaded. With content_keys each runtime source's command line carries a hash of the
+    # source and one of every runtime header; ninja compares command lines, so new contents always compile.
+    headers = None
+    if content_keys and not make_lib:
+        heads = sorted(p for p in RUNTIME.rglob('*') if p.suffix in ('.h', '.hpp', '.inc') and p.is_file())
+        headers = hashlib.sha256(b''.join(h.read_bytes() for h in heads)).hexdigest()[:16]
     for src in sources:
         o = runtime_object(out, src)
-        if headers and src.suffix == '.c' and src.parent == RUNTIME:
+        if headers and src.suffix in ('.c', '.cpp') and src.is_relative_to(RUNTIME):
             content = hashlib.sha256(src.read_bytes()).hexdigest()[:16]
             lines.append(f'build {ninja_path(o)}: cc_rt {ninja_path(src)}')
-            lines.append(f'  rtflags = $rtflags -DRT_SOURCE_DIGEST=0x{content} -DRT_HEADERS_DIGEST=0x{headers}')
+            extra = f' -std=c++20 -I {cmd_path(RUNTIME / "third_party" / "eglantine")}' if src.suffix == '.cpp' else ''
+            lines.append(f'  rtflags = $rtflags{extra} -DRT_SOURCE_DIGEST=0x{content} -DRT_HEADERS_DIGEST=0x{headers}')
             rt.append(o)
             continue
         if src.suffix == '.rc':   # windres writes no depfile: the files totk.rc embeds are listed by hand
@@ -931,7 +936,7 @@ def main():
     if runtime_lib and not runtime_lib.is_file():
         sys.exit(f'{runtime_lib} not found: build it with --make-runtime-lib')
     text, objs, exe = ninja_file(gen, out, mods, jobs, skip, pairs is not None, runtime_lib,
-                                 args.make_runtime_lib)
+                                 args.make_runtime_lib, content_keys=bool(runtime_lib or args.full_build))
     write_if_changed(out / 'build.ninja', text)
 
     env = dict(os.environ)
