@@ -430,8 +430,21 @@ def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=
         sources = [p for p in sources if p.name in INSTALL_SIDE] + [out / 'modules.c']
     else:
         sources += [out / 'modules.c']
+    # An install compiles INSTALL_SIDE from the release's runtime folder into objects an earlier install left. Ninja
+    # compares times, and a release unpacked from a zip carries the archive's times (local time without a zone), which
+    # can be older than those objects: a changed romfs.c was not compiled again and the PlayStation prompts never
+    # loaded. The hash of each such source and of the runtime headers goes on its command line, which ninja does
+    # compare, so new contents always compile.
+    headers = hashlib.sha256(b''.join(h.read_bytes() for h in sorted(RUNTIME.glob('*.h')))).hexdigest()[:16] \
+        if runtime_lib and not make_lib else None
     for src in sources:
         o = runtime_object(out, src)
+        if headers and src.suffix == '.c' and src.parent == RUNTIME:
+            content = hashlib.sha256(src.read_bytes()).hexdigest()[:16]
+            lines.append(f'build {ninja_path(o)}: cc_rt {ninja_path(src)}')
+            lines.append(f'  rtflags = $rtflags -DRT_SOURCE_DIGEST=0x{content} -DRT_HEADERS_DIGEST=0x{headers}')
+            rt.append(o)
+            continue
         if src.suffix == '.rc':   # windres writes no depfile: the files totk.rc embeds are listed by hand
             lines.append(f'build {ninja_path(o)}: rc {ninja_path(src)} | {ninja_path(RUNTIME / "totk.manifest")} '
                          f'{ninja_path(RUNTIME / "dkb.ico")}')
