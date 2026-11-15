@@ -20,6 +20,7 @@ Runs under Python 3.14 (compression.zstd, as the release's python does) or with 
 """
 import argparse
 import collections
+import hashlib
 import json
 import re
 import struct
@@ -129,6 +130,17 @@ def sfnt_cmap_pua(font):
             'pua': sorted(found)}
 
 
+def sfnt_plain(data):
+    """The plain OpenType / TrueType bytes of a font member (unwrapping a BFOTF / BFTTF), or None."""
+    if data[:4] in (b'OTTO', b'\0\1\0\0', b'true'):
+        return bytes(data)
+    if len(data) > 16:
+        key = bytes(x ^ y for x, y in zip(data[4:8], struct.pack('>I', len(data) - 8)))
+        if bytes(x ^ key[i % 4] for i, x in enumerate(data[8:12])) in (b'OTTO', b'\0\1\0\0', b'true'):
+            return bytes(x ^ key[i % 4] for i, x in enumerate(data[8:]))
+    return None
+
+
 def font_info(data):
     """Font facts of a member, or None: a plain sfnt, a BFOTF / BFTTF (8-byte header, then every 4-byte word XORed with
     one key, which the size field gives away), or a BFFNT (bitmap sheets, listed only)."""
@@ -230,6 +242,7 @@ class Survey:
         self.tag_labels = collections.defaultdict(list)
         self.kinds = collections.Counter()
         self.errors = []
+        self.export, self.exported = None, {}   # --export-font: member name part -> {sha256: (path, plain bytes)}
 
     def visit(self, path, data, depth=0):
         name = path.rsplit('/', 1)[-1].lower()
@@ -270,6 +283,9 @@ class Survey:
             info = font_info(data)
             self.kinds['font'] += 1
             self.fonts.append((path, info))
+            plain = sfnt_plain(data) if self.export and self.export.lower() in name else None
+            if plain:
+                self.exported.setdefault(hashlib.sha256(plain).hexdigest(), (path, plain))
 
 
 def main():
@@ -277,6 +293,8 @@ def main():
     ap.add_argument('--romfs', type=Path, required=True, help='the install\'s romfs folder (romfs.bin and index.json)')
     ap.add_argument('--out', type=Path, default=ROOT / 'build' / 'prompt-survey')
     ap.add_argument('--all', action='store_true', help='scan every file, not only the UI, font and message folders')
+    ap.add_argument('--export-font', metavar='NAME', help='also write the fonts whose member name contains NAME as plain '
+                    '.otf / .ttf files into the output folder, one per distinct copy (game data: keep it under build/)')
     args = ap.parse_args()
     out = args.out.resolve()
     if 'build' not in out.parts:
@@ -289,6 +307,7 @@ def main():
     for f in files:
         folders[f['path'].split('/', 1)[0]] += 1
     survey = Survey()
+    survey.export = args.export_font
     with (args.romfs / 'romfs.bin').open('rb') as image:
         def read(row):
             image.seek(row['offset'])
@@ -349,6 +368,14 @@ def main():
     lines += [f'{f}: {n} layouts' for f, n in named.most_common()]
     lines += ['', f'== errors ({len(survey.errors)})'] + survey.errors[:50]
     out.mkdir(parents=True, exist_ok=True)
+    if args.export_font:
+        lines += ['', f'== exported fonts matching {args.export_font!r} (one file per distinct copy)']
+        for k, (digest, (path, plain)) in enumerate(sorted(survey.exported.items(), key=lambda kv: kv[1][0])):
+            stem = re.sub(r'\W+', '_', path.rsplit(':', 1)[-1].rsplit('/', 1)[-1].rsplit('.', 1)[0])
+            fname = f'{stem}-{k}.{"otf" if plain[:4] == b"OTTO" else "ttf"}'
+            (out / fname).write_bytes(plain)
+            same = [p for p, info in survey.fonts if p.rsplit(':', 1)[-1] == path.rsplit(':', 1)[-1]]
+            lines.append(f'{fname}: from {path}, sha256 {digest[:16]}; {len(same)} copies of that member in all')
     (out / 'report.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
     (out / 'report.json').write_text(json.dumps({
         'fonts': survey.fonts, 'textures': survey.textures, 'layouts': survey.layout_refs,
