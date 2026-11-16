@@ -220,6 +220,12 @@ area = "gfx"
 cmd = ["{python}", "tests/vk_memory_inspect_test.py", "--cc", "{cc}", "--deps", "{deps}"]
 
 [[test]]
+name = "rec-capture-alone"
+tier = 1
+area = "gfx"
+cmd = ["{python}", "tests/rec_capture_alone_test.py", "--cc", "{cc}", "--deps", "{deps}", "--out", "{out}"]
+
+[[test]]
 name = "vk-prefix-read"
 tier = 1
 area = "gfx"

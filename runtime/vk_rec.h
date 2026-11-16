@@ -39,7 +39,12 @@ void rec_stats_log(void);             // TOTK_TRACE=perf: packets, bytes, drains
 // capture is [begin, end)), and rec_capture_play makes them into cb on the calling thread once the slices are executed
 // there. The recorder must be idle for the play (rec_drain), and nothing may be captured that has no packet.
 // rec_capture_reset forgets every capture, once none is held.
+// rec_capture_begin_for(cb) captures the calls into cb when the recorder does not record it (TOTK_VK_RECORDER=0, the
+// default on AMD's proprietary driver): the wrappers queue packets for cb into the capture as they would for the
+// recorder's part, and every other call goes on as before. rec_capture_alone(cb): such a capture can be taken for cb.
 uint32_t rec_capture_begin(void);
+uint32_t rec_capture_begin_for(VkCommandBuffer cb);
+int rec_capture_alone(VkCommandBuffer cb);
 uint32_t rec_capture_end(void);
 void rec_capture_play(VkCommandBuffer cb, uint32_t lo, uint32_t hi);
 void rec_capture_reset(void);

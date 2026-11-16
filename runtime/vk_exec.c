@@ -2304,11 +2304,14 @@ static int par_defer_ok(const VkExec *ex) {
                par_defer_mode == 2 ? "does not wait in the B blocks" : par_defer_mode ? "does not wait" : "waits",
                par_defer_mode == 2 ? "ab" : par_defer_mode ? "1" : "0");
     }
-    // The held part needs the recorder to record it (its calls are captured as packets) and a split to leave it open;
-    // the replay thread of the TOTK_REPLAY_PAR check keeps everything in one command buffer. par_room left a place in
-    // PDQ before the pass was collected.
+    // The pass end's calls are captured as packets: from the recorder's part, or, without the recorder (TOTK_VK_RECORDER=0,
+    // the default on AMD's proprietary driver), from the part this thread records itself (rec_capture_alone), which it
+    // then also makes them into and ends (vk_sync_split_finish). A split leaves the part open; the replay thread of the
+    // TOTK_REPLAY_PAR check keeps everything in one command buffer. par_room left a place in PDQ before the pass was
+    // collected.
     return RT_KNOB_ON(par_defer_mode) && !par_no_defer && PC.nslices > PC.s0 && par_nworkers && ex == &X && !par_no_split &&
-           split_n > 0 && !vk_dump_armed && pd_n < PAR_DEFER_DEPTH && rec_owns(ex->cb) && rec_capture_room(PAR_CAP_ROOM);
+           split_n > 0 && !vk_dump_armed && pd_n < PAR_DEFER_DEPTH && (rec_owns(ex->cb) || rec_capture_alone(ex->cb)) &&
+           rec_capture_room(PAR_CAP_ROOM);
 }
 
 // vk_rec.c, inside the pass end par_defer captures: a call it cannot hold (one without a packet, or a full capture).
@@ -2343,7 +2346,7 @@ static void par_defer(VkExec *ex) {
     d->s0 = PC.s0, d->s1 = PC.nslices, d->sig = PC.sig;
     rec_capture_spill(par_spill);
     pd_cur = d, pd_spilled = 0;
-    d->cap_lo = rec_capture_begin();
+    d->cap_lo = rec_capture_begin_for(ex->cb);
     ex->recorded++;   // the part holds the pass's vkCmdExecuteCommands
     vk_exec_draw_new_cb(ex);
     ex->dirty = VK_EXEC_DIRTY_ALL;

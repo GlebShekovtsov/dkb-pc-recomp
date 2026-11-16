@@ -128,6 +128,9 @@ static uint64_t cap[CAP_WORDS];
 static uint64_t cap_n;
 static int capturing;
 static void (*spill_fn)(void);
+// A capture without the recorder (rec_capture_begin_for): the command buffer whose calls it takes, NULL otherwise.
+// OWNED reads it from every thread that records (the slice workers record their own secondaries), so atomically.
+static VkCommandBuffer cap_cb;
 
 void rec_capture_spill(void (*fn)(void)) { spill_fn = fn; }
 int rec_capture_room(uint32_t words) { return cap_n + words <= CAP_WORDS; }
@@ -142,8 +145,22 @@ uint32_t rec_capture_begin(void) {
     capturing = 1;
     return (uint32_t)cap_n;
 }
+// Without the recorder, the submitting thread records cb itself: the pass end's calls go to the capture through the
+// same wrappers, and rec_capture_play makes them on this thread, which recorded the rest of the part. vk_sync.c
+// vk_sync_split_defer and vk_sync_split_finish need no recorder (rec_call declines and the end is made here).
+// Only without a recorder thread at all: vk_sync_split_finish hands the held part's end to rec_call, which takes any
+// recorder thread there is, so with TOTK_VK_RECORDER=ab a part the submitting thread recorded in a B block would be
+// ended on the recorder, the pattern of issue #5.
+int rec_capture_alone(VkCommandBuffer cb) { return cb && !rec_thread; }
+uint32_t rec_capture_begin_for(VkCommandBuffer cb) {
+    if (!rec_capture_alone(cb)) return rec_capture_begin();
+    capturing = 1;
+    __atomic_store_n(&cap_cb, cb, __ATOMIC_RELAXED);
+    return (uint32_t)cap_n;
+}
 uint32_t rec_capture_end(void) {
     capturing = 0;
+    __atomic_store_n(&cap_cb, (VkCommandBuffer)VK_NULL_HANDLE, __ATOMIC_RELAXED);
     return (uint32_t)cap_n;
 }
 void rec_capture_reset(void) { cap_n = 0; }
@@ -158,9 +175,23 @@ void rec_capture_play(VkCommandBuffer cb, uint32_t lo, uint32_t hi) {
 
 int rec_owns(VkCommandBuffer cb) { return rec_live && cb == rec_cb; }
 
+// A call whose packet no longer fits a capture without the recorder: spill ends the capture, and nothing reads the
+// ring, so the packet goes to solo and pub makes it into the command buffer at once, after what the spill made.
+static uint64_t solo[RING_WORDS / 4 + 1];
+static VkCommandBuffer solo_cb;
+static uint32_t solo_op;
+
 static void *put(uint32_t op, size_t bytes) {
     uint64_t n = 1 + (bytes + 7) / 8, pos = put_h % RING_WORDS;
-    if (capturing && cap_n + n > CAP_WORDS) spill();
+    if (capturing && cap_n + n > CAP_WORDS) {
+        VkCommandBuffer alone = __atomic_load_n(&cap_cb, __ATOMIC_RELAXED);
+        spill();
+        if (alone) {
+            if (n > RING_WORDS / 4) rt_fatal("vk_rec: a packet of %llu bytes", (unsigned long long)bytes);
+            solo_cb = alone, solo_op = op;
+            return &solo[1];
+        }
+    }
     if (capturing) {
         cap[cap_n] = (uint64_t)op | n << 32;
         cap_n += n;
@@ -182,6 +213,12 @@ static void *put(uint32_t op, size_t bytes) {
 }
 
 static void pub(void) {
+    if (solo_cb) {   // the packet put kept after an alone capture spilled
+        VkCommandBuffer cb = solo_cb;
+        solo_cb = VK_NULL_HANDLE;
+        exec_cb(cb, solo_op, &solo[1]);
+        return;
+    }
     if (capturing) return;
     if (rec_batch) {
         if (++unpub < rec_batch) return;
@@ -369,7 +406,9 @@ void rec_stats_log(void) {
 
 // A helper translator asks this too, for its own command buffer, which is never rec_cb: the loads are atomic so that
 // reading them while the producer moves to another part is not a data race.
-#define OWNED(cb) (__atomic_load_n(&rec_live, __ATOMIC_RELAXED) && (cb) == __atomic_load_n(&rec_cb, __ATOMIC_RELAXED))
+// A capture without the recorder (cap_cb) owns its command buffer the same way: its calls become packets in cap.
+#define OWNED(cb) ((__atomic_load_n(&rec_live, __ATOMIC_RELAXED) && (cb) == __atomic_load_n(&rec_cb, __ATOMIC_RELAXED)) || \
+                   ((cb) && (cb) == __atomic_load_n(&cap_cb, __ATOMIC_RELAXED)))
 // A call the ring takes no packet for: everything queued first, then the call here.
 #define FALLBACK() (capturing ? spill() : (void)0, rec_drain(), RS_.fallbacks++)
 
