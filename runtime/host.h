@@ -291,6 +291,9 @@ const char *res_heapdef_path(void);                        // the game's HeapDef
 void res_init(void);                                       // after rt_patches_init: the patch page and the sets
 void dkb_wide_init(void);                                  // Bananza-only virtual display and camera patch values
 uint64_t dkb_wide_heap_extra_kib(void);                    // Bananza: what the render-target pool needs added to GSys
+int dkb_native_aa(void);                                   // Bananza: the game's upscale step runs at full size now
+int dkb_native_aa_issued_by(uint64_t caller);              // ... and a dispatch issued at that guest address is it
+void dkb_native_aa_live(void);                             // re-read the Upscaler setting (frame_step_present)
 int dkb_wide_output(unsigned out[2]);                      // active mode; optional output gets its size or the stock size
 int res_sizes(unsigned out[2], unsigned scene[2]);         // the output and scene sizes in effect (the game's own
                                                            // until res_init switched the sets on). Bananza: the game's

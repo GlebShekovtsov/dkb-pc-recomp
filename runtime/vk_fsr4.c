@@ -314,14 +314,14 @@ static void barriers(VkCommandBuffer cb, const VkImageMemoryBarrier2 *b, uint32_
 }
 
 // The scene's camera from its projection (row-major, OpenGL style: the depth buffer holds (ndc z + 1) / 2, as in
-// vk_fsr3.c camera_factors): the near and far distances and the vertical field of view. 0 for a matrix that is not a
-// perspective projection.
+// vk_fsr3.c vk_fsr3_camera_factors): the near and far distances and the vertical field of view. 0 for a matrix that is
+// not a perspective projection.
 static int camera(const float p[16], float *near_z, float *far_z, float *fov_y) {
     if (p[12] != 0.0f || p[13] != 0.0f || p[14] != -1.0f || p[15] != 0.0f) return 0;
     if (!(p[0] > 0.0f) || !(p[5] > 0.0f) || !isfinite(p[0]) || !isfinite(p[5])) return 0;
     *fov_y = 2.0f * atanf(1.0f / p[5]);
     *near_z = 1.0f, *far_z = 5000.0f;   // (the game's own, when the matrix gives no sane ones)
-    if (p[11] > 0.0f) return 0;   // as vk_fsr3.c camera_factors: depth 0 is at the near plane
+    if (p[11] > 0.0f) return 0;   // as vk_fsr3.c vk_fsr3_camera_factors: depth 0 is at the near plane
     double n = (double)p[11] / ((double)p[10] - 1.0), f = (double)p[11] / ((double)p[10] + 1.0);
     if (isfinite(n) && n > 0.0) {
         *near_z = (float)n;

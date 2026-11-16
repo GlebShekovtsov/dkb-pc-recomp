@@ -946,6 +946,13 @@ uint64_t plat_mem_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t m
     return got;
 }
 
+void plat_mem_prewrite(uint64_t addr, uint64_t n) {
+    if (ww_fd < 0 || !n) return;
+    uint64_t lo = addr & ~(PG - 1), hi = (addr + n + PG - 1) & ~(PG - 1);
+    struct uffdio_writeprotect wp = {.range = {lo, hi - lo}, .mode = 0};   // mode 0: protection off, as a write leaves it
+    ioctl(ww_fd, UFFDIO_WRITEPROTECT, &wp);   // a failure (a range that is not watched) leaves the writes to fault as before
+}
+
 // One handler for the synchronous faults. A SIGSEGV whose page-fault error code has the write bit set goes to the
 // write-fault hook first (memory.c thaws a frozen region); a fault in this executable's code then goes to the crash
 // hook (main.c); anything else gets the default action. Runs on the thread's signal stack.

@@ -144,6 +144,9 @@ Requirements:
 
 - Linux 6.7 or later: the write watch uses userfaultfd write protection with `PAGEMAP_SCAN`. SteamOS 3.8 qualifies.
 - A Vulkan 1.3 driver with `VK_EXT_external_memory_host` (RADV, NVIDIA).
+- A newer Mesa than the system's can run the game alone: set `vulkan_driver` in `totk.ini` to its ICD file (for example
+  `vulkan_driver = ~/.local/mesa/share/vulkan/icd.d/radeon_icd.x86_64.json`) in place of a wrapper script
+  ([dkb-testing.md](dkb-testing.md), `DKB_VULKAN_DRIVER`).
 - Packages on Arch:
 
   ```sh

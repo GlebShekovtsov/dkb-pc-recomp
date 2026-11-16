@@ -74,8 +74,29 @@ static void mesa_cache_beside_exe(void) {
     plat_setenv("MESA_SHADER_CACHE_DIR", dir);
 }
 
+#ifndef _WIN32
+// Both Linux drivers cap their shader cache at about 1 GB and evict past it. --warm-shaders builds every stage library
+// into that cache, so a full cache drops libraries the installer built and the game compiles them again in play. The
+// cap goes to 10 GiB unless the player set one: MESA_SHADER_CACHE_MAX_SIZE for Mesa, __GL_SHADER_DISK_CACHE_SIZE
+// (bytes) for NVIDIA's driver. A cap, not a reservation: the cache takes only what the pipelines need. Windows
+// drivers read neither name.
+static void driver_cache_room(void) {
+    char mesa[256], nv[256];
+    int set_mesa = !plat_getenv("MESA_SHADER_CACHE_MAX_SIZE", mesa, sizeof mesa);
+    int set_nv = !plat_getenv("__GL_SHADER_DISK_CACHE_SIZE", nv, sizeof nv);
+    if (set_mesa) plat_setenv("MESA_SHADER_CACHE_MAX_SIZE", "10G");
+    if (set_nv) plat_setenv("__GL_SHADER_DISK_CACHE_SIZE", "10737418240");
+    // the variables are set inside this process, where no outside tool sees them, so the log says what the drivers get
+    rt_log("vk: shader disk cache room: MESA_SHADER_CACHE_MAX_SIZE=%s, __GL_SHADER_DISK_CACHE_SIZE=%s",
+           set_mesa ? "10G (set here)" : mesa, set_nv ? "10737418240 (set here)" : nv);
+}
+#endif
+
 static int create_instance(void) {
     mesa_cache_beside_exe();
+#ifndef _WIN32
+    driver_cache_room();
+#endif
     const char *ext[28];
     uint32_t n_ext = (uint32_t)gfx_window_vk_extensions(ext, 8);
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};

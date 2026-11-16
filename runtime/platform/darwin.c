@@ -988,6 +988,8 @@ int plat_mem_state(uint64_t addr, uint64_t limit, uint64_t *end) {
     return v == PS_FREE ? PLAT_MEM_FREE : v == PS_RESERVED ? PLAT_MEM_RESERVED : v - PS_NONE;
 }
 
+void plat_mem_prewrite(uint64_t addr, uint64_t n) { (void)addr, (void)n; }   // a watched write costs nothing extra here
+
 // No userfaultfd, no PAGEMAP_SCAN: the pages the CPU wrote since the last reset cannot be read back. The caller
 // (vk_memory.c) uploads the whole range again when it sees this.
 uint64_t plat_mem_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t max, int reset) {

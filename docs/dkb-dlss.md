@@ -17,7 +17,8 @@ Needs:
 2. Pick NVIDIA DLSS in the F1 menu's upscaler row, or write `upscaler = dlss` under `[display]` in `dkb.ini`.
 3. Restart the game: NGX adds its Vulkan extensions when the device is made, so DLSS starts only with a run that
    began with `upscaler = dlss`.
-4. Keep `scene_res = auto`. `full` draws the 3D scene at the output size and the game runs no upscale to replace.
+4. Keep `scene_res = auto`, or choose `full` for DLAA (native anti-aliasing, update 3.2.0 only, `docs/dkb-testing.md`).
+   Without that patch `full` draws the 3D scene at the output size and the game runs no upscale to replace.
 5. Read `logs/dkb.log` next to `dkb.exe`. A run with DLSS on has `dlss: NGX core loaded`, then
    `dlss: NGX initialised ...` and, once the game upscales, `dlss: Quality WxH -> WxH, preset K`. Every way it can
    stop logs one `dlss:` line with the reason; a `cfg: ... upscaler = '...' is not one of ...` line means the value
@@ -63,7 +64,9 @@ as before this change: zero motion vectors, a zero depth image, a new history. T
 output to input (DLAA at 1:1).
 
 DLSS only runs where the game runs its own upscaler. `scene_res = full` (`docs/dkb-testing.md`) draws the scene at
-the whole render resolution on purpose, so neither the game's upscaler nor DLSS runs then. When the game draws the scene at the output size (in 150 s
+the whole render resolution on purpose, so neither the game's upscaler nor DLSS runs then, except on update 3.2.0,
+where the patch set `dkbnative` makes the game run its upscale step at that size and DLSS runs as DLAA (the same
+setting runs FSR 3.1 and FSR 4 as native anti-aliasing). When the game draws the scene at the output size (in 150 s
 replays on 1.0.0 with a 1920x1080 output it switched to that partway through the play, at a different point in each
 run), there is no upscaler dispatch to replace and the game's picture is shown as it is.
 

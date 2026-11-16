@@ -85,6 +85,8 @@ uint64_t dkb_wide_heap_extra_kib(void) {
     return heap_extra = pool > DKB_POOL_BASE ? (uint64_t)(pool - DKB_POOL_BASE) >> 10 : 0;
 }
 
+static float scene_ratio_now;   // the ratio dkb_wide_scene wrote, 0 for auto
+
 static void dkb_wide_scene(uint8_t *page, float ratio) {
     int set = rt_patch_set("dkbscene");
     if (set < 0) {
@@ -114,6 +116,7 @@ static void dkb_wide_scene(uint8_t *page, float ratio) {
         memcpy(page + 0x110, &pool, 4);
     }
     memcpy(page + 0x118, &ratio, 4);
+    scene_ratio_now = ratio;
     rt_patch_switch(set, 1);
     // Update 3.2.0 makes each display's 3D image a scale from its render parameters times the display size, 2/3, read
     // at main+79024/79028 (patches-dkb458752.txt, set render3d); the controller's ratio divides that image, so the
@@ -132,8 +135,48 @@ static void dkb_wide_scene(uint8_t *page, float ratio) {
            ratio, ratio, scale_set >= 0 ? ", the 3.2.0 image scale at 1.0" : "", pool >> 20);
 }
 
+// Native anti-aliasing (recomp/patches-dkb458752.txt, set dkbnative; docs/dkb-testing.md). With the 3D drawn at the
+// output size (a scene ratio of 1.0 in effect) the game skips its upscale step's dispatch, so a temporal upscaler (FSR
+// 3.1, FSR 4, DLSS) has nothing to replace. The set makes the game run that dispatch at full size too, from the 3D to
+// an image of the same size, and the upscaler takes it as anti-aliasing alone (FSR 4 Native AA, DLAA). The Upscaler
+// setting is live, so the choice is checked again whenever the settings change (frame_step_present).
+static int native_set = -2, native_on;
+static unsigned native_seen;
+
+// The wrapper the upscale step f_7000325a80 calls to issue the dispatch (main f_7000325f30, 3.2.0): the return address
+// the dispatch records, 0x7000325fc4, lies inside it. Guest code has the same addresses in every run (layout.py).
+#define NATIVE_AA_ISSUER_LO 0x7000325f30ull
+#define NATIVE_AA_ISSUER_HI 0x7000325fe0ull
+
+int dkb_native_aa(void) { return __atomic_load_n(&native_on, __ATOMIC_RELAXED); }
+
+// Whether a same-size dispatch issued from the guest address caller is the game's upscale step run at full size by the
+// set: only while the set is on, and only from the wrapper above, so no other same-size pass of the same shape (a
+// post-process compute pass) is taken for the upscaler (vk_exec_draw.c game_upscaler).
+int dkb_native_aa_issued_by(uint64_t caller) {
+    return dkb_native_aa() && caller >= NATIVE_AA_ISSUER_LO && caller < NATIVE_AA_ISSUER_HI;
+}
+
+void dkb_native_aa_live(void) {
+    unsigned v = cfg_version();
+    if (native_set != -2 && v == native_seen) return;
+    native_seen = v;
+    if (native_set == -2) native_set = rt_patch_set("dkbnative");
+    if (native_set < 0) return;
+    const char *up = cfg_value("TOTK_UPSCALER");
+    int want = scene_ratio_now > 0 && scene_ratio_now < 1.0005f &&
+               (!strcmp(up, "fsr4") || !strcmp(up, "fsr3") || !strcmp(up, "dlss"));
+    if (want == native_on) return;
+    __atomic_store_n(&native_on, want, __ATOMIC_RELAXED);
+    rt_patch_switch(native_set, want);
+    rt_log("Bananza resolution: native anti-aliasing %s (%s with the 3D at the output size: the game's upscale step "
+           "runs at full size for it)", want ? "on" : "off", up);
+}
+
 void dkb_wide_init(void) {
     wide_enabled = 0;
+    scene_ratio_now = 0;
+    native_set = -2, native_on = 0;   // the set is off at start (the generated default) and chosen below
     wide_output[0] = 2880;
     wide_output[1] = 1620;
     int scene_set = rt_patch_set("dkbscene"), scale_set = rt_patch_set("render3d");
@@ -177,4 +220,5 @@ void dkb_wide_init(void) {
     // romfs.c serves the grown HeapDef from here on (res_heapdef_served), which dkb_wide_scene asks about.
     if (dkb_wide_heap_extra_kib()) fs_init();
     if (scene) dkb_wide_scene(page, scene);
+    dkb_native_aa_live();
 }

@@ -233,3 +233,14 @@ site fontk main 554e90 52a00109 52a00409
 # Glyph cache texture x2 each way [49e4a0, 49e4ac]; w9 is stored to +0x28/+0x2c and rewritten.
 site fontk main 5818b8 b9400369 b9400369 531f7929
 site fontk main 5818c8 b9400769 b9400769 531f7929
+
+# Native anti-aliasing (docs/dkb-testing.md, scene_res): the game's upscaler level, in its settings at +0x10, is 0
+# while the 3D is drawn at the output size, and the upscale step (f_7000325a80, called from the frame step
+# f_7000323504 every frame) then skips its dispatch; at a scaled 3D the level is 2. Read as 2 at both of the step's
+# loads, the dispatch runs at full size too, from the 3D to an image of the same size, and a temporal upscaler takes it
+# as anti-aliasing alone. The dispatch is issued by f_7000325f30, which runtime/dkb_wide.c dkb_native_aa_issued_by
+# names so that vk_exec_draw.c game_upscaler takes a same-size dispatch from there and from nowhere else. The runtime
+# turns the set on (dkb_native_aa_live) with FSR 3.1, FSR 4 or DLSS chosen and scene_res = full. 3.2.0 addresses only.
+set dkbnative DKB_NATIVE_AA 0
+site dkbnative main 325bb0 b94012c8 52800048  # ldr w8, [x22, #0x10] -> mov w8, #2
+site dkbnative main 325d10 b9401289 52800049  # ldr w9, [x20, #0x10] -> mov w9, #2

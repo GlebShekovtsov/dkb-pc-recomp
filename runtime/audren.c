@@ -360,19 +360,44 @@ static void render_thread(void *p) {
     const uint64_t frame_ns = (uint64_t)r->param.sample_count * 1000000000ull / (uint64_t)r->param.sample_rate;
     const double frame = (double)r->param.sample_count / r->param.sample_rate;
     uint64_t next = kern_now_ns();
+    const int64_t block = (int64_t)r->param.sample_count;
     while (plat_cas32(&r->running, 0, 0)) {
         uint64_t now = kern_now_ns();
-        int64_t pace = audio_mixer_pace_ns(r, now);
-        if (pace > 0) {
-            plat_wait_ns((uint64_t)pace);
-            continue;
-        }
-        if (pace == 0) {
-            next = now + frame_ns;   // where the timer goes on if the device stops pacing
+        // Even pacing (Linux crackle fix, dkb-pc-recomp #133 / #272): one frame every frame_ns of host time, as the Switch's
+        // DSP renders, nudged by at most 5 % toward the output target so the queue stays there. Rendering whenever the
+        // device had taken the ring below the target made bursts of four or five frames after each large device period
+        // (1024 frames on PipeWire), with no game update between them, and the output clicked at every 240-frame edge.
+        // A burst is still allowed only to refill a nearly empty queue (start, underrun).
+        int64_t have, target, period;
+        if (audio_mixer_fill(r, now, &have, &target, &period)) {
+            if (have > target + 2 * period) {   // well above the target: let the device take some first
+                int64_t ns = (have - target - period) * 1000000000ll / (int64_t)r->param.sample_rate;
+                plat_wait_ns((uint64_t)(ns < 500000 ? 500000 : ns));
+                next = kern_now_ns();
+                continue;
+            }
+            if (have < target - 2 * period || have < 2 * block) {
+                next = now + frame_ns;   // refill now
+            } else {
+                double err = (double)(have - target) / (double)(target > 0 ? target : 1);   // > 0: too full
+                double k = 1.0 + (err * 0.1 > 0.05 ? 0.05 : err * 0.1 < -0.05 ? -0.05 : err * 0.1);
+                if (next > now) plat_wait_ns(next - now);
+                else if (now - next > 100000000ull) next = now;
+                next += (uint64_t)((double)frame_ns * k);
+            }
         } else {
-            if (next > now) plat_wait_ns(next - now);
-            else if (now - next > 100000000ull) next = now;   // fell far behind (debugger, sleep): resynchronise
-            next += frame_ns;
+            int64_t pace = audio_mixer_pace_ns(r, now);
+            if (pace > 0) {
+                plat_wait_ns((uint64_t)pace);
+                continue;
+            }
+            if (pace == 0) {
+                next = now + frame_ns;   // where the timer goes on if the device stops pacing
+            } else {
+                if (next > now) plat_wait_ns(next - now);
+                else if (now - next > 100000000ull) next = now;   // fell far behind (debugger, sleep): resynchronise
+                next += frame_ns;
+            }
         }
         plat_mutex_lock(&r->lock);
         if (r->state == 0) {

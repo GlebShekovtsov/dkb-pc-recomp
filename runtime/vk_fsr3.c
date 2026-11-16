@@ -4,7 +4,8 @@
 // runtime/third_party/fidelityfx and compiled by tools/build_shaders.py into fsr3_*_spv.h), recorded here as dispatches
 // of our own with push descriptors; nothing of AMD's is linked or loaded at run time. The inputs are DLSS's: the
 // scene's jitter, depth and camera motion vectors come from vk_dlss.c (vk_temporal_inputs); the projection gives FSR its
-// near and far distances (camera_factors). A frame without a scene at the input size is left to the game's upscaler.
+// near and far distances (vk_fsr3_camera_factors). A frame without a scene at the input size is left to the game's
+// upscaler.
 //
 // Derived from Hookshot's FSR 3.1 integration (gpu/vk/vk_fsr3.cpp and fsr3_math.h, https://github.com/NotRexed/Hookshot
 // @ fab8cb37641714bd839ae83c2a7bc582bedc4d70, Copyright 2026 Hookshot contributors, GPL-3.0-or-later), rewritten in C
@@ -174,7 +175,7 @@ static int fail(const char *why) {
 // passes' device_to_view_depth ([1] / (depth - [0])). [2] and [3] scale ndc x and y to view x and y per unit distance.
 // 0 for a matrix that is not a perspective projection. (Hookshot fsr3_math.h camera_from_projection, which also flips a
 // forward depth to FSR's reversed one: the passes here are built for the forward depth.)
-static int camera_factors(const float p[16], float f[4]) {
+int vk_fsr3_camera_factors(const float p[16], float f[4]) {
     if (p[12] != 0.0f || p[13] != 0.0f || p[14] != -1.0f || p[15] != 0.0f) return 0;
     if (!(p[0] > 0.0f) || !(p[5] > 0.0f) || !isfinite(p[0]) || !isfinite(p[5])) return 0;
     double a = (1.0 - (double)p[10]) * 0.5, b = (double)p[11] * 0.5;
@@ -713,7 +714,7 @@ int vk_fsr3_record(VkCommandBuffer cb, uint64_t fence, const VkTexImage *in, con
     // Without a scene at the input size (a menu, a cutscene's own passes) the game's upscaler runs this frame, and the
     // next temporal one starts from a reset. A scene whose projection FSR cannot use is the same, but the motion pass
     // may have bound its own pipeline: -1, and the caller binds the game's again.
-    if (!t.temporal || !camera_factors(t.proj, dtv)) {
+    if (!t.temporal || !vk_fsr3_camera_factors(t.proj, dtv)) {
         int bound = t.temporal;
         t.temporal = 0;   // no jitter for the next frame either
         vk_temporal_done(&t, w, h, ow);

@@ -82,6 +82,11 @@ static uint32_t vs_outs(const GfxShader *v,const GfxShader *f,GfxShaderIo io[32]
 // here: this fixture checks the geometry-chain module path only.
 static uint32_t *lq_fold(const GfxShader *src,const uint32_t *w,uint64_t words,uint64_t *out_n) {(void)src;(void)w;(void)words;(void)out_n;return NULL;}
 VkPipelineCreateFlags vk_pipeline_capture_flags(void) {return 0;}
+// The pipeline cache gate (pcache_build_begin/end) is inline in the builders: one thread here, so its locks do nothing.
+void plat_mutex_lock(PlatMutex *m) {(void)m;}
+void plat_mutex_unlock(PlatMutex *m) {(void)m;}
+void plat_cond_wait(PlatCond *c,PlatMutex *m) {(void)c;(void)m;}
+void plat_cond_broadcast(PlatCond *c) {(void)c;}
 static int screen_uv_stage(const GfxShader *src) {(void)src;return 0;}
 uint32_t *spirv_screen_uv(const uint32_t *w,uint64_t n,uint64_t *out_n);
 uint32_t *spirv_fmz(const uint32_t *w,uint64_t n,int vertex_only,uint64_t *out_n,unsigned *nm,unsigned *nf) {(void)w;(void)n;(void)vertex_only;(void)out_n;(void)nm;(void)nf;return NULL;}

@@ -206,9 +206,9 @@ static int load(void) {
 #undef GET
     if (NGX_FAILED(required(&n_inst_ext, &inst_ext, &n_dev_ext, &dev_ext))) n_inst_ext = n_dev_ext = 0;
     rt_log("dlss: NGX core loaded, it asks for %u instance and %u device extensions", n_inst_ext, n_dev_ext);
-    if (!strcmp(cfg_value("TOTK_SCENE_RES"), "full"))   // dkb_wide.c dkb_scene_ratio: the game then runs no upscale
+    if (!strcmp(cfg_value("TOTK_SCENE_RES"), "full") && !dkb_native_aa())   // dkb_wide.c dkb_scene_ratio: no upscale
         rt_log("dlss: scene_res = full draws the 3D scene at the output size, so the game runs no upscale for DLSS to "
-               "replace; set scene_res = auto for DLSS");
+               "replace (update 3.2.0 makes it run one for native anti-aliasing); set scene_res = auto for DLSS");
     return 1;
 }
 
@@ -727,7 +727,7 @@ int vk_temporal_inputs(VkCommandBuffer cb, uint32_t w, uint32_t h, uint32_t ow, 
 }
 
 // After the evaluation of the frame vk_temporal_inputs prepared: this frame's camera is the next one's last, and the
-// next frame's scene is jittered when this one was temporal.
+// next frame's scene is jittered when this one was temporal. The inputs go on to frame interpolation (vk_fsr3fi.c).
 void vk_temporal_done(const VkTemporalIn *t, uint32_t w, uint32_t h, uint32_t ow) {
     S.have = 0, J.used = 0;
     J.w = w, J.h = h, J.frame = frames_now();
@@ -740,6 +740,7 @@ void vk_temporal_done(const VkTemporalIn *t, uint32_t w, uint32_t h, uint32_t ow
         J.prev_ok = 0, jdepth_set(VK_NULL_HANDLE);
     }
     next_jitter(w, ow);
+    vk_fsr3fi_note(t, w, h);   // AMD's frame interpolation takes the same depth and motion at this frame's present
 }
 
 #ifdef _WIN32

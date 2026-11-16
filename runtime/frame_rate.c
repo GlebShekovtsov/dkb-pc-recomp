@@ -379,6 +379,7 @@ static void world_clock(double game) {
 
 void frame_step_present(uint64_t display_ns, int interval) {
     frame_limit_live();
+    if (!rt_game_version) dkb_native_aa_live();   // Bananza: native anti-aliasing follows the live Upscaler setting
     double step = 0, dt = last_ns ? (double)(display_ns - last_ns) * 1e-9 : 0;
     if (step_word && fixed_step) {
         step = STEP_FIRST_S;   // the patch page keeps the 1/60 s frame_step_init stored

@@ -6,7 +6,8 @@ compiler; tools/build_game.py refuses to build when a header no longer matches i
 shader. Needs glslc and spirv-val from MSYS2 UCRT64 (package mingw-w64-ucrt-x86_64-shaderc, spirv-tools).
 
 AMD's FSR 3.1 upscaler passes (runtime/third_party/fidelityfx) are built the same way, each variant with its own defines
-and the SDK's include directory (FSR3_VARIANTS): runtime/fsr3_<variant>_spv.h.
+and the SDK's include directory (FSR3_VARIANTS): runtime/fsr3_<variant>_spv.h. So are the passes of its frame
+interpolation and the optical flow under it (FSR3FI_VARIANTS, runtime/fsr3_fi_*_spv.h and runtime/fsr3_of_*_spv.h).
 
     python tools/build_shaders.py [--check]
 """
@@ -62,6 +63,44 @@ FSR3_VARIANTS = [   # (header name, SDK pass, extra defines)
     ('prepare_reactivity', 'prepare_reactivity', ()),
     ('luma_instability', 'luma_instability', ()),
     ('accumulate', 'accumulate', ()),
+]
+
+# AMD FSR 3.1's frame interpolation and the optical flow it runs on (runtime/vk_fsr3fi.c), from the same SDK. The options
+# are the same promises about the inputs vk_fsr3fi.c is handed, which are the upscaler's: motion vectors at the render
+# size and not jittered, and the game's depth as it is (not reversed). The option names are the interpolation's own, and
+# differ from the upscaler's (LOW_RES_MOTION_VECTORS here, LOW_RESOLUTION_MOTION_VECTORS there); the SDK ignores a name it
+# does not read, so a misspelled one would change nothing and say nothing (tests/fsr3fi_bindings_test.py).
+FI_OPTIONS = ('FFX_GPU=1', 'FFX_GLSL=1',
+              'FFX_FRAMEINTERPOLATION_OPTION_INVERTED_DEPTH=0',
+              'FFX_FRAMEINTERPOLATION_OPTION_LOW_RES_MOTION_VECTORS=1',
+              'FFX_FRAMEINTERPOLATION_OPTION_JITTERED_MOTION_VECTORS=0')
+OF_OPTIONS = ('FFX_GPU=1', 'FFX_GLSL=1')
+FSR3FI_VARIANTS = [   # (header name, SDK folder, pass file, defines)
+    ('fsr3_fi_setup', 'frameinterpolation', 'ffx_frameinterpolation_setup_pass.glsl', FI_OPTIONS),
+    ('fsr3_fi_reconstruct_previous_depth', 'frameinterpolation',
+     'ffx_frameinterpolation_reconstruct_previous_depth_pass.glsl', FI_OPTIONS),
+    ('fsr3_fi_reconstruct_and_dilate', 'frameinterpolation',
+     'ffx_frameinterpolation_reconstruct_and_dilate_pass.glsl', FI_OPTIONS),
+    ('fsr3_fi_game_motion_vector_field', 'frameinterpolation',
+     'ffx_frameinterpolation_game_motion_vector_field_pass.glsl', FI_OPTIONS),
+    ('fsr3_fi_optical_flow_vector_field', 'frameinterpolation',
+     'ffx_frameinterpolation_optical_flow_vector_field_pass.glsl', FI_OPTIONS),
+    ('fsr3_fi_disocclusion_mask', 'frameinterpolation', 'ffx_frameinterpolation_disocclusion_mask_pass.glsl', FI_OPTIONS),
+    ('fsr3_fi_game_vector_field_inpainting_pyramid', 'frameinterpolation',
+     'ffx_frameinterpolation_compute_game_vector_field_inpainting_pyramid_pass.glsl', FI_OPTIONS),
+    ('fsr3_fi_inpainting_pyramid', 'frameinterpolation',
+     'ffx_frameinterpolation_compute_inpainting_pyramid_pass.glsl', FI_OPTIONS),
+    ('fsr3_fi_interpolate', 'frameinterpolation', 'ffx_frameinterpolation_pass.glsl', FI_OPTIONS),
+    ('fsr3_fi_inpainting', 'frameinterpolation', 'ffx_frameinterpolation_inpainting_pass.glsl', FI_OPTIONS),
+    ('fsr3_of_prepare_luma', 'opticalflow', 'ffx_opticalflow_prepare_luma_pass.glsl', OF_OPTIONS),
+    ('fsr3_of_luminance_pyramid', 'opticalflow', 'ffx_opticalflow_compute_luminance_pyramid_pass.glsl', OF_OPTIONS),
+    ('fsr3_of_generate_scd_histogram', 'opticalflow', 'ffx_opticalflow_generate_scd_histogram_pass.glsl', OF_OPTIONS),
+    ('fsr3_of_compute_scd_divergence', 'opticalflow', 'ffx_opticalflow_compute_scd_divergence_pass.glsl', OF_OPTIONS),
+    ('fsr3_of_compute_optical_flow_v5', 'opticalflow', 'ffx_opticalflow_compute_optical_flow_advanced_pass_v5.glsl',
+     OF_OPTIONS),
+    ('fsr3_of_filter_optical_flow_v5', 'opticalflow', 'ffx_opticalflow_filter_optical_flow_pass_v5.glsl', OF_OPTIONS),
+    ('fsr3_of_scale_optical_flow_v5', 'opticalflow', 'ffx_opticalflow_scale_optical_flow_advanced_pass_v5.glsl',
+     OF_OPTIONS),
 ]
 
 INCLUDE = re.compile(rb'^\s*#\s*include\s*"([^"]+)"', re.M)
@@ -120,6 +159,10 @@ def shader_sources(runtime):
         src = sdk / 'shaders' / 'fsr3upscaler' / f'ffx_fsr3upscaler_{p}_pass.glsl'
         if src.exists():   # a --runtime copy without the SDK builds without FSR 3.1's headers
             jobs.append(Job(src, f'fsr3_{name}', FSR3_OPTIONS + extra, inc))
+    for name, folder, p, defs in FSR3FI_VARIANTS:
+        src = sdk / 'shaders' / folder / p
+        if src.exists():
+            jobs.append(Job(src, name, defs, inc))
     return jobs
 
 

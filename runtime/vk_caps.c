@@ -48,6 +48,9 @@ void vk_caps_driver(VkPhysicalDevice p) {
     vk_caps.amd_sc = drv.driverID == VK_DRIVER_ID_AMD_PROPRIETARY && strstr(drv.driverInfo, "shader compiler");
     vk_caps.moltenvk = drv.driverID == VK_DRIVER_ID_MOLTENVK;
     vk_caps.radv = drv.driverID == VK_DRIVER_ID_MESA_RADV;
+    // Navi 48 (device 0x7550: the RX 9070 XT and RX 9070) on AMD's proprietary driver: the one AMD setup the replay
+    // threads were measured on. No driver property tells RDNA 4 apart, so the device id does.
+    vk_caps.amd_slices = vk_caps.amd && drv.driverID == VK_DRIVER_ID_AMD_PROPRIETARY && p2.properties.deviceID == 0x7550;
 }
 
 // TOTK_GPL=0/1 forces graphics pipeline libraries off or on. Default off on AMD's RDNA 1/2 driver branch: every boot

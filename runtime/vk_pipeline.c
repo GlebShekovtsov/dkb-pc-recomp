@@ -131,6 +131,64 @@ typedef struct Pipe {
     uint8_t key[];
 } Pipe;
 
+// ---- pipeline cache gate: no vkGetPipelineCacheData while a pipeline is being built (Intel on Windows)
+//
+// The cache is the driver's to synchronise, and on other drivers the autosave copies it while workers build. Intel's
+// Windows driver crashes in vkGetPipelineCacheData when a build is under way on another thread (Longshot met it every
+// few minutes of play and gates the two the same way: gpu/vk/vk_draw.cpp PcacheFetch and PcacheUse, f41a5c59, #190). There the builds
+// count themselves and the save waits until none runs; a build that starts during the copy (about 60 ms, at most every
+// 20 s) waits for it. Other drivers keep the lock-free path: TOTK_PCACHE_GATE=1 or 0 overrides the choice.
+// Not gated on purpose: gpl_link and the internal pipelines made with a null cache never touch the saved cache, so
+// they cannot race its copy.
+static struct { PlatMutex lock; PlatCond cv; int on, builds, fetching; } pcg = {.lock = PLAT_MUTEX_INIT, .cv = PLAT_COND_INIT, .on = -1};
+
+static int pcache_gate_on(void) {
+    int on = __atomic_load_n(&pcg.on, __ATOMIC_ACQUIRE);
+    if (on >= 0) return on;
+    const char *e = cfg_get("TOTK_PCACHE_GATE");
+#ifdef _WIN32
+    on = vk_ctx()->props.vendorID == 0x8086;
+#else
+    on = 0;
+#endif
+    if (e && *e) on = strcmp(e, "0") != 0;
+    if (on) rt_log("vk_pipeline: the pipeline cache is saved only while no pipeline is being built (%s)",
+                   e && *e ? "TOTK_PCACHE_GATE" : "Intel's Windows driver");
+    __atomic_store_n(&pcg.on, on, __ATOMIC_RELEASE);
+    return on;
+}
+
+static void pcache_build_begin(void) {
+    if (!pcache_gate_on()) return;
+    plat_mutex_lock(&pcg.lock);
+    while (pcg.fetching) plat_cond_wait(&pcg.cv, &pcg.lock);
+    pcg.builds++;
+    plat_mutex_unlock(&pcg.lock);
+}
+
+static void pcache_build_end(void) {
+    if (!pcache_gate_on()) return;
+    plat_mutex_lock(&pcg.lock);
+    if (!--pcg.builds) plat_cond_broadcast(&pcg.cv);
+    plat_mutex_unlock(&pcg.lock);
+}
+
+static void pcache_fetch_begin(void) {   // one fetch at a time: save_lock is held
+    if (!pcache_gate_on()) return;
+    plat_mutex_lock(&pcg.lock);
+    pcg.fetching = 1;   // new builds wait from here, so the count only falls
+    while (pcg.builds) plat_cond_wait(&pcg.cv, &pcg.lock);
+    plat_mutex_unlock(&pcg.lock);
+}
+
+static void pcache_fetch_end(void) {
+    if (!pcache_gate_on()) return;
+    plat_mutex_lock(&pcg.lock);
+    pcg.fetching = 0;
+    plat_cond_broadcast(&pcg.cv);
+    plat_mutex_unlock(&pcg.lock);
+}
+
 static Layout *layouts[LAYOUT_BUCKETS];
 static Pipe *pipes[PIPE_BUCKETS];
 
@@ -1790,7 +1848,9 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
     if (k->fbl & 2) pi.flags |= VK_PIPELINE_CREATE_DEPTH_STENCIL_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
     pi.flags |= vk_pipeline_capture_flags();
     uint64_t p0 = perf_begin();
+    pcache_build_begin();
     VkResult r = vkCreateGraphicsPipelines(P.device, P.cache, 1, &pi, NULL, &pipe);
+    pcache_build_end();
     perf_end(PERF_PIPE, p0);   // counts on the render thread only, so background builds stay out of it
     if (r != VK_SUCCESS) {
         rt_log("vk_pipeline: vkCreateGraphicsPipelines failed (%d)", (int)r);
@@ -1947,7 +2007,9 @@ static VkPipeline lib_create(int kind, const VkPipeState *s, const GKey *k, VkPi
         ri.depthAttachmentFormat = (VkFormat)k->depth, ri.stencilAttachmentFormat = (VkFormat)k->stencil;
         pi.pColorBlendState = &cb, pi.pMultisampleState = &ms;
     }
+    pcache_build_begin();
     if (vkCreateGraphicsPipelines(P.device, P.cache, 1, &pi, NULL, &pipe) != VK_SUCCESS) pipe = VK_NULL_HANDLE;
+    pcache_build_end();
 out:
     if (m) vkDestroyShaderModule(P.device, m, NULL);
     free(patched);
@@ -2160,8 +2222,8 @@ static VkPipeline gpl_link(const VkPipeState *s, const GKey *k, const Layout *lc
 // shaders (gfx_shader_get results) live for the process (gfx_shader_drop_memory is the shader probe's, which builds no
 // pipelines), layouts until vk_pipeline_shutdown, which drains the queue first. Workers call vkCreateGraphicsPipelines
 // without P.lock: P.cache is created without VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT, so the driver
-// synchronises it, vkGetPipelineCacheData in vk_pipeline_save included. Compute pipelines stay synchronous: a skipped
-// dispatch can change what the game computes.
+// synchronises it, vkGetPipelineCacheData in vk_pipeline_save included (except where the pipeline cache gate is on).
+// Compute pipelines stay synchronous: a skipped dispatch can change what the game computes.
 //
 // Two queues: draws' misses (A.head) and the boot prebuild (A.low, see "pipeline keys" below). Workers take the low
 // queue only when the other is empty and run its jobs at PLAT_PRIO_BELOW_NORMAL, so guest threads win. A draw
@@ -2890,7 +2952,9 @@ static VkPipeline compute_create(const GfxShader *cs, const Layout *l) {
                                       .flags = vk_pipeline_capture_flags(), .layout = l->layout};
     pin_subgroup32(&ci.stage, &rqc, code, words);
     VkPipeline pipe = VK_NULL_HANDLE;
+    pcache_build_begin();
     if (vkCreateComputePipelines(P.device, P.cache, 1, &ci, NULL, &pipe) != VK_SUCCESS) pipe = VK_NULL_HANDLE;
+    pcache_build_end();
     vkDestroyShaderModule(P.device, m, NULL);
     return pipe;
 }
@@ -3467,10 +3531,11 @@ void vk_pipeline_save(void) {
     }
     size_t size = 0;
     void *data = NULL;
-    if (vkGetPipelineCacheData(P.device, P.cache, &size, NULL) == VK_SUCCESS && size && (data = malloc(size)) &&
-        vkGetPipelineCacheData(P.device, P.cache, &size, data) == VK_SUCCESS) {
-        if (!plat_file_write_atomic(P.cache_path, data, size)) rt_log("vk_pipeline: cannot write %s", P.cache_path);
-    }
+    pcache_fetch_begin();   // the copy only: builds go on during the file write
+    int got = vkGetPipelineCacheData(P.device, P.cache, &size, NULL) == VK_SUCCESS && size && (data = malloc(size)) &&
+              vkGetPipelineCacheData(P.device, P.cache, &size, data) == VK_SUCCESS;
+    pcache_fetch_end();
+    if (got && !plat_file_write_atomic(P.cache_path, data, size)) rt_log("vk_pipeline: cannot write %s", P.cache_path);
     free(data);
     plat_mutex_unlock(&save_lock);
 }

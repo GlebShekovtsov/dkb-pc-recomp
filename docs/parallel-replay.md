@@ -1,7 +1,7 @@
 # Recording the replay on several threads
 
-Status: in bananza since pull request 195 (`TOTK_REPLAY_THREADS`; by default 4 threads from 8 logical processors since 13 November, and 6 from 12 since pull request 271, except on
-RADV and AMD's RDNA 1/2 driver): big passes are recorded in slices by up to 16 threads, each with a draw context of its own (pull request 190).
+Status: in bananza since pull request 195 (`TOTK_REPLAY_THREADS`; by default 4 threads from 8 logical processors since 13 November, and 6 from 12 since pull request 271, on AMD only the
+RX 9070 and 9070 XT): big passes are recorded in slices by up to 16 threads, each with a draw context of its own (pull request 190).
 The 6-thread default was measured on 16 logical processors only (a Ryzen 7 9800X3D); machines with 12 to 15, and
 Intel chips with performance and efficiency cores, were not measured, and there 6 threads leave fewer processors to
 the game's own threads. The sections below follow the work in the

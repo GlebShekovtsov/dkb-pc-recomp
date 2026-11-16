@@ -1375,6 +1375,93 @@ void vk_gpu_written(uint64_t addr, uint64_t size) {
     vk_guest_written(addr, size);
 }
 
+// One submission's GPU writes with the shadow storage. A heavy Bananza frame reports about 4,400 of them (a thousand
+// 15,000-byte storage buffers among them, 15 MiB in all), and one vk_gpu_written per range cost the completion thread
+// 6.7 ms a frame in the cave after the tutorial: every call searched the whole pending list, took four locks, and its
+// copy faulted once per write-watched page. The game's threads wait for these fences, so that time was frame time. Here
+// the ranges are sorted once, their pages are thawed and marked written in runs (plat_mem_prewrite), the copies run
+// under one hold of the locks, and one pass over the pending list removes them. Without the shadow storage each range
+// goes through vk_gpu_written_into as before.
+static int wb_cmp(const void *x, const void *y) {
+    const uint64_t *a = x, *b = y;
+    return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1];
+}
+
+void vk_gpu_written_many(const VkGpuWrite *in, int n) {
+    if (!shadow_on || n < 4) {
+        for (int i = 0; i < n; i++) vk_gpu_written_into(in[i].addr, in[i].size, in[i].buf);
+        return;
+    }
+    uint64_t (*w)[2] = malloc((size_t)n * sizeof *w);
+    uint8_t *gone = calloc((size_t)n, 1);
+    if (!w || !gone) rt_fatal("vk: out of memory for a write-back batch");
+    int m = 0;
+    for (int i = 0; i < n; i++)
+        if (in[i].size) w[m][0] = in[i].addr, w[m][1] = in[i].addr + in[i].size, m++;   // {lo, hi}
+    qsort(w, (size_t)m, sizeof *w, wb_cmp);
+    pool_lock_shared();
+    plat_mutex_lock(&shadow_lock);
+    // Look each range's pool up first: only a range the copy below takes (the pool has a shadow map covering it) has
+    // its pages thawed and prewritten, so a range outside every pool leaves its pages as they are.
+    PoolRec **pr = calloc((size_t)n, sizeof *pr);
+    if (!pr) rt_fatal("vk: out of memory for a write-back batch");
+    PoolRec *r = NULL;
+    for (int i = 0; i < m; i++) {
+        uint64_t a = w[i][0], size = w[i][1] - a;
+        if (!r || a < r->import_lo || w[i][1] > r->import_hi) {   // sorted: the last pool usually holds the next range
+            const pidx_ent *e = pidx_find(&pool_index, a, size);
+            r = e ? e->buf : NULL;
+        }
+        if (r && r->smap && a >= r->import_lo && w[i][1] <= r->import_hi) pr[i] = r;
+    }
+    // Runs of pages the copies will write: neighbours and ranges on one page become one thaw and one prewrite.
+    for (int i = 0; i < m;) {
+        if (!pr[i]) {
+            i++;
+            continue;
+        }
+        uint64_t lo = w[i][0] & ~0xfffull, hi = (w[i][1] + 0xfff) & ~0xfffull;
+        int j = i + 1;
+        for (; j < m && (!pr[j] || (w[j][0] & ~0xfffull) <= hi); j++)
+            if (pr[j] && ((w[j][1] + 0xfff) & ~0xfffull) > hi) hi = (w[j][1] + 0xfff) & ~0xfffull;
+        mem_thaw(lo, hi - lo);
+        plat_mem_prewrite(lo, hi - lo);
+        i = j;
+    }
+    for (int i = 0; i < m; i++) {
+        if (!pr[i]) continue;
+        uint64_t a = w[i][0], size = w[i][1] - a;
+        memcpy((void *)(uintptr_t)a, pr[i]->smap + (a - pr[i]->import_lo), size);
+        s_wb_bytes += size;
+    }
+    // Each range leaves the pending list once, as vk_gpu_written removes one entry per call: equal ranges are
+    // neighbours in w, and gone[] marks the ones that found their entry.
+    int kept = 0, removed = 0;
+    for (int i = 0; i < nspend; i++) {
+        uint64_t key[2] = {spend[i].lo, spend[i].hi};
+        int lo = 0, hi = m;
+        while (lo < hi) {
+            int mid = lo + (hi - lo) / 2;
+            if (wb_cmp(w[mid], key) < 0) lo = mid + 1;
+            else hi = mid;
+        }
+        while (lo < m && gone[lo] && !wb_cmp(w[lo], key)) lo++;
+        if (removed < m && lo < m && !wb_cmp(w[lo], key)) gone[lo] = 1, removed++;
+        else spend[kept++] = spend[i];
+    }
+    if (kept != nspend) nspend = kept, spend_dirty = 1;
+    plat_mutex_unlock(&shadow_lock);
+    plat_mutex_unlock_shared(&pool_lock);
+    plat_mutex_lock(&gen_lock);
+    uint32_t g = ++gen_now;
+    for (int i = 0; i < m; i++)
+        if (!nvn_gpu_only(w[i][0])) stamp_range(w[i][0] & ~0xfffull, (w[i][1] + 0xfff) & ~0xfffull, g);
+    plat_mutex_unlock(&gen_lock);
+    free(gone);
+    free(pr);
+    free(w);
+}
+
 // As vk_gpu_written, for a write the GPU made into buffer buf. When buf is the VRAM mirror of the pool holding the range,
 // the mirror has the GPU's bytes, and vk_mem_mirror_end copies them into guest memory (or vk_mem_gpu_kept keeps them in
 // the mirror). The stamp still tells every other reader of guest memory (the texture checks), but the pool's next

@@ -185,5 +185,8 @@ void audio_mixer_render(AudioRenderer *r, double seconds);   // after audio_voic
 // many ns (the ring is at its target), -1 leaves the pace to the render thread's timer (no device, renderer stopped,
 // device stalled).
 int64_t audio_mixer_pace_ns(AudioRenderer *r, uint64_t now);
+// While the output device paces rendering: 1, with the queued output frames, the output target and the device period.
+// 0 when the device does not pace (no device, stopped, stalled): the render thread keeps its own timer then.
+int audio_mixer_fill(AudioRenderer *r, uint64_t now, int64_t *have, int64_t *target, int64_t *period);
 int audio_buffer_empty(const AudrenWaveBuffer *b);   // no samples to decode: played as soon as it is reached
 void audio_device_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs);   // IAudioDevice

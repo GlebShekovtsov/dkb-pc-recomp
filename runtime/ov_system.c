@@ -80,6 +80,7 @@ static const char *switch_language(const char *tag) {
         !strcmp(lang, "ru") || !strcmp(lang, "ko") || !strcmp(lang, "pt"))
         return !strcmp(lang, "ja") ? "ja" : !strcmp(lang, "de") ? "de" : !strcmp(lang, "it") ? "it"
              : !strcmp(lang, "nl") ? "nl" : !strcmp(lang, "ru") ? "ru" : !strcmp(lang, "ko") ? "ko" : "pt";
+    if (!strcmp(lang, "pl")) return "pl";   // Eglantine: Set::LanguageCode::PL = "pl", ApplicationLanguage::Polish
     if (!strcmp(lang, "fr")) return !strcmp(region, "CA") ? "fr-CA" : "fr";
     if (!strcmp(lang, "es")) return *region && strcmp(region, "ES") ? "es-419" : "es";
     if (!strcmp(lang, "zh"))
@@ -96,11 +97,12 @@ static const char *switch_language(const char *tag) {
 // spellings, which older totk.ini files and menus wrote, are mapped to them.
 const char *ov_language(void) {
     static const char *const codes[] = {"ja", "en-US", "fr", "de", "it", "es", "ko", "nl", "pt", "ru",
-                                        "en-GB", "fr-CA", "es-419", "zh-Hans", "zh-Hant", "pt-BR"};
+                                        "en-GB", "fr-CA", "es-419", "zh-Hans", "zh-Hant", "pt-BR", "pl"};
     const char *code = cfg_get("TOTK_LANG");   // no fixed default: TOTK_LOCALE or the Windows user locale decides when unset
     if (code && *code) {
         if (!strcmp(code, "zh-CN")) return "zh-Hans";
         if (!strcmp(code, "zh-TW")) return "zh-Hant";
+        if (!strcmp(code, "EUpl")) return "pl";   // the game's own name for Polish (Mals/EUpl)
         for (size_t i = 0; i < sizeof codes / sizeof *codes; i++)
             if (!strcmp(code, codes[i])) return codes[i];
         rt_fatal("TOTK_LANG '%s' is not a Switch language code", code);

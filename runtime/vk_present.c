@@ -191,7 +191,20 @@ static int build_swapchain(void) {
     VkResult r = vkCreateSwapchainKHR(c->device, &ci, NULL, &g_sc);
     if (r != VK_SUCCESS) {
         rt_log("gfx: vkCreateSwapchainKHR failed (%d)", (int)r);
-        g_sc = old;
+        // A failed create still retires the swapchain it was given as oldSwapchain: that one can neither be acquired
+        // from nor passed as oldSwapchain again (VUID-VkSwapchainCreateInfoKHR-oldSwapchain-01933). It goes with its
+        // views and semaphores, and vk_present_frame builds a new one from nothing on a later frame. Hookshot does the
+        // same (gpu/vk/vk_main.cpp create_swapchain).
+        for (uint32_t i = 0; i < g_sc_n; i++) {
+            vkDestroySemaphore(c->device, g_render_done[i], NULL);
+            if (g_sc_view[i]) vkDestroyImageView(c->device, g_sc_view[i], NULL);
+            g_sc_view[i] = VK_NULL_HANDLE;
+        }
+        if (old) vkDestroySwapchainKHR(c->device, old, NULL);
+        g_sc = VK_NULL_HANDLE;
+        if (g_sc_hdr) vk_hdr_release();   // the device is idle here
+        __atomic_store_n(&g_sc_hdr, 0, __ATOMIC_RELEASE);
+        g_sc_n = 0;
         vk_queue_unlock();
         if (hdr) {   // once: vk_hdr_off makes the next pick SDR
             rt_log("hdr: the HDR10 swapchain could not be created; trying SDR");
@@ -417,7 +430,8 @@ static void save_capture(const char *path) {
 }
 
 // The rectangle {x, y, w, h} of a dw x dh swapchain image the cw x ch picture goes into; gfx_window.c fits it.
-static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w, int h, const int crop[4], int defer) {
+static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w, int h, const int crop[4], int defer,
+                          int held) {
     if (gfx_window_exiting()) return;
     int general = layout == VK_IMAGE_LAYOUT_GENERAL;
     if (hdr_trace_on()) {   // DKB_HDR_TRACE: the window texture's format when it changes (HDR10 in the game's HDR mode)
@@ -427,7 +441,7 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
             last_fmt = (int)fmt, last_w = w, last_h = h;
         }
     }
-    gfx_window_start();
+    if (!held) gfx_window_start();   // held: the caller started the window before it took the present lock
     VkCtx *c = vk_ctx();
     plat_rmutex_lock(&g_pl);
     if (gfx_window_exiting()) { plat_rmutex_unlock(&g_pl); return; }
@@ -657,12 +671,25 @@ out:
 }
 
 void vk_present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w, int h, const int crop[4]) {
-    present_image(src, layout, fmt, w, h, crop, 0);
+    present_image(src, layout, fmt, w, h, crop, 0, 0);
+}
+
+// vk_present_image for a caller that holds the present lock and called gfx_window_start before it took it
+// (vk_framegen.c display_main). gfx_window_start takes the start lock, which must never be taken under the present
+// lock: the exit (gfx_exit_release) holds the start lock while vk_present_release waits for the present lock.
+void vk_present_image_held(VkImage src, VkImageLayout layout, VkFormat fmt, int w, int h, const int crop[4]) {
+    present_image(src, layout, fmt, w, h, crop, 0, 1);
 }
 
 void vk_present_blit(VkImage src, VkImageLayout layout, VkFormat fmt, int w, int h, const int crop[4]) {
-    present_image(src, layout, fmt, w, h, crop, 1);
+    present_image(src, layout, fmt, w, h, crop, 1, 0);
 }
+
+// The present lock, for a caller that must not present after vk_present_release freed what it presents (vk_framegen.c
+// display_main): the release runs under it. The caller presents with vk_present_image_held, having called
+// gfx_window_start before taking it.
+void vk_present_lock(void) { plat_rmutex_lock(&g_pl); }
+void vk_present_unlock(void) { plat_rmutex_unlock(&g_pl); }
 
 void vk_present_flip(void) {
     plat_rmutex_lock(&g_pl);
@@ -700,6 +727,7 @@ void vk_present_release(void) {
         vk_fsr_release();
         vk_smaa_release();
         vk_fg_release();
+        vk_fsr3fi_release();
         vk_color_release();
         vk_hdr_release();
         free_capture();

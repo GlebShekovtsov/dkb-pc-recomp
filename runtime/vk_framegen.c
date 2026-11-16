@@ -1,21 +1,40 @@
-// Frame generation (TOTK_FRAME_GEN = 2x; off by default, experimental): a frame made between each two of the game's, from
-// their motion, shown first, then the game's own frame half an interval later. A C rewrite of Hookshot's
-// gpu/vk/vk_framegen.cpp (https://github.com/NotRexed/Hookshot @ fab8cb37641714bd839ae83c2a7bc582bedc4d70, GPL-3.0) with
-// its shaders runtime/shaders/fg_*.comp:
+// Frame generation (TOTK_FRAME_GEN = auto, 2x to 8x; off by default, experimental): frames made between each two of the
+// game's, from their motion. A C rewrite of Hookshot's gpu/vk/vk_framegen.cpp (https://github.com/NotRexed/Hookshot @
+// fab8cb37641714bd839ae83c2a7bc582bedc4d70, GPL-3.0; Auto, the multipliers above 2x, the sets and the display thread from
+// https://git.notrexed.dev/Hookshot/Hookshot @ 7191250b7b0f8a4becd79ee086229a2620872fc7) with its shaders
+// runtime/shaders/fg_*.comp:
 //   1. the crop of the window texture is copied into an RGBA8 history image (the game draws over its texture next frame)
 //      and reduced to quarter-size luma;
 //   2. block matching of the luma against the frame before: a vector per 16x16 pixels within +-32 pixels, then a 3x3 median;
-//   3. the frame at t = 0.5 blends the last frame moved back and the new one forward along the vectors.
-// The present thread (vk_backend.c present_main) calls vk_fg_record with the game's texture before its blit, then, when a
-// made frame exists, vk_fg_show in place of the blit: the made frame goes through vk_present_image, the history copy of
-// the game's frame through vk_present_blit, and its flip waits until half an interval after the made one. Both go
-// through the whole present chain (colour, FSR, SMAA, HDR, overlay), so the overlay is never interpolated. The game's
-// texture is read only by the command buffer vk_fg_record submits, and the swapchain is touched only through
-// vk_present_image and vk_present_flip.
+//   3. a frame at each time t between the two blends the last frame moved back and the new one forward along the vectors.
+//
+// 2x: one made frame at t = 0.5, shown first, then the game's own frame half an interval later. The present thread
+// (vk_backend.c present_main) calls vk_fg_record with the game's texture before its blit (it returns 1), then vk_fg_show
+// in place of the blit: the made frame goes through vk_present_image, the history copy of the game's frame through
+// vk_present_blit, and its flip waits until half an interval after the made one. With frame_gen_by = fsr3
+// (TOTK_FRAME_GEN_BY) the made frame comes from AMD FSR 3.1's frame interpolation instead of steps 2 and 3
+// (vk_fsr3fi.c), over the depth and motion of the frame's temporal upscaler (vk_fg_record's fi); a frame it cannot
+// make gets the built-in one.
+//
+// Auto and 3x to 8x (vk_fg_record returns 2), two threads as in Hookshot. A fixed multiplier m gives each game frame as
+// many frames as the display can show, m at most (fg_pace_fixed_frames): the made ones at t = k / n, then the game's own.
+// Auto gives each of the display's refreshes between two game frames a frame made at its place between them
+// (fg_pace_auto_slots), shown one game frame time later at its refresh's time; a refresh next to a game frame shows that
+// frame itself. The present thread makes the game frame's set (the made frames and a copy of the game's own, so the history
+// can move on) into one of three sets, submits it, and queues it. It waits only when all three sets are still being shown,
+// which holds the game back as Hookshot's sets do. The display thread (display_main) takes the sets in order and shows each
+// frame through vk_present_image on an even line: the game's frame time over the set's frames apart, never more than one
+// game frame behind what the game handed over, a line that fell behind starting again from now (fg_pace_show_due); a made
+// frame is left out when the next set is already waiting.
+//
+// Every frame goes through the whole present chain (colour, FSR, SMAA, HDR, overlay), so the overlay is never
+// interpolated. The game's texture is read only by the command buffer vk_fg_record submits, and the swapchain is touched
+// only through vk_present_image and vk_present_flip (and, from the display thread, under the present lock).
 // Any failure turns the pass off for the session with one log line, and the present goes on as without it.
 #include "vk.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "cfg.h"
@@ -30,6 +49,7 @@
 #include "ui/menu.h"   // gfx_window_present_mode
 
 #define HIST_FMT VK_FORMAT_R8G8B8A8_UNORM
+#define SETS 3   // one shown, one waiting its place on the line, one being made: the display thread never holds the game back
 
 typedef struct {
     VkImage img;
@@ -46,6 +66,18 @@ typedef struct {
     uint32_t samplers;
 } Pipe;
 
+// One game frame's frames, in the order shown (Auto and 3x to 8x): frame[k] is a made frame or a copy of the game's own
+// (game[k]).
+typedef struct {
+    Image frame[FG_MAX_MULT];   // frame[0..S.frames) exist: the most a game frame may be given in this mode
+    int n, timed;               // the frames shown; timed (Auto): each at due[k], else on the display thread's line
+    int game[FG_MAX_MULT];
+    int64_t due[FG_MAX_MULT];
+    uint32_t w, h;
+    uint64_t frame_no;          // the game frame for the thumbnails and the dump (vk_thumbs_frame), 0 none
+    int busy;                   // made and not yet all shown (D.mu)
+} Set;
+
 static struct {
     int tried, dead, said;   // said: bits of the reasons already logged (SAY_*)
     PFN_vkCmdPushDescriptorSetKHR push;
@@ -54,7 +86,13 @@ static struct {
     VkCommandPool pool;
     VkCommandBuffer cb;
     VkFence fence;
-    Image hist[2], luma_img[2], flow_img[2], made;
+    Image hist[2], luma_img[2], flow_img[2], made;   // made: the 2x frame
+    Set sets[SETS];
+    int frames;           // 0: the 2x path (made); else the images of each set: Auto's cap, or the multiplier
+    int next_set;         // the set the next record fills
+    int64_t slot_next;    // Auto: the display's next refresh to be given a frame (fg_pace_auto_slots)
+    int said_n;           // the frames a game frame got at the last "asked, made" log line; 0 = none yet
+    uint64_t said_at;
     uint32_t w, h;        // the crop size the images were made for; 0 = none
     VkFormat fmt_ok;      // the last window texture format found to have BLIT_SRC
     VkFormat fmt_bad;     // the last one found without it
@@ -64,18 +102,44 @@ static struct {
     uint64_t last_at;     // when the previous job reached vk_fg_record; 0 = none
     int64_t interval;     // the game's frame interval, fg_pace_interval
     // the 5 s log
-    uint64_t t0, real, made_n, no_hist, hitch, over, crop, cut, late;
+    uint64_t t0, real, made_n, by_fsr, no_hist, hitch, over, crop, cut, late;
 } S;
 // S and the images are touched by vk_fg_record (the present thread) and vk_fg_release (the exit, under vk_present.c's g_pl
 // first: that order everywhere), so each holds this lock for its whole run; vk_fg_show copies what it needs and presents
-// without it.
+// without it. The display thread reads a set only between its queueing and its busy flag going down, and takes neither
+// this lock nor S.
 static PlatMutex fgl = PLAT_MUTEX_INIT;
-enum { SAY_HDR = 1, SAY_MODE = 2, SAY_GAME = 4, SAY_FMT = 8, SAY_BLIT = 16 };
+enum { SAY_HDR = 1, SAY_MODE = 2, SAY_GAME = 4, SAY_FMT = 8, SAY_BLIT = 16, SAY_SLOW = 32, SAY_NOFI = 64 };
+
+// The display thread's queue: the sets made and not yet taken, in order (D.mu, signalled on D.cv). dead is set by
+// vk_fg_release under the present lock, and the display thread reads it under that lock before each present, so it
+// never presents an image the release freed; nothing waits on the display thread once it is set.
+static struct {
+    PlatMutex mu;
+    PlatCond cv;
+    int jobs[SETS], at_head, count;
+    int64_t job_at[SETS];
+    int started, dead;
+    uint64_t gen;   // bumped by vk_fg_release (D.mu): a set made before it is not presented after it
+} D = {.mu = PLAT_MUTEX_INIT, .cv = PLAT_COND_INIT};
 
 static void say(int bit, const char *msg, int arg) {
     if (S.said & bit) return;
     S.said |= bit;
     rt_log(msg, arg);
+}
+
+// Waits until the display thread has shown every set it was given (or the release ended it). Before the sets' images
+// are freed or remade, and before the present thread presents a frame of its own again.
+static void display_idle(void) {
+    plat_mutex_lock(&D.mu);
+    for (;;) {
+        int busy = D.count;
+        for (int i = 0; i < SETS; i++) busy |= S.sets[i].busy;
+        if (!busy || D.dead || !D.started) break;
+        plat_cond_wait_ms(&D.cv, &D.mu, 100);
+    }
+    plat_mutex_unlock(&D.mu);
 }
 
 static VkResult make_pipe(VkCtx *c, Pipe *p, const uint32_t *code, size_t size, uint32_t samplers, uint32_t push) {
@@ -142,7 +206,10 @@ static int make_image(VkCtx *c, Image *i, VkFormat fmt, uint32_t w, uint32_t h, 
 static void free_images(VkCtx *c) {
     for (int i = 0; i < 2; i++) free_image(c, &S.hist[i]), free_image(c, &S.luma_img[i]), free_image(c, &S.flow_img[i]);
     free_image(c, &S.made);
+    for (int s = 0; s < SETS; s++)
+        for (int i = 0; i < FG_MAX_MULT; i++) free_image(c, &S.sets[s].frame[i]);
     S.w = S.h = 0;
+    S.frames = 0;
     S.have_prev = 0;
 }
 
@@ -160,6 +227,7 @@ static void free_all(VkCtx *c) {
 static int fail(VkCtx *c, const char *what) {
     rt_log("fg: %s: off", what);
     S.dead = 1;
+    display_idle();    // the sets already queued go out first
     vk_queue_lock();   // an earlier present may still read the images
     vkDeviceWaitIdle(c->device);
     vk_queue_unlock();
@@ -231,11 +299,21 @@ static int init(VkCtx *c) {
     return 1;
 }
 
-// Images for a w x h crop. A new size waits for the device (the earlier jobs' images may still be read) and starts the
-// history again.
-static int ensure_images(VkCtx *c, uint32_t w, uint32_t h) {
-    if (S.w == w && S.h == h) return 1;
-    if (S.w) {   // earlier jobs' images may still be read; the first allocation has nothing to wait for
+// TOTK_FRAME_GEN: 0 off, 1 Auto, 2 to FG_MAX_MULT the fixed multiplier. Another value is off.
+static int fg_mode(void) {
+    const char *v = cfg_value("TOTK_FRAME_GEN");
+    if (!strcmp(v, "auto")) return 1;
+    if (v[0] >= '2' && v[0] <= '0' + FG_MAX_MULT && v[1] == 'x' && !v[2]) return v[0] - '0';
+    return 0;
+}
+
+// Images for a w x h crop. frames 0 is the 2x path (one made image); otherwise `frames` images in each of the SETS sets.
+// A new size or count waits for the display thread and the device (the earlier jobs' images may still be read, the sets
+// still shown) and starts the history again.
+static int ensure_images(VkCtx *c, uint32_t w, uint32_t h, int frames, int mode) {
+    if (S.w == w && S.h == h && S.frames == frames) return 1;
+    if (S.w) {   // the first allocation has nothing to wait for
+        display_idle();
         vk_queue_lock();   // vkDeviceWaitIdle needs every queue left alone
         vkDeviceWaitIdle(c->device);
         vk_queue_unlock();
@@ -243,7 +321,13 @@ static int ensure_images(VkCtx *c, uint32_t w, uint32_t h) {
     free_images(c);
     uint32_t qw = (w + 3) / 4, qh = (h + 3) / 4, cw = (qw + 3) / 4, ch = (qh + 3) / 4;
     const VkImageUsageFlags work = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    int ok = make_image(c, &S.made, HIST_FMT, w, h, work | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    int ok = 1;
+    if (!frames) ok = make_image(c, &S.made, HIST_FMT, w, h, work | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    // a set's frames are written by the synthesis pass or copied from the history, and blitted to the window
+    for (int s = 0; s < SETS && ok; s++)
+        for (int i = 0; i < frames && ok; i++)
+            ok = make_image(c, &S.sets[s].frame[i], HIST_FMT, w, h,
+                            work | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
     for (int i = 0; i < 2 && ok; i++)
         ok = make_image(c, &S.hist[i], HIST_FMT, w, h, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                                                           VK_IMAGE_USAGE_TRANSFER_SRC_BIT) &&
@@ -254,8 +338,14 @@ static int ensure_images(VkCtx *c, uint32_t w, uint32_t h) {
         snprintf(msg, sizeof msg, "images %ux%u not made", w, h);
         return fail(c, msg);
     }
-    S.w = w, S.h = h, S.fresh = 1;
-    rt_log("fg: frame generation 2x on (experimental): made at %ux%u, history RGBA8", w, h);
+    S.w = w, S.h = h, S.frames = frames, S.fresh = 1;
+    if (mode == 1)
+        rt_log("fg: frame generation Auto on (experimental): a frame for each of the display's refreshes (%.0f Hz; up to %d "
+               "a game frame), made at %ux%u, history RGBA8, %d sets", gfx_window_refresh_hz(), frames, w, h, SETS);
+    else if (frames)
+        rt_log("fg: frame generation %dx on (experimental): made at %ux%u, history RGBA8, %d sets", mode, w, h, SETS);
+    else
+        rt_log("fg: frame generation 2x on (experimental): made at %ux%u, history RGBA8", w, h);
     return 1;
 }
 
@@ -270,9 +360,14 @@ static void full_barrier(VkCommandBuffer cb) {
 
 // The first command buffer after (re)allocation moves every image to GENERAL, where they stay.
 static void to_general(VkCommandBuffer cb) {
-    const Image *all[] = {&S.hist[0], &S.hist[1], &S.luma_img[0], &S.luma_img[1], &S.flow_img[0], &S.flow_img[1], &S.made};
-    VkImageMemoryBarrier2 b[7];
-    for (int i = 0; i < 7; i++)
+    enum { MOST = 7 + SETS * FG_MAX_MULT };
+    const Image *all[MOST] = {&S.hist[0], &S.hist[1], &S.luma_img[0], &S.luma_img[1], &S.flow_img[0], &S.flow_img[1]};
+    uint32_t n = 6;
+    if (!S.frames) all[n++] = &S.made;
+    for (int s = 0; s < SETS; s++)
+        for (int i = 0; i < S.frames; i++) all[n++] = &S.sets[s].frame[i];   // only those that exist: a barrier on no image is invalid
+    VkImageMemoryBarrier2 b[MOST];
+    for (uint32_t i = 0; i < n; i++)
         b[i] = (VkImageMemoryBarrier2){.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
                                        .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                                        .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
@@ -281,7 +376,7 @@ static void to_general(VkCommandBuffer cb) {
                                        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                                        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = all[i]->img,
                                        .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
-    VkDependencyInfo d = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 7, .pImageMemoryBarriers = b};
+    VkDependencyInfo d = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = n, .pImageMemoryBarriers = b};
     vkCmdPipelineBarrier2(cb, &d);
 }
 
@@ -306,18 +401,107 @@ static void log_stats(uint64_t now) {
     if (!S.t0) S.t0 = now;
     if (now - S.t0 < 5000000000ull) return;
     double s = (double)(now - S.t0) / 1e9;
-    rt_log("fg: %.1f s: real %.1f fps, shown %.1f fps, made %u; skipped: no history %u, hitch %u, over refresh %u, crop %u; "
-           "real cut short %u; late >2 ms %u", s, (double)S.real / s, (double)(S.real + S.made_n) / s, (unsigned)S.made_n,
-           (unsigned)S.no_hist, (unsigned)S.hitch, (unsigned)S.over, (unsigned)S.crop, (unsigned)S.cut, (unsigned)S.late);
-    S.t0 = now, S.real = S.made_n = S.no_hist = S.hitch = S.over = S.crop = S.cut = S.late = 0;
+    if (S.frames)   // Auto and 3x to 8x: the display thread shows the frames and counts what it shows (display_main)
+        rt_log("fg: %.1f s: real %.1f fps, made %u (%.1f a second); game frames without made ones: no history %u, hitch %u, "
+               "over refresh %u, crop %u", s, (double)S.real / s, (unsigned)S.made_n, (double)S.made_n / s,
+               (unsigned)S.no_hist, (unsigned)S.hitch, (unsigned)S.over, (unsigned)S.crop);
+    else
+        rt_log("fg: %.1f s: real %.1f fps, shown %.1f fps, made %u (by AMD FSR 3.1 %u); skipped: no history %u, "
+               "hitch %u, over refresh %u, crop %u; real cut short %u; late >2 ms %u", s, (double)S.real / s,
+               (double)(S.real + S.made_n) / s, (unsigned)S.made_n, (unsigned)S.by_fsr, (unsigned)S.no_hist, (unsigned)S.hitch, (unsigned)S.over, (unsigned)S.crop,
+               (unsigned)S.cut, (unsigned)S.late);
+    S.t0 = now, S.real = S.made_n = S.by_fsr = S.no_hist = S.hitch = S.over = S.crop = S.cut = S.late = 0;
 }
 
-static int record(VkImage src, VkFormat fmt, int w, int h, const int crop[4]) {
+// Waits until at: a sleep to 1 ms before it, then yields (the sleep alone wakes up to ~0.5 ms late), as Hookshot's
+// display thread waits (vk_framegen.cpp wait_until_near).
+static void wait_until(int64_t at) {
+    int64_t now = (int64_t)kern_now_ns();
+    if (at > now + 1500000) plat_wait_ns((uint64_t)(at - now - 1000000));
+    while ((int64_t)kern_now_ns() < at) plat_yield();
+}
+
+// The display thread (Hookshot vk_framegen.cpp display_main): takes the sets in the order they were made and shows
+// their frames on the pacer's line (fg_pace_show_due). Its 5 s line is Hookshot's, so the two logs compare directly.
+static void display_main(void *arg) {
+    (void)arg;
+    int64_t interval = 16666667, last_at = 0, next_show = 0, shown_at = 0, since = 0;
+    int on_time = 0, late = 0, skipped = 0, hist[6] = {0};
+    plat_mutex_lock(&D.mu);
+    for (;;) {
+        while (!D.count) plat_cond_wait(&D.cv, &D.mu);
+        const int si = D.jobs[D.at_head];
+        const int64_t at = D.job_at[D.at_head];
+        const uint64_t gen = D.gen;
+        D.at_head = (D.at_head + 1) % SETS, D.count--;
+        plat_mutex_unlock(&D.mu);
+        Set *st = &S.sets[si];
+        if (last_at) {
+            const int64_t d = at - last_at;
+            if (d > 0 && !fg_pace_hitch(d)) interval = fg_pace_interval(interval, d);
+        }
+        last_at = at;
+        if (!since) since = at;
+        if (at - since > 5000000000ll) {
+            rt_log("fg: frame interpolation: %d frames shown on time, %d late (over 2 ms), %d made ones left out (the game's "
+                   "next frame waiting); shown apart: <7 ms %d, 7-9 %d, 9-12 %d, 12-17 %d, 17-25 %d, over 25 %d", on_time,
+                   late, skipped, hist[0], hist[1], hist[2], hist[3], hist[4], hist[5]);
+            memset(hist, 0, sizeof hist);
+            on_time = late = skipped = 0, since = at;
+        }
+        const int timed = st->timed, shown = st->n;
+        const int64_t step = interval / (shown > 1 ? shown : 1);
+        for (int k = 0; k < shown; k++) {
+            // A made frame is left out when the next set is already waiting: the display thread behind the game holds
+            // its sets, and the game waits for them. The set's game frame is always shown.
+            if (!st->game[k]) {
+                plat_mutex_lock(&D.mu);
+                const int newer = D.count > 0;
+                plat_mutex_unlock(&D.mu);
+                if (newer) {
+                    skipped++;
+                    continue;
+                }
+            }
+            const int64_t now = (int64_t)kern_now_ns();
+            const int64_t due = fg_pace_show_due(timed, st->due[k], next_show, now, at, interval, step);
+            wait_until(due);
+            const int64_t t = (int64_t)kern_now_ns();
+            // The start lock (gfx_window_start) before the present lock, never under it: the exit holds the start lock
+            // while vk_present_release waits for the present lock (vk_present_image_held).
+            gfx_window_start();
+            vk_present_lock();   // the release frees the images under this lock and sets D.dead first
+            plat_mutex_lock(&D.mu);   // g_pl, then D.mu: the release's order
+            const int live = !D.dead && gen == D.gen;
+            plat_mutex_unlock(&D.mu);
+            if (live) {
+                if (st->game[k] && st->frame_no) vk_thumbs_frame(st->frame_no);   // the thumbnail and the dump name the game's frame
+                vk_present_image_held(st->frame[k].img, VK_IMAGE_LAYOUT_GENERAL, HIST_FMT, (int)st->w, (int)st->h, NULL);
+            }
+            vk_present_unlock();
+            if (shown_at) {
+                const int64_t d = t - shown_at;
+                hist[d < 7000000 ? 0 : d < 9000000 ? 1 : d < 12000000 ? 2 : d < 17000000 ? 3 : d < 25000000 ? 4 : 5]++;
+            }
+            shown_at = t;
+            next_show = t + step;
+            if (t - due > 2000000) late++;
+            else on_time++;
+        }
+        plat_mutex_lock(&D.mu);
+        st->busy = 0;
+        plat_cond_broadcast(&D.cv);
+    }
+}
+
+static int record(VkImage src, VkFormat fmt, int w, int h, const int crop[4], const VkFiInputs *fi, uint64_t frame_no) {
     VkCtx *c = vk_ctx();
     if (S.dead || !c) return 0;
     if (gfx_window_closing()) return 0;   // the exit is about to free everything below
-    if (strcmp(cfg_value("TOTK_FRAME_GEN"), "2x")) {   // off, or turned off while running: hand the images back
+    const int mode = fg_mode();
+    if (!mode) {   // off, or turned off while running: hand the images back once the display thread showed its sets
         if (S.w) {
+            display_idle();
             vk_queue_lock();
             vkDeviceWaitIdle(c->device);
             vk_queue_unlock();
@@ -336,21 +520,29 @@ static int record(VkImage src, VkFormat fmt, int w, int h, const int crop[4]) {
     if (cw <= 0 || ch <= 0) return 0;
     // Where no frames are made (one log line each): the HDR picture (PQ code values: not for a blend); TotK, whose
     // back-edge pacing (vk_backend.c present_hold) the paced show replaces; window textures that are not 8-bit UNORM; and
-    // FIFO, where the two acquires and presents of a job would block the present thread and halve the game's rate.
-    const char *mode = gfx_window_present_mode();
+    // FIFO, where the two acquires and presents of a job would block the present thread and halve the game's rate (the
+    // display thread's presents would block on the display and hold the sets back).
+    const char *pmode = gfx_window_present_mode();
     int skip = 0;
     if (fmt == VK_FORMAT_A2B10G10R10_UNORM_PACK32 && hdr_native_on()) skip = 1, say(SAY_HDR, "fg: native HDR picture: no made frames", 0);
     else if (rt_game_version != 0) skip = 1, say(SAY_GAME, "fg: not Bananza: no made frames", 0);
     else if (fmt != VK_FORMAT_R8G8B8A8_UNORM && fmt != VK_FORMAT_B8G8R8A8_UNORM)
         skip = 1, say(SAY_FMT, "fg: window texture format %d is not 8-bit UNORM: no made frames", (int)fmt);
-    else if (!*mode) skip = 1;   // no swapchain yet
-    else if (strcmp(mode, "mailbox") && strcmp(mode, "immediate"))
+    else if (!*pmode) skip = 1;   // no swapchain yet
+    else if (strcmp(pmode, "mailbox") && strcmp(pmode, "immediate"))
         skip = 1, say(SAY_MODE, "fg: present mode fifo: no made frames (needs mailbox or immediate)", 0);
     if (skip) {
         S.have_prev = 0, S.last_at = 0;
         return 0;
     }
-    if (!S.tried && !init(c)) return 0;
+    if (!S.tried) {
+        if (!init(c)) return 0;
+        // a device made again after a release: the display thread presents again. D.mu only: vk_present_release holds
+        // the present lock and then takes fgl, so taking the present lock here, under fgl, would invert that order.
+        plat_mutex_lock(&D.mu);
+        D.dead = 0;
+        plat_mutex_unlock(&D.mu);
+    }
     if (fmt != S.fmt_ok) {
         if (fmt != S.fmt_bad) {
             VkFormatProperties fp;
@@ -365,6 +557,7 @@ static int record(VkImage src, VkFormat fmt, int w, int h, const int crop[4]) {
         S.fmt_ok = fmt;
     }
     uint64_t now = kern_now_ns();
+    const uint64_t before = S.last_at;
     int64_t gap = S.last_at ? (int64_t)(now - S.last_at) : 0;
     int hitch = S.last_at && fg_pace_hitch(gap);
     S.last_at = now;
@@ -372,14 +565,69 @@ static int record(VkImage src, VkFormat fmt, int w, int h, const int crop[4]) {
     if (gap && !hitch) S.interval = fg_pace_interval(S.interval, gap);
     if (S.w && ((uint32_t)cw != S.w || (uint32_t)ch != S.h)) S.crop++;
     if (hitch) S.hitch++;
-    if (!ensure_images(c, (uint32_t)cw, (uint32_t)ch)) return 0;
-    int blend = S.have_prev && !hitch;   // ensure_images cleared have_prev on a new size
-    if (blend && fg_pace_over_refresh(S.interval, gfx_window_refresh_hz())) blend = 0, S.over++;   // the display cannot show 2x
+    const double hz = gfx_window_refresh_hz();
+    // the images are made once for the most a game frame may be given: Auto's cap, or the multiplier's frames (2x: one)
+    const int frames = mode == 2 ? 0 : mode == 1 ? fg_pace_auto_cap(hz) : mode;
+    if (!ensure_images(c, (uint32_t)cw, (uint32_t)ch, frames, mode)) return 0;
+    int blend = S.have_prev && !hitch;   // ensure_images cleared have_prev on a new size or count
+    if (!frames && blend && fg_pace_over_refresh(S.interval, hz)) blend = 0, S.over++;   // the display cannot show 2x
     if (!blend && !hitch && !S.fresh && !S.have_prev) S.no_hist++;
     S.real++;
 
+    // Auto and 3x to 8x: the set to fill. It waits while the display thread still shows all three (the game is held back
+    // then, as by Hookshot's sets).
+    Set *st = NULL;
+    float t[FG_MAX_MULT];
+    int n = 0, any_made = blend;
+    if (frames) {
+        plat_mutex_lock(&D.mu);
+        const uint64_t wait0 = kern_now_ns();
+        while (S.sets[S.next_set].busy && !D.dead) plat_cond_wait_ms(&D.cv, &D.mu, 100);
+        const uint64_t waited = kern_now_ns() - wait0;
+        const int dead = D.dead;
+        st = &S.sets[S.next_set];
+        st->busy = !dead;
+        S.next_set = (S.next_set + 1) % SETS;
+        plat_mutex_unlock(&D.mu);
+        if (dead) return 0;
+        if (waited > 1000000000ull) say(SAY_SLOW, "fg: a set waited over 1 s for the display thread", 0);
+
+        // the set: its frames' places between the last game frame and this one in t (1: this game frame)
+        st->timed = mode == 1;
+        if (blend && mode == 1) {   // Auto: a frame for each of the display's refreshes, at its own time
+            int64_t at[FG_MAX_MULT];
+            n = fg_pace_auto_slots((int64_t)before, (int64_t)now, (int64_t)(1e9 / (hz > 0 ? hz : 60.0)), &S.slot_next, t, at,
+                                   S.frames);
+            for (int k = 0; k < n; k++) st->game[k] = t[k] > 0.999f, st->due[k] = at[k] + S.interval;
+        } else if (blend) {   // a fixed multiplier: the made frames at k / n, then the game's own
+            n = fg_pace_fixed_frames(mode, hz, S.interval);
+            if (n != S.said_n && (!S.said_n || now - S.said_at > 5000000000ull)) {
+                if (n < mode)
+                    rt_log("fg: %dx asked, %dx made: the display's %.0f Hz over the game's %.0f fps (the game keeps its rate)",
+                           mode, n, hz, S.interval > 0 ? 1e9 / (double)S.interval : 0.0);
+                else if (S.said_n) rt_log("fg: %dx made", n);
+                S.said_n = n, S.said_at = now;
+            }
+            if (n < 2) S.over++;   // the display shows the game's frames alone
+            for (int k = 0; k < n; k++) st->game[k] = k == n - 1, t[k] = (float)(k + 1) / (float)n;
+        } else {   // nothing to blend from: the game's frame, and Auto's timeline starts at it
+            n = 1, st->game[0] = 1, t[0] = 1.0f, st->due[0] = (int64_t)now + S.interval;
+            S.slot_next = (int64_t)now + (int64_t)(1e9 / (hz > 0 ? hz : 60.0));
+        }
+        st->n = n, st->w = (uint32_t)cw, st->h = (uint32_t)ch, st->frame_no = frame_no;
+        any_made = 0;
+        for (int k = 0; k < n; k++) any_made |= !st->game[k];
+    }
+
     // the previous job's command buffer is done long ago; the wait is for the fence's sake
-    if (vkWaitForFences(c->device, 1, &S.fence, VK_TRUE, 5000000000ull) != VK_SUCCESS) return fail(c, "fence wait timed out");
+    if (vkWaitForFences(c->device, 1, &S.fence, VK_TRUE, 5000000000ull) != VK_SUCCESS) {
+        if (st) {
+            plat_mutex_lock(&D.mu);
+            st->busy = 0;
+            plat_mutex_unlock(&D.mu);
+        }
+        return fail(c, "fence wait timed out");
+    }
     VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
     vkResetCommandBuffer(S.cb, 0);
@@ -390,7 +638,9 @@ static int record(VkImage src, VkFormat fmt, int w, int h, const int crop[4]) {
     const int cur = S.cur, prev = cur ^ 1;
     const uint32_t uw = (uint32_t)cw, uh = (uint32_t)ch, qw = (uw + 3) / 4, qh = (uh + 3) / 4, fw = (qw + 3) / 4,
                    fh = (qh + 3) / 4;
-    full_barrier(cb);   // the game's writes (earlier submissions) and the earlier presents' reads of our images
+    // the game's writes (earlier submissions), and the earlier presents' reads of our images, which went to the same
+    // queue before this
+    full_barrier(cb);
     VkImageBlit region = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                           .srcOffsets = {{cx, cy, 0}, {cx + cw, cy + ch, 1}},
                           .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{0, 0, 0}, {cw, ch, 1}}};
@@ -400,19 +650,51 @@ static int record(VkImage src, VkFormat fmt, int w, int h, const int crop[4]) {
     VkDescriptorImageInfo in[3];
     in[0] = (VkDescriptorImageInfo){S.nearest, S.hist[cur].view, G};
     pass(cb, &S.luma, in, S.luma_img[cur].view, qw, qh, NULL, 0);
-    if (blend) {
+    // 2x with frame_gen_by = fsr3: AMD's interpolation makes the frame where the upscaler gave this frame's depth and
+    // motion (vk_fsr3fi.c; a size that is not the 3D's shape, a first frame after a gap and a camera cut it refuses).
+    // The flow and synthesis passes below then run only for a frame it did not make (the luma above always runs: the
+    // built-in flow of a later frame reads it).
+    int by_amd = 0;
+    if (!frames && any_made && vk_fsr3fi_wanted()) {
+        if (fi && fi->valid)
+            by_amd = vk_fsr3fi_generate(cb, fi, S.hist[cur].view, S.hist[prev].view, S.made.view, uw, uh);
+        else
+            say(SAY_NOFI, "fg: frame_gen_by = fsr3 needs the depth and motion of a temporal upscaler (upscaler = dlss, "
+                          "fsr3 or fsr4, with the 3D drawn below the output size): the built-in interpolation makes this "
+                          "frame", 0);
+    }
+    if (by_amd) S.made_n++, S.by_fsr++;
+    if (any_made && !by_amd) {
         in[0] = (VkDescriptorImageInfo){S.nearest, S.luma_img[prev].view, G};
         in[1] = (VkDescriptorImageInfo){S.nearest, S.luma_img[cur].view, G};
         pass(cb, &S.flow, in, S.flow_img[0].view, fw, fh, NULL, 0);
         in[0] = (VkDescriptorImageInfo){S.nearest, S.flow_img[0].view, G};
         pass(cb, &S.median, in, S.flow_img[1].view, fw, fh, NULL, 0);
-        const float t = 0.5f;
         in[0] = (VkDescriptorImageInfo){S.linear, S.hist[prev].view, G};
         in[1] = (VkDescriptorImageInfo){S.linear, S.hist[cur].view, G};
         in[2] = (VkDescriptorImageInfo){S.nearest, S.flow_img[1].view, G};
-        pass(cb, &S.synth, in, S.made.view, uw, uh, &t, sizeof t);
+        if (!frames) {
+            const float half = 0.5f;
+            pass(cb, &S.synth, in, S.made.view, uw, uh, &half, sizeof half);
+            S.made_n++;
+        }
+        for (int k = 0; k < n; k++)
+            if (!st->game[k]) {
+                pass(cb, &S.synth, in, st->frame[k].view, uw, uh, &t[k], sizeof t[k]);
+                S.made_n++;
+            }
     }
-    // the last barrier orders later writes to the game's texture (the next submissions) after our blit's read of it
+    // the game's own frame goes into the set too: the history image is written again two frames on, while the set may
+    // still be waiting its turn
+    for (int k = 0; k < n; k++)
+        if (st->game[k]) {
+            const VkImageCopy cp = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                                    {0, 0, 0}, {uw, uh, 1}};
+            vkCmdCopyImage(cb, S.hist[cur].img, G, st->frame[k].img, G, 1, &cp);
+        }
+    // the last barrier orders later writes to the game's texture (the next submissions) after our blit's read of it, and
+    // the display thread's blits of the set after its writes
+    if (frames) full_barrier(cb);
     vkEndCommandBuffer(cb);
     VkCommandBufferSubmitInfo cbi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = cb};
     VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .commandBufferInfoCount = 1, .pCommandBufferInfos = &cbi};
@@ -422,6 +704,11 @@ static int record(VkImage src, VkFormat fmt, int w, int h, const int crop[4]) {
     vk_queue_unlock();
     if (r != VK_SUCCESS) {
         vk_device_fault_report(r);
+        if (st) {
+            plat_mutex_lock(&D.mu);
+            st->busy = 0;
+            plat_mutex_unlock(&D.mu);
+        }
         char msg[64];
         snprintf(msg, sizeof msg, "submit failed (%d)", (int)r);
         return fail(c, msg);
@@ -429,13 +716,29 @@ static int record(VkImage src, VkFormat fmt, int w, int h, const int crop[4]) {
     S.shown = cur;
     S.cur = prev;
     S.have_prev = 1;
-    if (blend) S.made_n++;
-    return blend;
+    if (!frames) return blend;
+    // Auto and 3x to 8x: to the display thread, which starts with the first set
+    plat_mutex_lock(&D.mu);
+    if (!D.started) {
+        if (!plat_thread_spawn(display_main, NULL, "vk fg display", 0)) {
+            st->busy = 0;
+            plat_mutex_unlock(&D.mu);   // fail waits on the display queue under this lock
+            return fail(c, "cannot start the display thread");
+        }
+        D.started = 1;
+    }
+    const int tail = (D.at_head + D.count) % SETS;
+    D.jobs[tail] = (int)(st - S.sets), D.job_at[tail] = (int64_t)now, D.count++;
+    plat_cond_broadcast(&D.cv);
+    plat_mutex_unlock(&D.mu);
+    return 2;   // Auto: also a set of no frames, when the game outruns the display and this frame has no refresh
 }
 
-int vk_fg_record(VkImage src, VkFormat fmt, int w, int h, const int crop[4]) {
+int vk_fg_record(VkImage src, VkFormat fmt, int w, int h, const int crop[4], const VkFiInputs *fi, uint64_t frame_no) {
     plat_mutex_lock(&fgl);
-    int r = record(src, fmt, w, h, crop);
+    int r = record(src, fmt, w, h, crop, fi, frame_no);
+    // a frame the display thread does not get is presented by the caller (or by vk_fg_show): the sets before it go out first
+    if (r != 2) display_idle();
     plat_mutex_unlock(&fgl);
     return r;
 }
@@ -470,7 +773,14 @@ void vk_fg_show(int (*pending)(void), uint64_t frame) {
     plat_mutex_unlock(&fgl);
 }
 
-void vk_fg_release(void) {
+void vk_fg_release(void) {   // under the present lock, device idle
+    plat_mutex_lock(&D.mu);
+    D.gen++;
+    D.dead = 1;   // first: the display thread presents nothing more, and nothing waits on it
+    for (int s = 0; s < SETS; s++) S.sets[s].busy = 0;
+    D.count = 0;
+    plat_cond_broadcast(&D.cv);
+    plat_mutex_unlock(&D.mu);
     VkCtx *c = vk_ctx();
     plat_mutex_lock(&fgl);
     if (c && S.tried) {

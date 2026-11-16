@@ -28,7 +28,7 @@ fps_limit = 60
 # Release cached textures earlier (the default is 90, in percent of VRAM)
 tex_vram_pressure = 75
 
-# Record big render passes on several threads (Automatic is 6 from 12 logical processors and 4 from 8, not on RADV or AMD's RDNA 1/2 driver)
+# Record big render passes on several threads (Automatic is 6 from 12 logical processors and 4 from 8, on AMD only the RX 9070 and 9070 XT)
 replay_threads = 6
 
 # Submit the GPU work in smaller parts, so the GPU starts sooner (defaults: 64 draws, 1000 us)

@@ -109,6 +109,35 @@ Defaults chosen from these runs (13 November, build of bananza with the pre-impo
 | 8 logical processors, old defaults | 49.8 and 50.5 | 23.7 and 26.3 | 371 and 389 | |
 | 8 logical processors, `TOTK_REPLAY_THREADS=4` | 54.1 and 54.3 | 26.1 and 23.5 | 165 and 185 | |
 
-So `TOTK_REPLAY_THREADS` defaults to 4 from 8 logical processors (6 from 12; not on RADV or AMD's RDNA 1/2 driver, not measured there) and `TOTK_HEAP_LAZY`
+So `TOTK_REPLAY_THREADS` defaults to 4 from 8 logical processors (6 from 12; on AMD only the RX 9070 and 9070 XT, the cards measured) and `TOTK_HEAP_LAZY`
 to 1 on Windows.
 - Run-to-run noise is about 2 fps, and 3 in the 1% low.
+
+## Linux: the write-back of GPU results (14 November)
+
+Measured on an RX 7900 XTX with RADV (Mesa 26.2.7) and a 16-thread CPU, standing still in the cave after the tutorial
+on 1.0.0 at 1920x1080: 5,230 draws a frame, the GPU busy about 5 ms a frame, and 46 to 47 fps. No thread was busy for a
+whole frame (the busiest, the one that replays, 51 % of a core in a 20 s `perf` sample), so the frame was waiting, not
+working: the game's threads waited 7.8 ms a frame on fences.
+
+Those fences are held up by the shadow storage's write-back (`vk_memory.c`, "shadow storage"): the frame reports about
+4,400 GPU writes into CPU-visible memory, a thousand 15,000-byte storage buffers among them, 15 MiB in all, and the
+completion thread copied each back with its own search of the pending list, its own locks and a write-protection
+fault per page, 6.7 ms of CPU a frame. `vk_gpu_written_many` does a submission's ranges in one pass.
+
+| Build | fps | Frame | Fence wait of the game's threads |
+| --- | --- | --- | --- |
+| one call per range | 46.8 and 47.1 | 21.3 ms | 7.8 ms |
+| one pass per submission | 56.9 and 57.1 | 17.6 ms | 4.5 ms |
+| the 15,000-byte write-backs skipped (a test, not a fix: the game reads some results back) | 59.8 and 59.8 | 16.7 ms | 2.2 to 3.8 ms |
+
+Ruled out in the same scene: `DKB_REPLAY_THREADS` 2, 4 and 8 (46 to 48 fps), the generated code at `-O2` instead of
+`-O1` (46.7 and 47.4 against 46.8), `DKB_REPLAY_ASYNC=1` (32 fps: the game falls to two vsyncs a frame) and
+`DKB_SHADOW=0` (2 fps on Linux, as the shadow storage's comment says). What is left on the replaying thread is the
+write-watch query before each submit, about 2.5 ms a frame over 530 MiB. Copying a GPU write back only when the CPU
+touches its pages would remove the rest of the write-back; the last table row is its upper bound here.
+
+Again on 3.2.0 (16 November, `bananza` dba3a15 without and with this change, the same card and driver): standing still
+in the first cave of Ingot Isle at 1920x1080, the game's own upscaler, frame generation off: 49.2 and 49.3 fps before,
+59.6 and 59.1 after; the slowest frame 71.5 and 64.5 ms before, 25.7 and 26.3 ms after; the replaying thread busy
+20.3 ms a frame before, 14.2 and 16.1 ms after.

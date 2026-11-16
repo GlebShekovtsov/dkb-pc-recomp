@@ -136,6 +136,10 @@
 # Which GPU to use: its index in the log, or part of its name. Default: the first discrete GPU with Vulkan 1.3.
 # gpu_index = 0
 # gpu_name = NVIDIA
+# Linux: a Vulkan driver of your own for this game only, such as a Mesa build outside the system's folders: the path of
+# its ICD .json file ("~" expands), for example ~/.local/mesa/share/vulkan/icd.d/radeon_icd.x86_64.json. Empty uses the
+# system's drivers. A VK_DRIVER_FILES or VK_ICD_FILENAMES already set in the environment wins. Read at start.
+# vulkan_driver =
 # Game resolution: the size the game draws its picture and interface in (1280x720 to 7680x4320). Above 1920x1080 the
 # game's texture heap and memory pool grow with it. Another shape than 16:9, such as 3440x1440 on a 21:9 monitor or
 # the Steam Deck's 1280x800 (16:10), gives the camera's view that shape and lays the HUD out for it. The installer
@@ -161,7 +165,8 @@
 # a GPU with no FSR 4 (NVIDIA), the log has one "fsr4:" line saying why and FSR 3.1 runs instead.
 # upscaler = fsr
 # Bananza only: auto keeps the game's dynamic 3D resolution (usually two thirds of output_res on each side), full draws
-# the 3D scene at output_res (sharper, more GPU cost; no upscaler or DLSS then), a ratio from 1.0 to 3.0 draws it at
+# the 3D scene at output_res (sharper, more GPU cost; no upscaler then, except that on update 3.2.0 upscaler = fsr3,
+# fsr4 or dlss runs at that size as native anti-aliasing, docs/dkb-testing.md), a ratio from 1.0 to 3.0 draws it at
 # output_res divided by that ratio and upscales it to output_res (1.5 with upscaler = dlss: DLSS Quality at output_res).
 # Read at start.
 # scene_res = auto
@@ -170,12 +175,22 @@
 # the window (FSR or bilinear) and before the menu is drawn, so the game's HUD is smoothed as well. Changes while the game
 # runs take effect at once.
 # smaa = off
-# Frame generation (experimental, Donkey Kong Bananza only): off (the default) or 2x. At 2x a frame is made between each two of the game's, from their
-# motion, and shown first, then the game's own frame half a frame later, so a game at 30 fps is shown at 60. The menu
-# overlay is drawn on every shown frame and is never interpolated. No frame is made after a gap of over 100 ms, when the
-# picture's size changes, for the game's own HDR picture, when the display's refresh is below the doubled rate, or unless
-# vk_present is mailbox or immediate. Changes while the game runs take effect at once.
+# Frame generation (experimental, Donkey Kong Bananza only): off (the default), auto, or 2x to 8x. Frames are made between
+# each two of the game's, from their motion. At 2x one is made and shown first, then the game's own frame half a frame
+# later, so a game at 30 fps is shown at 60. auto gives each refresh of the display between two game frames a frame, up
+# to 4 a game frame (the refresh over 30 fps), shown one game frame later. 3x to 8x make that many frames for each of the
+# game's, and no more than the display can show: a game at 60 fps on a 165 Hz display gets 2 whatever the multiplier. The
+# menu overlay is drawn on every shown frame and is never interpolated. No frame is made after a gap of over 100 ms, when
+# the picture's size changes, for the game's own HDR picture, when the display's refresh is below the rate asked, or
+# unless vk_present is mailbox or immediate. Changes while the game runs take effect at once.
 # frame_gen = off
+# What makes the frames of frame_gen = 2x (experimental): builtin, the default, from the picture alone; fsr3, AMD FSR 3.1's
+# frame interpolation, which also uses the scene's depth and motion. fsr3 runs only while a temporal upscaler (upscaler =
+# dlss, fsr3 or fsr4) draws the 3D below the output size, at 2x, with the display's refresh over twice the game's rate; a
+# frame it cannot make (no depth or motion, a camera cut, the first frame after a gap) gets the built-in one, and the other
+# frame_gen values always use the built-in one. The game's HUD is interpolated with the scene. Changes while the game runs
+# take effect at once.
+# frame_gen_by = builtin
 # Picture shape when the window's shape differs from the game resolution's (a 16:9 picture in a 21:9 fullscreen
 # window): fit, the default, keeps the shape, with black bars at the sides or above and below, so a 16:9 game in a wider
 # window is no longer stretched as it used to be; stretch fills the window. Changes while the game runs take effect at

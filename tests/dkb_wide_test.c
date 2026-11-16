@@ -8,7 +8,9 @@
 
 static unsigned checks, failures, page_reads, fs_calls, fs_out[2], fs_scene_on;
 static int setting, set_index, scene_index, switched, scene_switched, heapdef_grown, fs_wide;
-static const char *resolution, *scene_res;
+static int native_index = -1, native_switched, native_switches;
+static unsigned settings_version;
+static const char *resolution, *scene_res, *upscaler = "fsr";
 static uint8_t test_page[4096];
 
 #define CHECK(c) do { checks++; if (!(c)) { \
@@ -20,18 +22,22 @@ int cfg_bool(const char *key) {
     return setting;
 }
 const char *cfg_value(const char *key) {
-    CHECK(!strcmp(key, "TOTK_OUTPUT_RES") || !strcmp(key, "TOTK_SCENE_RES"));
-    return key[5] == 'O' ? resolution : scene_res;
+    CHECK(!strcmp(key, "TOTK_OUTPUT_RES") || !strcmp(key, "TOTK_SCENE_RES") || !strcmp(key, "TOTK_UPSCALER"));
+    return !strcmp(key, "TOTK_UPSCALER") ? upscaler : key[5] == 'O' ? resolution : scene_res;
 }
+// dkb_native_aa_live reads the settings version to check the Upscaler setting again after a change.
+unsigned cfg_version(void) { return settings_version; }
 int rt_patch_set(const char *name) {
     if (!strcmp(name, "dkbscene")) return scene_index;
     if (!strcmp(name, "render3d")) return -1;
+    if (!strcmp(name, "dkbnative")) return native_index;
     CHECK(!strcmp(name, "dkbwide"));
     return set_index;
 }
 void rt_patch_switch(int set, int on) {
-    CHECK(set == 0 || set == scene_index);
+    CHECK(set == 0 || set == scene_index || set == native_index);
     if (set == 0) switched = on;
+    else if (set == native_index) native_switched = on, native_switches++;
     else scene_switched = on;
 }
 void *rt_patch_page(void) { page_reads++; return test_page; }
@@ -47,6 +53,9 @@ void fs_init(void) {
 static void reset(const char *text) {
     resolution = text;
     scene_res = "auto";
+    upscaler = "fsr";
+    native_index = -1;
+    native_switched = native_switches = 0;
     scene_index = -1;
     heapdef_grown = 0;
     scene_switched = 0;
@@ -178,7 +187,46 @@ static void scene_pool(void) {
     CHECK(page_pool() >= dkb_wide_pool_bytes(7680, 4320));
 }
 
+// Native anti-aliasing: on only with the set present, the 3D at the output size and a temporal upscaler chosen; it
+// follows the live Upscaler setting; and only a dispatch issued from the upscale step's wrapper counts as the game's
+// upscaler.
+static void native_aa(void) {
+    reset("3840x2160");
+    heapdef_grown = 1;   // else the ratio is raised to what the stock GSys heap holds (dkb_wide_scene)
+    scene_res = "full", scene_index = 1, native_index = 2, upscaler = "fsr4";
+    dkb_wide_init();
+    CHECK(dkb_native_aa() == 1 && native_switched == 1);
+    upscaler = "fsr", settings_version++;
+    dkb_native_aa_live();
+    CHECK(dkb_native_aa() == 0 && native_switched == 0);
+    upscaler = "dlss";
+    dkb_native_aa_live();   // the settings did not change: not looked at again
+    CHECK(dkb_native_aa() == 0);
+    settings_version++;
+    dkb_native_aa_live();
+    CHECK(dkb_native_aa() == 1 && native_switched == 1);
+    int n = native_switches;
+    settings_version++;
+    dkb_native_aa_live();
+    CHECK(native_switches == n);   // unchanged: no switch
+    CHECK(dkb_native_aa_issued_by(0x7000325fc4ull));
+    CHECK(!dkb_native_aa_issued_by(0x7000325f2cull) && !dkb_native_aa_issued_by(0x7000325fe0ull));
+    CHECK(!dkb_native_aa_issued_by(0));
+    upscaler = "bilinear", settings_version++;
+    dkb_native_aa_live();
+    CHECK(!dkb_native_aa_issued_by(0x7000325fc4ull));   // set off: nothing is taken
+    reset("3840x2160");   // a scaled 3D, auto, and no set
+    scene_res = "1.5", scene_index = 1, native_index = 2, upscaler = "fsr4";
+    dkb_wide_init();
+    CHECK(dkb_native_aa() == 0);
+    reset("3840x2160");
+    scene_res = "full", scene_index = 1, native_index = -1, upscaler = "fsr4";
+    dkb_wide_init();
+    CHECK(dkb_native_aa() == 0 && native_switches == 0);
+}
+
 int main(void) {
+    native_aa();
     heap_extras();
     ordering();
     scene_pool();

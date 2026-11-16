@@ -31,6 +31,7 @@
 #include "host.h"
 #include "platform/platform.h"
 #include "sha256.h"
+#include "vk_driver_env.h"
 
 #define MAX_MODULES 16
 
@@ -544,6 +545,9 @@ static void require_cpu(void) {
 int main(int argc, char **argv) {
     require_cpu();
     mem_init();   // first: claim the guest address space before anything else can land there; reads totk.ini
+    // Right after the settings can be read and before anything loads or calls the Vulkan loader (SDL's video init,
+    // vk_init): the loader reads VK_DRIVER_FILES when it first lists the drivers.
+    vk_driver_env_apply();
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
     plat_crash_hook(crash_handler);

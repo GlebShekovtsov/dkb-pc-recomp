@@ -487,6 +487,12 @@ area = "gfx"
 cmd = ["{python}", "tests/fg_pace_test.py", "--cc", "{cc}"]
 
 [[test]]
+name = "fsr3fi-bindings"
+tier = 0
+area = "shaders"
+cmd = ["{python}", "tests/fsr3fi_bindings_test.py"]
+
+[[test]]
 name = "geometry-feature-flags"
 tier = 1
 area = "geometry"
