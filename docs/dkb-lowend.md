@@ -109,6 +109,6 @@ Defaults chosen from these runs (13 November, build of bananza with the pre-impo
 | 8 logical processors, old defaults | 49.8 and 50.5 | 23.7 and 26.3 | 371 and 389 | |
 | 8 logical processors, `TOTK_REPLAY_THREADS=4` | 54.1 and 54.3 | 26.1 and 23.5 | 165 and 185 | |
 
-So `TOTK_REPLAY_THREADS` defaults to 4 from 8 logical processors (not on AMD, not measured there) and `TOTK_HEAP_LAZY`
+So `TOTK_REPLAY_THREADS` defaults to 4 from 8 logical processors (6 from 12; not on RADV or AMD's RDNA 1/2 driver, not measured there) and `TOTK_HEAP_LAZY`
 to 1 on Windows.
 - Run-to-run noise is about 2 fps, and 3 in the 1% low.
