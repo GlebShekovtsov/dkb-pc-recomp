@@ -240,8 +240,14 @@ static void unlock(void) {
 // so they never wait for the walk.
 static int tex_frozen;   // tex_lock
 
-static void hold_barrier(void) {   // tex_lock held
+// TOTK_TRACE=perf: the walk's waits for held slices by what made it wait (HOLD_*), their count and ns.
+enum { HOLD_NEW, HOLD_RELEASED, HOLD_REDESCRIBED, HOLD_GPU_WRITTEN, HOLD_UPLOAD, HOLD_OTHER, HOLD_N };
+static uint64_t hold_n[HOLD_N], hold_ns[HOLD_N];
+static void hold_barrier_why(int why);
+static void hold_barrier(void) { hold_barrier_why(HOLD_OTHER); }
+static void hold_barrier_why(int why) {   // tex_lock held
     if (!vk_exec_held_pending()) return;
+    uint64_t w0 = kern_now_ns();
     tex_frozen++;
     uint64_t t0 = holds_on > 0 ? kern_now_ns() : 0;
     uint32_t depth = plat_rmutex_release(&tex_lock);
@@ -249,6 +255,7 @@ static void hold_barrier(void) {   // tex_lock held
     plat_rmutex_retake(&tex_lock, depth);
     if (t0) hold_t0 += kern_now_ns() - t0;   // the lock was not held meanwhile: TOTK_LOCK_HOLDS leaves the wait out
     tex_frozen--;
+    hold_n[why]++, hold_ns[why] += kern_now_ns() - w0;
 }
 
 void vk_texture_hold_barrier(void) {
@@ -752,7 +759,7 @@ static void astc_check(const Tex *e, const uint8_t *raw, const VkAstcRegion *ar,
 // Copies the whole storage into the image (every level and layer the image has).
 static void upload(Tex *e) {
     static volatile int32_t n_bad, n_undecoded;
-    hold_barrier();   // the copy goes to the queue ahead of a held part (vk_sync_split_finish), whose slices may sample e
+    hold_barrier_why(HOLD_UPLOAD);   // the copy goes to the queue ahead of a held part (vk_sync_split_finish), whose slices may sample e
     const tex_t *t = &e->t;
     const nvn_texdesc *d = &t->d;
     int bw, bh, bpb = nvn_fmt_bpb(d->format, &bw, &bh);
@@ -1060,8 +1067,17 @@ static Tex *entry_of(const tex_t *t) {
     TexKey k;
     make_key(t, &k);
     Tex *e = nvn_hm_get(&by_key, &k);
-    if ((!e || e->released || memcmp(&e->t, t, sizeof *t)) && vk_exec_held_pending())
-        hold_barrier(), e = nvn_hm_get(&by_key, &k);   // a held slice may have made it meanwhile
+    if ((!e || e->released || memcmp(&e->t, t, sizeof *t)) && vk_exec_held_pending()) {
+        int why = !e ? HOLD_NEW : e->released ? HOLD_RELEASED : HOLD_REDESCRIBED;
+        static int told;
+        if ((rt_trace & RT_TRACE_PERF) && told < 24) {
+            told++;
+            const char *const what[] = {"new", "released", "re-described"};
+            rt_log("perf: the walk waits for held slices at a %s texture %ux%u format %#x at %#llx", what[why], t->d.width,
+                   t->d.height, (unsigned)t->d.format, (unsigned long long)k.addr);
+        }
+        hold_barrier_why(why), e = nvn_hm_get(&by_key, &k);   // a held slice may have made it meanwhile
+    }
     if (vk_spec_helper()) {
         // The helper thread only reads: an entry to create, to take back into use or to describe anew is the replay
         // thread's to change, at its own position in the submission.
@@ -1206,7 +1222,7 @@ void vk_texture_gpu_written(const tex_t *t) {
 
 static void gpu_written_entry(Tex *e) {
     {
-        if (!e->pub.gpu_owned) hold_barrier(), vk_spec_world_changed();   // a helper part or a held slice may have checked or uploaded it as CPU-owned
+        if (!e->pub.gpu_owned) hold_barrier_why(HOLD_GPU_WRITTEN), vk_spec_world_changed();   // a helper part or a held slice may have checked or uploaded it as CPU-owned
         e->pub.gpu_owned = 1;
         uint64_t f = vk_exec_recording_fence();
         if (f > e->wr_fence) e->wr_fence = f;
@@ -1494,6 +1510,13 @@ void vk_texture_new_submit(void) {
         uint64_t ck, calls, untr;
         vk_mem_snap_stats(&ck, &calls, &untr);
         holds_log(f * 60);
+        rt_log("perf: frame %llu: waits for held slices: new texture %llu (%.2f ms), released %llu (%.2f ms), re-described "
+               "%llu (%.2f ms), first GPU write %llu (%.2f ms), upload %llu (%.2f ms), other %llu (%.2f ms)",
+               (unsigned long long)f * 60, (unsigned long long)hold_n[0], hold_ns[0] / 1e6, (unsigned long long)hold_n[1],
+               hold_ns[1] / 1e6, (unsigned long long)hold_n[2], hold_ns[2] / 1e6, (unsigned long long)hold_n[3],
+               hold_ns[3] / 1e6, (unsigned long long)hold_n[4], hold_ns[4] / 1e6, (unsigned long long)hold_n[5],
+               hold_ns[5] / 1e6);
+        memset(hold_n, 0, sizeof hold_n), memset(hold_ns, 0, sizeof hold_ns);
         rt_log("perf: frame %llu: binding storage checks %llu (texture %llu), write-watch snapshot queries %llu, untracked %llu",
                (unsigned long long)f * 60, (unsigned long long)ck, (unsigned long long)n_checks, (unsigned long long)calls,
                (unsigned long long)untr);

@@ -477,6 +477,31 @@ NVN_API(nvnQueueFenceSync) {
     s->fenced = 1;
     s->fence = nvn_fence_last();
 }
+// TOTK_TRACE=perf: the waits of nvnSyncWait that blocked, by how many submits the waited fence is behind the newest
+// (0: the newest), with the ns blocked; logged about every 2 s.
+static struct { uint64_t calls, blocked[4], ns[4], t0; } sw;
+static PlatMutex sw_lock = PLAT_MUTEX_INIT;
+static void sync_wait_note(uint64_t behind, uint64_t ns, int blocked) {
+    if (!(rt_trace & RT_TRACE_PERF)) return;
+    plat_mutex_lock(&sw_lock);
+    sw.calls++;
+    if (blocked) {
+        int k = behind > 3 ? 3 : (int)behind;
+        sw.blocked[k]++, sw.ns[k] += ns;
+    }
+    uint64_t now = kern_now_ns();
+    if (!sw.t0) sw.t0 = now;
+    if (now - sw.t0 >= 2000000000ull) {
+        double s = (now - sw.t0) / 1e9;
+        rt_log("perf: nvnSyncWait: %llu calls in %.1f s; blocked on the newest submit %llu (%.1f ms), one behind %llu "
+               "(%.1f ms), two %llu (%.1f ms), more %llu (%.1f ms)", (unsigned long long)sw.calls, s,
+               (unsigned long long)sw.blocked[0], sw.ns[0] / 1e6, (unsigned long long)sw.blocked[1], sw.ns[1] / 1e6,
+               (unsigned long long)sw.blocked[2], sw.ns[2] / 1e6, (unsigned long long)sw.blocked[3], sw.ns[3] / 1e6);
+        memset(&sw, 0, sizeof sw), sw.t0 = now;
+    }
+    plat_mutex_unlock(&sw_lock);
+}
+
 // NVNsyncWaitResult nvnSyncWait(const NVNsync *s, uint64_t timeout_ns): a sync never fenced reports a timeout at once;
 // a fenced one is released only after the back end completed that fence value
 NVN_API(nvnSyncWait) {
@@ -484,12 +509,20 @@ NVN_API(nvnSyncWait) {
     uint64_t timeout = arg_x(c, 1);
     if (!s->fenced) { ret_x(c, NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED); return; }
     const GfxBackend *b = gfx_backend();
-    if (b->fence_done() >= s->fence) { b->cpu_synced(s->fence); ret_x(c, NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED); return; }
+    uint64_t newest = nvn_fence_last();
+    if (b->fence_done() >= s->fence) {
+        sync_wait_note(0, 0, 0);
+        b->cpu_synced(s->fence);
+        ret_x(c, NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED);
+        return;
+    }
     int ok;
+    uint64_t t0 = kern_now_ns();
     {
         NVN_BLOCKING();
         ok = b->fence_wait(s->fence, timeout);
     }
+    sync_wait_note(newest > s->fence ? newest - s->fence : 0, kern_now_ns() - t0, 1);
     if (ok) b->cpu_synced(s->fence);
     ret_x(c, ok ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED);
 }
