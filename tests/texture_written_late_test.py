@@ -185,9 +185,10 @@ def source(root):
                                                   'plat_rmutex_release', 'plat_rmutex_retake', 'plat_once')]
     parts += ['#define HOLD_SITES 16\n#define lock() lock_at(0)', typedef(tex, 'HoldSite')] + [statement(tex, name) for name in (
         'static int holds_on', 'static _Thread_local uint64_t hold_t0', 'static _Thread_local void *hold_ra',
-        'static PlatMutex holds_lock', 'static HoldSite holds')]
+        'static PlatMutex holds_lock', 'static HoldSite holds', 'enum { HOLD_NEW', 'static uint64_t hold_n')]
+    parts += ['static void hold_barrier_why(int why);']
     parts += [function(tex, name) for name in (
-        'tex_init', 'hold_note', 'lock_at', 'unlock', 'hold_barrier', 'lock_unfrozen', 'agen_idx', 'tex_gen_bump', 'make_key', 'owned_lower', 'own_add', 'rel_append',
+        'tex_init', 'hold_note', 'lock_at', 'unlock', 'hold_barrier', 'hold_barrier_why', 'lock_unfrozen', 'agen_idx', 'tex_gen_bump', 'make_key', 'owned_lower', 'own_add', 'rel_append',
         'sweep_released', 'fills_no_page', 'wb_cfg_init', 'vk_texture_gpu_written_ready')]
     parts += [statement(tex, 'static void gpu_written_entry(Tex *e);')]
     parts += [function(tex, name) for name in ('vk_texture_gpu_written_late', 'gpu_written_entry', 'vk_texture_release')]
