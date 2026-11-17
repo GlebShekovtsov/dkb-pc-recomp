@@ -99,6 +99,10 @@ typedef struct VkExec {
     void *views;                         // image views created for this command buffer (freed at its fence)
     int nviews, cap_views;
     int barrier_at;                      // recorded right after the last full barrier (-1: none yet)
+    int cs_tail;                         // recorded right after the last dispatch or compute barrier, when only
+                                         // compute work followed the barrier before it (vk_exec_barrier_cs; -1: none)
+    int cs_barrier_at;                   // recorded right after the last compute barrier (-1: none)
+    int game_barrier;                    // the game asked for a barrier (OP_BARRIER) since the last dispatch
 
     // Feedback loops (vk.h VkCtx.feedback, vk_exec_draw.c feedback_prepare). Learned targets are attached in
     // ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT; they stay in it across consecutive passes and go back to GENERAL at the next
@@ -147,6 +151,16 @@ void vk_exec_draw_new_cb(VkExec *ex);
 // Parallel passes (vk_exec.c par_start): vk_exec_par_hazard, on a thread recording a slice, marks that the slice
 // needed something only the primary may do (the call is then dropped and the pass's targets are not sliced again).
 void vk_exec_par_hazard(void);
+// The barrier before a dispatch, or the game's barrier (OP_BARRIER): when only compute work (dispatches, and the
+// copies their bindings record) was recorded since the last barrier, a compute-to-compute barrier, which needs no
+// flush of the colour and depth caches; else vk_exec_barrier. vk_exec_note_dispatch, right after a dispatch, notes
+// that it was compute work.
+void vk_exec_barrier_cs(VkExec *ex);
+void vk_exec_note_dispatch(VkExec *ex);
+// The barrier before a direct dispatch: vk_exec_barrier_cs, or with TOTK_CS_BARRIER=game none at all when only compute
+// work came since the last barrier and the game asked for none since the last dispatch (1 returned). Counts both kinds
+// for the perf trace.
+int vk_exec_dispatch_barrier(VkExec *ex);
 // As vk_exec_par_hazard for a draw whose effect depends on the order of draws across slices (a storage buffer write):
 // the pass's targets are not sliced again from the next pass on.
 void vk_exec_par_order_hazard(void);

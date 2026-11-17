@@ -71,6 +71,8 @@ static VkPipeline vk_pipeline_compute(const GfxShader *shader, const VkPipeInfo 
     (void)shader; static VkPipeInfo pi; *info = &pi; return 1;
 }
 static void vk_exec_barrier(VkExec *ex) { (void)ex; barriers++; }
+static void vk_exec_barrier_cs(VkExec *ex) { vk_exec_barrier(ex); }   // the compute barrier counts as one
+static void vk_exec_note_dispatch(VkExec *ex) { (void)ex; }
 #define VK_MEM_USE(sp) ((void)(sp))
 #define VK_MEM_BOUND(sp) ((void)(sp))
 static void bind_pipeline(VkExec *ex, unsigned point, VkPipeline pipe) { (void)ex; (void)point; (void)pipe; }

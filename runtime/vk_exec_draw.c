@@ -4542,7 +4542,10 @@ static void op_dispatch(VkExec *ex, const p_dispatch *d) {
     const VkPipeInfo *info = NULL;
     VkPipeline p = vk_pipeline_compute(cs, &info);
     if (!p || !info) return warn_once(W_PIPELINE, "a compute pipeline could not be created: dispatches with it are skipped");
-    vk_exec_barrier(ex);   // ends the pass; earlier writes are visible to the shader
+    // Ends the pass; earlier writes are visible to the shader. With TOTK_CS_BARRIER=game a dispatch the game left
+    // unordered gets none: its bindings below record only state (pipeline, descriptors, push constants); the mirror
+    // syncs they ask for go into the part's prologue, and a depth twin's copies carry their own barriers (twin_update).
+    vk_exec_dispatch_barrier(ex);
     // DLSS's one-time warm-up (vk_dlss.c vk_dlss_warm) records NGX's own work into the command buffer, so it goes before
     // the dispatch's binds, and the bound state is forgotten when it recorded. The replay thread's copy only: a
     // TOTK_REPLAY_PAR helper translating a dispatch leaves it to the replay thread.
@@ -4567,6 +4570,7 @@ static void op_dispatch(VkExec *ex, const p_dispatch *d) {
     }
     if (!blit && !dlss) vkCmdDispatch(ex->cb, (uint32_t)d->x, (uint32_t)d->y, (uint32_t)d->z);
     ex->recorded++;
+    if (!blit && !dlss) vk_exec_note_dispatch(ex);   // only compute work since the barrier above
     // The blit is a transfer write, where what follows expects a compute-shader write: a full barrier makes it visible
     // to every later access (the one before it, vk_exec_barrier above, already covers the transfer reads). DLSS's
     // writes get the same.
@@ -4592,7 +4596,7 @@ static void op_dispatch_ind(VkExec *ex, const p_dispatch_ind *d) {
     const VkPipeInfo *info = NULL;
     VkPipeline p = vk_pipeline_compute(cs, &info);
     if (!p || !info) return warn_once(W_PIPELINE, "a compute pipeline could not be created: dispatches with it are skipped");
-    vk_exec_barrier(ex);
+    vk_exec_barrier_cs(ex);   // its arguments may come from the dispatch before (DRAW_INDIRECT in the compute barrier)
     VK_MEM_USE(ip);
     bind_pipeline(ex, VK_PIPELINE_BIND_POINT_COMPUTE, p);
     dc->c0_dim[0] = dc->c0_dim[1] = dc->c0_dim[2] = 0;
@@ -4610,6 +4614,7 @@ static void op_dispatch_ind(VkExec *ex, const p_dispatch_ind *d) {
     }
     vkCmdDispatchIndirect(ex->cb, ip.buffer, ip.offset);
     ex->recorded++;
+    vk_exec_note_dispatch(ex);
     note_work(ex, 3, 0);
     vk_mem_count(ip.cls, VK_MUSE_IND, sizeof(VkDispatchIndirectCommand));
     VK_MEM_BOUND(ip);
