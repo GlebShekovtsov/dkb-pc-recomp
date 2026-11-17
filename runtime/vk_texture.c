@@ -242,7 +242,7 @@ static int tex_frozen;   // tex_lock
 
 // TOTK_TRACE=perf: the walk's waits for held slices by what made it wait (HOLD_*), their count and ns.
 enum { HOLD_NEW, HOLD_RELEASED, HOLD_REDESCRIBED, HOLD_GPU_WRITTEN, HOLD_UPLOAD, HOLD_OTHER, HOLD_N };
-static uint64_t hold_n[HOLD_N], hold_ns[HOLD_N];
+static uint64_t hold_n[HOLD_N], hold_ns[HOLD_N], hold_skipped;
 static void hold_barrier_why(int why);
 static void hold_barrier(void) { hold_barrier_why(HOLD_OTHER); }
 static void hold_barrier_why(int why) {   // tex_lock held
@@ -1063,11 +1063,33 @@ static int alias_copy(Tex *e, const Tex *src) {
     return 1;
 }
 
+// Whether an entry other than self at self's address is live. A held slice that resolves a slot whose entry is
+// released follows a live entry at the same storage (vk_texture_by_id_locked); with none, it takes the released entry
+// itself, which is what it finds taken back into use too.
+static int other_live_at(const Tex *self) {
+    for (const Tex *p = nvn_hm_get(&by_addr, &self->key.addr); p; p = p->next_at)
+        if (p != self && !p->released) return 1;
+    return 0;
+}
+
+// TOTK_HOLD_REVIVE (default 1): a released entry taken back into use with the same description, with no other live
+// entry at its storage, does not wait for the held slices: they would resolve its slots to it either way. The game
+// takes three transient 1440x810 targets back each frame, and each wait cost about 0.5 ms of the replay (TOTK_TRACE=perf
+// in the Hilltop Layer, RX 9070 XT). 0 waits as before; ab switches it with the A/B blocks.
+static int revive_free(const Tex *e, const tex_t *t) {
+    static int mode = -1;
+    if (mode < 0) mode = rt_knob("HOLD_REVIVE", "1");
+    return e && e->released && !memcmp(&e->t, t, sizeof *t) && RT_KNOB_ON(mode) && !other_live_at(e);
+}
+
 static Tex *entry_of(const tex_t *t) {
     TexKey k;
     make_key(t, &k);
     Tex *e = nvn_hm_get(&by_key, &k);
-    if ((!e || e->released || memcmp(&e->t, t, sizeof *t)) && vk_exec_held_pending()) {
+    if ((!e || e->released || memcmp(&e->t, t, sizeof *t)) && vk_exec_held_pending() && !vk_spec_helper() &&
+        revive_free(e, t))
+        hold_skipped++;
+    else if ((!e || e->released || memcmp(&e->t, t, sizeof *t)) && vk_exec_held_pending()) {
         int why = !e ? HOLD_NEW : e->released ? HOLD_RELEASED : HOLD_REDESCRIBED;
         static int told;
         if ((rt_trace & RT_TRACE_PERF) && told < 24) {
@@ -1511,12 +1533,13 @@ void vk_texture_new_submit(void) {
         vk_mem_snap_stats(&ck, &calls, &untr);
         holds_log(f * 60);
         rt_log("perf: frame %llu: waits for held slices: new texture %llu (%.2f ms), released %llu (%.2f ms), re-described "
-               "%llu (%.2f ms), first GPU write %llu (%.2f ms), upload %llu (%.2f ms), other %llu (%.2f ms)",
+               "%llu (%.2f ms), first GPU write %llu (%.2f ms), upload %llu (%.2f ms), other %llu (%.2f ms); released "
+               "taken back without a wait %llu (TOTK_HOLD_REVIVE)",
                (unsigned long long)f * 60, (unsigned long long)hold_n[0], hold_ns[0] / 1e6, (unsigned long long)hold_n[1],
                hold_ns[1] / 1e6, (unsigned long long)hold_n[2], hold_ns[2] / 1e6, (unsigned long long)hold_n[3],
                hold_ns[3] / 1e6, (unsigned long long)hold_n[4], hold_ns[4] / 1e6, (unsigned long long)hold_n[5],
-               hold_ns[5] / 1e6);
-        memset(hold_n, 0, sizeof hold_n), memset(hold_ns, 0, sizeof hold_ns);
+               hold_ns[5] / 1e6, (unsigned long long)hold_skipped);
+        memset(hold_n, 0, sizeof hold_n), memset(hold_ns, 0, sizeof hold_ns), hold_skipped = 0;
         rt_log("perf: frame %llu: binding storage checks %llu (texture %llu), write-watch snapshot queries %llu, untracked %llu",
                (unsigned long long)f * 60, (unsigned long long)ck, (unsigned long long)n_checks, (unsigned long long)calls,
                (unsigned long long)untr);
