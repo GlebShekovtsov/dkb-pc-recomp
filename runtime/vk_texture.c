@@ -1076,10 +1076,20 @@ static int other_live_at(const Tex *self) {
 // entry at its storage, does not wait for the held slices: they would resolve its slots to it either way. The game
 // takes three transient 1440x810 targets back each frame, and each wait cost about 0.5 ms of the replay (TOTK_TRACE=perf
 // in the Hilltop Layer, RX 9070 XT). 0 waits as before; ab switches it with the A/B blocks.
+// TOTK_HOLD_REVIVE=always (experimental, to measure what the waits cost): no wait for a same-description revive even
+// with another live entry at the storage, where a held slice could follow that entry instead.
+static uint64_t hold_other_live;   // perf: revives that waited because another entry at the storage was live
 static int revive_free(const Tex *e, const tex_t *t) {
     static int mode = -1;
-    if (mode < 0) mode = rt_knob("HOLD_REVIVE", "1");
-    return e && e->released && !memcmp(&e->t, t, sizeof *t) && RT_KNOB_ON(mode) && !other_live_at(e);
+    if (mode < 0) {
+        const char *v = cfg_get("TOTK_HOLD_REVIVE");
+        mode = v && !strcmp(v, "always") ? 3 : rt_knob("HOLD_REVIVE", "1");
+        if (mode == 3) rt_log("vk: TOTK_HOLD_REVIVE=always: released textures are taken back without waiting for held slices");
+    }
+    if (!e || !e->released || memcmp(&e->t, t, sizeof *t) || !(mode == 3 || RT_KNOB_ON(mode))) return 0;
+    if (mode == 3) return 1;
+    if (other_live_at(e)) return hold_other_live++, 0;
+    return 1;
 }
 
 static Tex *entry_of(const tex_t *t) {
@@ -1534,12 +1544,12 @@ void vk_texture_new_submit(void) {
         holds_log(f * 60);
         rt_log("perf: frame %llu: waits for held slices: new texture %llu (%.2f ms), released %llu (%.2f ms), re-described "
                "%llu (%.2f ms), first GPU write %llu (%.2f ms), upload %llu (%.2f ms), other %llu (%.2f ms); released "
-               "taken back without a wait %llu (TOTK_HOLD_REVIVE)",
+               "taken back without a wait %llu (TOTK_HOLD_REVIVE), waited for another live texture at the storage %llu",
                (unsigned long long)f * 60, (unsigned long long)hold_n[0], hold_ns[0] / 1e6, (unsigned long long)hold_n[1],
                hold_ns[1] / 1e6, (unsigned long long)hold_n[2], hold_ns[2] / 1e6, (unsigned long long)hold_n[3],
                hold_ns[3] / 1e6, (unsigned long long)hold_n[4], hold_ns[4] / 1e6, (unsigned long long)hold_n[5],
-               hold_ns[5] / 1e6, (unsigned long long)hold_skipped);
-        memset(hold_n, 0, sizeof hold_n), memset(hold_ns, 0, sizeof hold_ns), hold_skipped = 0;
+               hold_ns[5] / 1e6, (unsigned long long)hold_skipped, (unsigned long long)hold_other_live);
+        memset(hold_n, 0, sizeof hold_n), memset(hold_ns, 0, sizeof hold_ns), hold_skipped = hold_other_live = 0;
         rt_log("perf: frame %llu: binding storage checks %llu (texture %llu), write-watch snapshot queries %llu, untracked %llu",
                (unsigned long long)f * 60, (unsigned long long)ck, (unsigned long long)n_checks, (unsigned long long)calls,
                (unsigned long long)untr);

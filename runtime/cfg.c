@@ -172,7 +172,7 @@ static const CfgMeta metas[] = {
     {"DESC_C0_SERIAL", "0", "0|1|ab", RESTART}, {"DESC_SAMP_GEN", "1", "0|1|ab", RESTART}, {"DESC_TD_HASH", "1", "0|1|ab", RESTART},
     {"TEX_REPEAT", "1", "0|1|ab", RESTART},
     {"CS_BARRIER", "0", "0|1|ab|game", RESTART},
-    {"HOLD_REVIVE", "1", "0|1|ab", RESTART},
+    {"HOLD_REVIVE", "1", "0|1|ab|always", RESTART},
     {"DESC_STAGE_ORIGIN", "0", "0|1|ab", RESTART},
     {"PUSH_SKIP", "1", "0|1", RESTART}, {"SPLIT_DRAWS", "64", "0..1000", RESTART},
     {"SPLIT_US", "1000", "0..20000", RESTART},
