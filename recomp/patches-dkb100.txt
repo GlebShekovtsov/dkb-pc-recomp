@@ -133,10 +133,13 @@ guard poolguard main 410794 410e54 ptr x10 f875794a
 # free list is empty its own code takes a null node and loads its payload at +0x10 (108510). The guard continues the
 # loop instead (108468): the id is not cached and may come back on a later pass.
 guard poolguard main 108510 108468 ptr x8 f9400909
-# #317: the job graph builder f_700011d680 looks each edge's target up in the node table (+0x28); a null slot faulted
-# on its pending count (11d8b4, 3.2.0 1116d4). The guard sends a null target to the next edge (11d8dc) before the link
-# slot is taken, the path of a full link pool.
-guard poolguard main 11d858 11d8dc ptr x12 b82b01ce
+# #317: the job graph builder f_700011d680 looks each edge's source (x13) and target (x12) up in the node table
+# (+0x28); a null target slot faulted on its pending count (11d8b4, 3.2.0 1116d4), and on 3.2.0 a null source slot of
+# the next edge then faulted on its link list (3.2.0 1116a4). The guards send an edge with either end null to the next
+# edge (11d8dc): the source before the target is loaded (11d854), the target before the link slot is taken (11d858),
+# the path of a full link pool. Same code as 3.2.0 main+0x111674 and main+0x111678 (patches-dkb458752.txt).
+guard poolguard main 11d854 11d8dc edge x13 f86cd9ec
+guard poolguard main 11d858 11d8dc edge x12 b82b01ce
 
 # #136: the walk in main+0x1692ac4 passes a null slot to f_7000534324 (the call at 1692c00); the guard sits on the
 # bl and skips it to 1692c5c, the loop tail that reloads x8 from [x20] and uses no result of the call.

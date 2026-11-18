@@ -409,7 +409,12 @@ static void test_cores(Cpu *c) {
     g_running = g_run_max = g_core_clash = 0;
     kern_core_stats_reset();
     for (int i = 0; i < CORE_WORKERS; i++) {
+        // Created with the process's ideal core, a thread may run on core 0 alone, as on Horizon; the game widens a
+        // thread's mask with SetThreadCoreMask, and so does this test, to cores 0-2 (ideal core kept: -3).
         h[i] = create(c, a_core_worker, NULL, 44, -2);
+        CHECK(sv(c, 0x0E, 0, 0, h[i], 0) == 0 && c->x[1] == 0 && c->x[2] == 1, "a new thread's core mask is %#llx, "
+              "core %lld, not core 0 alone", (unsigned long long)c->x[2], (long long)(int32_t)c->x[1]);
+        CHECK(sv(c, 0x0F, h[i], (uint64_t)(int64_t)-3, 7, 0) == 0, "SetThreadCoreMask %#x", h[i]);
         start(c, h[i]);
     }
     for (int i = 0; i < CORE_WORKERS; i++) join(c, h[i]);

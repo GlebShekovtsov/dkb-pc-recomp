@@ -391,6 +391,13 @@ static int sub_resolve(const tex_t *t, const view_t *v, int has_v, const NVNcopy
         warn_once(W_FORMAT, "copy of format %#x texture without an image: skipped", t->d.format);
         return 0;
     }
+    // An ASTC image kept as BC1 (vk_texture.c upload, astc_opaque.h) is made BC3 again first: what follows copies or
+    // encodes BC3 blocks (vk_astc_record with this format's astc_bc), and BC1 has neither their size nor alpha. One
+    // that cannot be made again is skipped, for the same reason.
+    if (f.astc_bc && !vk_texture_astc_bc3(s->img)) {
+        warn_once(W_FORMAT, "copy of format %#x texture whose BC1 image could not be made BC3: skipped", t->d.format);
+        return 0;
+    }
     const VkTexImage *img = s->img;
     if (img->aspect & VK_IMAGE_ASPECT_COLOR_BIT) s->aspect = VK_IMAGE_ASPECT_COLOR_BIT;
     else if (img->aspect == VK_IMAGE_ASPECT_DEPTH_BIT) s->aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
@@ -578,6 +585,13 @@ static int copy_decoded_astc(VkExec *ex, const p_copy_t2t *p) {
         return 1;
     }
     const VkTexImage *si = vk_texture_get(p->src), *di = vk_texture_get(p->dst);
+    // An image kept as BC1 is made BC3 again first: the destination because the copied texels may carry alpha, the
+    // source so that both sides have blocks of one size. Both come back from their storage. One that cannot be
+    // made again is skipped, for the same reason.
+    if (f.astc_bc && si && di && (!vk_texture_astc_bc3(si) || !vk_texture_astc_bc3(di))) {
+        warn_once(W_COPY, "decoded ASTC copy into a BC1 image that could not be made BC3: skipped");
+        return 1;
+    }
     Sub s, d;
     if (!decoded_astc_sub(p->src, &p->sv, p->has_sv, &p->sr, &f, si, &s) ||
         !decoded_astc_sub(p->dst, &p->dv, p->has_dv, &p->dr, &f, di, &d) || si->image == di->image ||

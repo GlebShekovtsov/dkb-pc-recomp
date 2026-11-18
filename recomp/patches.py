@@ -51,7 +51,7 @@ import re
 from pathlib import Path
 
 PAGE = 0x1000
-GUARD_KINDS = ('ptr', 'vcall')   # runtime/patches.c rt_guard_ptr, rt_guard_vcall
+GUARD_KINDS = ('ptr', 'vcall', 'edge')   # runtime/patches.c rt_guard_ptr, rt_guard_vcall, rt_guard_edge
 REG = re.compile(r'x([0-9]|[12][0-9]|30)')
 
 

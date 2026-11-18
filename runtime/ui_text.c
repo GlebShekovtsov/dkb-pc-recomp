@@ -246,6 +246,8 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_RUMBLE_CURVE_DESC] = "Lower values make subtle vibration easier to feel.",
     [UI_MENU_RUMBLE_TRIGGERS] = "Trigger vibration (Xbox)",
     [UI_MENU_RUMBLE_TRIGGERS_DESC] = "Enables vibration in the triggers on supported Xbox controllers.",
+    [UI_MENU_SWITCH2] = "Switch 2 controllers (Bluetooth)",
+    [UI_MENU_SWITCH2_DESC] = "Joy-Con 2 and Pro Controller 2 over Bluetooth, with HD rumble. To pair one, hold its Sync button with the game open; after that any button reconnects it. Over USB they work without this setting. Applies at the next start.",
     [UI_MENU_PAD_LAYOUT] = "Button layout",
     [UI_MENU_PAD_LAYOUT_DESC] = "Automatic picks Nintendo for Nintendo-style controllers and Xbox otherwise.\nNintendo uses the right button for A.\n"
                                 "Xbox uses the bottom button for A.\nXbox prompts uses Nintendo positions with Xbox labels.\n\n"
@@ -648,6 +650,8 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_RUMBLE_CURVE_DESC] = "Чем ниже значение, тем сильнее слабая вибрация.",
     [UI_MENU_RUMBLE_TRIGGERS] = "Вибрация триггеров (Xbox)",
     [UI_MENU_RUMBLE_TRIGGERS_DESC] = "Вибрация и в триггерах контроллера Xbox.",
+    [UI_MENU_SWITCH2] = "Контроллеры Switch 2 (Bluetooth)",
+    [UI_MENU_SWITCH2_DESC] = "Joy-Con 2 и Pro Controller 2 по Bluetooth, с HD-вибрацией. Чтобы подключить, удерживайте кнопку Sync при запущенной игре; потом любая кнопка подключает его снова. По USB они работают и без этой настройки. Применяется после перезапуска.",
     [UI_MENU_PAD_LAYOUT] = "Раскладка кнопок",
     [UI_MENU_PAD_LAYOUT_DESC] = "Какая кнопка работает как A. Nintendo: правая, как на Switch. Xbox: нижняя, как "
                                 "подписано на контроллере Xbox (крест на контроллере PlayStation). Автоматически: "

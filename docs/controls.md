@@ -144,7 +144,45 @@ The stick direction bits (`StickLLeft` to `StickRDown`) are derived from the sti
 
 ## Nintendo Switch 2 controllers
 
-Windows does not present the Switch 2 Pro Controller as a gamepad SDL can open (the log says `input: no gamepad`), so it needs a bridge program that wakes it and creates a virtual gamepad. The DS4Windows fork by hbashton ([github.com/hbashton/DS4Windows](https://github.com/hbashton/DS4Windows), tested with release VIIPERRC4.5.1, a pre-release) with the output set to an emulated DualSense gives buttons, rumble, gyro and accelerometer, and reads the sticks through the controller's calibration (they rest at 0 to 2%). The game reads its virtual DualSense directly; the log then shows `input: gamepad "DualSense Wireless Controller" (rumble, gyro and accelerometer, ...)` and `input: motion sensors on`. Its release notes also list Joy-Con 2 support, which is untested here.
+### Over Bluetooth (built in)
+
+With `switch2 = 1` in `totk.ini` (F1 > Controls > Controller > "Switch 2 controllers (Bluetooth)", applied at the next
+start) the game talks to a Pro Controller 2 or Joy-Con 2 over Bluetooth LE itself: no bridge program. On Windows it
+uses the system's Bluetooth through WinRT (`runtime/switch2_win.c`; Windows 10 or 11, a Bluetooth LE adapter), on Linux
+BlueZ over D-Bus (`runtime/switch2_bluez.c`); macOS has no transport yet. The code is ported from
+[mkw-recomp](https://github.com/adriadam10/mkw-recomp) (`runtime/input/switch2*.c`, MIT), whose protocol header comes
+from seedds/mkw-neo.
+
+- **Pairing:** start the game, then hold the small Sync button on the controller until its lights sweep. The log shows
+  `input: Pro Controller 2 ... paired with this PC`. From then on, any button wakes it and it reconnects to this PC
+  (pairing it with the console again moves it back there). Do not pair it in Windows' Bluetooth
+  settings: the game connects it itself.
+- **Joy-Con 2:** one Joy-Con alone is held sideways; a left and a right connected together are one controller.
+- **What works:** buttons, both sticks with the controller's own calibration, Home, gyro and accelerometer (the
+  six-axis sensor), player lights, and the game's **HD rumble**: every vibration value the game sets (amplitude and
+  frequency of the low and the high band, left and right) goes to the controller's actuators as it comes, three 5 ms
+  samples a packet, left side to the left grip and right side to the right grip (`switch2.c` `rumble`,
+  `ov_input.c` `rumble_update`). `rumble_strength` and `rumble_curve` apply; `rumble_hd` does not matter for these
+  controllers. Each controller appears as an SDL gamepad named "Pro Controller 2 (Bluetooth)" or
+  "Joy-Con 2 (Bluetooth)" and can be picked in Controller Device like any other.
+- **Not found?** `switch2 = 2` also logs every Bluetooth LE device that advertises, once. Close other programs that
+  talk to the controller (a bridge, Steam), and turn Bluetooth on before starting the game.
+
+### Over USB
+
+SDL 3.4 drives the Switch 2 controllers over USB (`SDL_hidapi_switch2.c`) when it is built with libusb: buttons,
+sticks, gyro and two-motor rumble, which SDL plays as the controller's own rumble at fixed frequencies (the game's HD
+frequencies need Bluetooth: SDL's driver takes no raw rumble data). On Linux distribution SDL3 packages usually have
+libusb. On Windows SDL loads `libusb-1.0.dll` and needs the controller's second USB interface on the WinUSB driver
+(once per controller with Zadig: Options > List All Devices, the controller's **Interface 1**, WinUSB, Replace Driver;
+never Interface 0). Neither the MSYS2 nor the upstream Windows SDL3 build has libusb, so a Windows build needs an SDL3
+built with `-DSDL_HIDAPI_LIBUSB=ON -DSDL_HIDAPI_LIBUSB_SHARED=ON` and `libusb-1.0.dll` beside `totk.exe` (as
+mkw-recomp's `tools/build/windeps.py` does). These controllers never take the Switch 1 HD packet (`rumble_hd`), so
+they stay on the two-motor path even with `rumble_hd = auto`.
+
+### Through a bridge program
+
+Without the above, Windows does not present the Switch 2 Pro Controller as a gamepad SDL can open (the log says `input: no gamepad`), so it needs a bridge program that wakes it and creates a virtual gamepad. The DS4Windows fork by hbashton ([github.com/hbashton/DS4Windows](https://github.com/hbashton/DS4Windows), tested with release VIIPERRC4.5.1, a pre-release) with the output set to an emulated DualSense gives buttons, rumble, gyro and accelerometer, and reads the sticks through the controller's calibration (they rest at 0 to 2%). The game reads its virtual DualSense directly; the log then shows `input: gamepad "DualSense Wireless Controller" (rumble, gyro and accelerometer, ...)` and `input: motion sensors on`. Its release notes also list Joy-Con 2 support, which is untested here.
 
 Bridges that output a ViGEm DualShock 4 (ProCon2Windows, connectyourpro as tested) give buttons and rumble but no motion: their virtual DualShock 4 reports a gyro and an accelerometer that never change, so motion aiming and Ultrahand rotation do nothing. Run one bridge at a time; Steam Input can also claim the controller, so close Steam if the bridge does not find it.
 

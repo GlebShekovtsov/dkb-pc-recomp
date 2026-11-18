@@ -517,7 +517,8 @@ def chunk_text(name, number, emitter, fns):
     if emitter.uses_patches:
         protos += 'extern uint8_t rt_patch_on[];\n'
     if emitter.uses_guards:
-        protos += 'int rt_guard_ptr(uint64_t p);\nint rt_guard_vcall(uint64_t obj);\n'
+        protos += ('int rt_guard_ptr(uint64_t p);\nint rt_guard_vcall(uint64_t obj);\n'
+                   'int rt_guard_edge(uint64_t node);\n')
     return (header(f'{name} chunk {number:04d}') + '#include "cpu.h"\n#include "simd.h"\n\n' + protos + '\n'
             + '\n\n'.join(body) + '\n')
 

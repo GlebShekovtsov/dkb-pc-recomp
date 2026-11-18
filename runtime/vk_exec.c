@@ -1996,7 +1996,10 @@ static int par_nworkers;
 
 // At a draw outside a pass: 1 when the pass it opens is sliced (the pass is then open, with secondary contents).
 // TOTK_REPLAY_THREADS (0: off), read once. Unset, it is 6 when the process may run on 12 or more logical processors, 4
-// on 8 to 11 and 0 below that: in the layer -101 scene (RTX 5060 Ti, 1920x1080, 60 fps limit) 4 threads gave 57.0 and
+// on 8 to 11, 3 on 4 to 7 and 0 below that. On 6 and 4 (a Ryzen 7 5700X held to its first 6 or 4 logical processors,
+// RTX 5060 Ti, the layer -200 recording at 1920x1080, 60 fps limit), 3 threads cut the first minute's frames over 50 ms
+// from 155 to 169 to 15 to 17 (6) and from 148 to 203 to 47 (4), at 43 against 40 fps and 41 against 38; 2 threads
+// gave nothing and 4 on 6 matched 3. Above that: in the layer -101 scene (RTX 5060 Ti, 1920x1080, 60 fps limit) 4 threads gave 57.0 and
 // 57.2 fps and 63 to 77 frames over 25 ms a minute, against 52.7 and 53.6 fps and 177 to 226 frames without
 // (docs/dkb-lowend.md). On 16 (Ryzen 7 9800X3D, RTX 5090) the Hilltop Layer of Surf Hills (3.2.0, 28,500 draws a frame)
 // replayed in 12.4 ms a frame with 6 against 14.9 with 4 (45 to 47 fps against 42), the route's Lake Level in 5.9 to 6.0
@@ -2015,7 +2018,7 @@ static int par_threads(void) {
     if (par_mode < 0) {
         const char *e = cfg_get("TOTK_REPLAY_THREADS");
         uint32_t cpus = plat_cpu_usable();
-        par_mode = e && *e ? atoi(e) : vk_caps.amd && !vk_caps.amd_slices ? 0 : cpus >= 12 ? 6 : cpus >= 8 ? 4 : 0;
+        par_mode = e && *e ? atoi(e) : vk_caps.amd && !vk_caps.amd_slices ? 0 : cpus >= 12 ? 6 : cpus >= 8 ? 4 : cpus >= 4 ? 3 : 0;
         if (par_mode < 0) par_mode = 0;
         if (par_mode) rt_log("vk: passes of %d or more draws are recorded in slices of up to %d draws into secondary command buffers "
                              "(TOTK_REPLAY_THREADS=%d%s: recorded by that many threads)", PAR_MIN_DRAWS, PAR_SLICE_DRAWS, par_mode,

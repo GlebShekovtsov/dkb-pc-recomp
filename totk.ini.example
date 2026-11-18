@@ -299,6 +299,11 @@
 # rumble_strength = 130
 # rumble_curve = 0.6
 # rumble_triggers = 0
+# Switch 2 controllers (Pro Controller 2, Joy-Con 2) over Bluetooth LE, with HD rumble: 1 on, 0 off, 2 on and logs
+# every advertising Bluetooth device once (for a report when one is not found). Hold Sync on a controller with the game
+# open to pair it with this PC; after that any button reconnects it. Do not pair it in the system's Bluetooth settings.
+# Over USB they work through SDL without this. Takes effect at the next start. docs/controls.md, "Switch 2 controllers".
+# switch2 = 0
 # Which gamepad button is Switch A: nintendo (by position: east A, south B, west Y, north X), xbox (south A, east B,
 # west X, north Y, as an Xbox pad labels them; cross A on a PlayStation pad) or auto (nintendo for a pad with Nintendo
 # labels, xbox for the others). xbox_prompts: the buttons as nintendo, and the game's prompts swapped to the Xbox

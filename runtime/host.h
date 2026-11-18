@@ -255,6 +255,8 @@ extern const char rt_port_version[];                       // VERSION at the bui
 // ---- kernel (kernel.c)
 typedef struct RtThread RtThread;
 Cpu *kern_cpu(void);                                       // current guest thread's Cpu, NULL on host threads
+void kern_cores_report(const char *tag);                    // logs each virtual core's owner and where its host
+                                                           // thread runs (one sample); from a guest thread, rare
 uint32_t kern_main_thread(Cpu **cpu);                      // main thread object and Cpu for the calling host thread
                                                            // (main.npdm: 1 MiB stack at the top of the stack region,
                                                            // priority 44, core 0); on the main thread: its handle

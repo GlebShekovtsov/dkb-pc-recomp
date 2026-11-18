@@ -109,7 +109,7 @@ Defaults chosen from these runs (13 November, build of bananza with the pre-impo
 | 8 logical processors, old defaults | 49.8 and 50.5 | 23.7 and 26.3 | 371 and 389 | |
 | 8 logical processors, `TOTK_REPLAY_THREADS=4` | 54.1 and 54.3 | 26.1 and 23.5 | 165 and 185 | |
 
-So `TOTK_REPLAY_THREADS` defaults to 4 from 8 logical processors (6 from 12; on AMD only the RX 9070 and 9070 XT on the proprietary driver, the setup measured) and `TOTK_HEAP_LAZY`
+So `TOTK_REPLAY_THREADS` defaults to 4 from 8 logical processors (6 from 12, 3 from 4 since 18 November; on AMD only the RX 9070 and 9070 XT on the proprietary driver, the setup measured) and `TOTK_HEAP_LAZY`
 to 1 on Windows.
 - Run-to-run noise is about 2 fps, and 3 in the 1% low.
 
@@ -151,3 +151,22 @@ lower in every pair; 52.7, 55.1, 51.9 and 56.8 fps off, 55.7, 57.6, 59.1 and 56.
 About 12,000 pages stay closed and 14 MiB a frame is left uncopied, with 4 to 8 pages touched every 60 frames. In the
 crater scene the game already holds 60 fps, and it made no difference there. It stays off by default until more of
 the game has been played with it.
+
+## Layer -200 on 6 and 4 logical processors (18 November)
+
+A Ryzen 7 5700X held to its first 6 or 4 logical processors (the process starts with that affinity, so the runtime
+counts only those), RTX 5060 Ti, the layer -200 recording on a player's save (3.2.0), 1920x1080, 60 fps limit, warm
+caches. The second minute and the end move with where the recording ends, so the first minute compares best.
+
+| Logical processors, `TOTK_REPLAY_THREADS` | first minute fps | frames over 50 ms | second minute fps, 1% low |
+| --- | --- | --- | --- |
+| 16, default (6) | 57.4 | 9 | 60.0, 53.3 |
+| 6, 0 (the old default) | 40.1 and 40.3 | 169 and 155 | 42.8 and 48.2, 19.4 and 23.0 |
+| 6, 2 | 40.6 | 138 | 42.5, 20.0 |
+| 6, 3 (the new default) | 43.7 and 43.2 | 15 and 17 | 49.4 and 50.0, 27.4 and 27.4 |
+| 6, 4 | 43.7 and 43.6 | 20 and 25 | 53.8 and 48.3, 28.8 and 28.0 |
+| 4, 0 (the old default) | 37.6 | 203 | 36.9, 18.3 |
+| 4, 2 | 38.8 | 148 | 36.8, 18.1 |
+| 4, 3 (the new default) | 41.0 | 47 | 41.6, 21.2 |
+
+So from 4 logical processors the default is 3 threads. Below 60 fps the scene stays bound by the replay thread.

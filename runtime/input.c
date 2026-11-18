@@ -23,6 +23,7 @@
 #include "vk.h"
 #include "platform/platform.h"
 #include "switch_rumble.h"
+#include "switch2.h"
 
 enum { STICK_MAX = 32767, STICK_DIR = 16384, TRIGGER_ON = 16384, RESCAN_MS = 1000 };
 
@@ -554,8 +555,14 @@ static void scan_pads(void) {
     if (!pad) return;
     pad_rumble = SDL_GetBooleanProperty(SDL_GetGamepadProperties(pad), SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false);
     SDL_GamepadType gt = SDL_GetGamepadType(pad);
-    pad_switch = gt == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO || gt == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT ||
-                 gt == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT || gt == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR;
+    // SDL types the Switch 2 controllers (Nintendo, 0x2066 to 0x2073; over USB SDL_hidapi_switch2.c, over Bluetooth
+    // switch2.c's virtual gamepad) as their Switch 1 counterparts, but neither takes a Switch 1 HD packet: SDL's
+    // Switch 2 driver refuses SDL_SendGamepadEffect, so with rumble_hd = auto such a pad would get no rumble at all.
+    // Over USB they take the two-motor path (SDL plays it as the controller's own HD rumble at fixed frequencies).
+    uint16_t vid = SDL_GetGamepadVendor(pad), pid = SDL_GetGamepadProduct(pad);
+    int switch2 = vid == 0x057E && pid >= 0x2066 && pid <= 0x2073;
+    pad_switch = !switch2 && (gt == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO || gt == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT ||
+                              gt == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT || gt == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR);
     pad_east_a = SDL_GetGamepadButtonLabel(pad, SDL_GAMEPAD_BUTTON_EAST) == SDL_GAMEPAD_BUTTON_LABEL_A;
     for (int i = 0; i < 4; i++) {
         SDL_GamepadButtonLabel lb = SDL_GetGamepadButtonLabel(pad, pad_sdl[PAD_SOUTH + i]);
@@ -649,6 +656,7 @@ static void start(void) {
     if (!SDL_Init(SDL_INIT_GAMEPAD)) { state = -1; rt_log("input: SDL gamepad init failed (%s), keyboard only", SDL_GetError()); }
     else state = 1;
     if (state == 1) test_pad_attach();
+    if (state == 1) switch2_start();   // Switch 2 controllers over Bluetooth, as virtual gamepads (TOTK_SWITCH2)
     if (state == 1) {
         scan_pads();
         if (!pad) rt_log("input: no gamepad (keyboard only until one is connected)");
@@ -964,9 +972,24 @@ int input_rumble_triggers_enabled(void) {
     return cfg_bool("TOTK_RUMBLE_TRIGGERS");
 }
 
+// Under lock: the open pad is a Switch 2 controller over Bluetooth (switch2.c's virtual gamepad), which takes the game's
+// vibration as HD samples through input_rumble_stream and nothing from the two paths below. Checked on each call: the
+// controller registers its gamepad only once it is attached, after SDL may already have listed it.
+static int pad_s2(void) {
+    return state == 1 && pad && switch2_owns(SDL_GetGamepadID(pad));
+}
+
+int input_rumble_stream(const float v[2][4]) {
+    int ok = 0;
+    plat_mutex_lock(&lock);
+    if (pad_s2()) ok = switch2_rumble_hd(SDL_GetGamepadID(pad), v);
+    plat_mutex_unlock(&lock);
+    return ok;
+}
+
 // Under lock: the open pad takes HD packets (a Switch pad, TOTK_RUMBLE_HD not off).
 static int pad_hd(void) {
-    return state == 1 && pad && pad_switch && !hd_failed && strcmp(cfg_value("TOTK_RUMBLE_HD"), "off") != 0;
+    return state == 1 && pad && pad_switch && !hd_failed && strcmp(cfg_value("TOTK_RUMBLE_HD"), "off") != 0 && !pad_s2();
 }
 
 int input_rumble_hd(const float v[2][4], uint32_t ms) {
@@ -990,7 +1013,7 @@ int input_rumble(uint16_t low, uint16_t high, uint32_t ms) {
     static unsigned seen;
     if (triggers < 0 || seen != cfg_version()) seen = cfg_version(), triggers = input_rumble_triggers_enabled();
     plat_mutex_lock(&lock);
-    if (state == 1 && pad && pad_rumble && !pad_hd()) {
+    if (state == 1 && pad && pad_rumble && !pad_hd() && !pad_s2()) {
         ok = SDL_RumbleGamepad(pad, low, high, ms);
         if (triggers) SDL_RumbleGamepadTriggers(pad, high, high, ms);   // unsupported pads return false: ignored
     }

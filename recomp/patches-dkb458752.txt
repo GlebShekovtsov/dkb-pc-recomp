@@ -167,10 +167,14 @@ guard poolguard main 429594 429c54 ptr x10 f875794a
 # the guard continues the id loop at 11ac28.
 guard poolguard main 11acd0 11ac28 ptr x8 f9400909
 # #317: the edge loop of the job graph builder f_70001114a0 (1.0.0 f_700011d680, +0xc1e0) looks both ends of each
-# edge up in the graph's node table (+0x28) and a null target slot faulted at 1116d4 (its pending count at +0x28). The
-# guard checks the target before the link slot is taken (ldadd at 111678) and goes to the loop's next edge (1116fc),
-# the path the code already takes when the link pool is full.
-guard poolguard main 111678 1116fc ptr x12 b82b01ce
+# edge up in the graph's node table (+0x28): the source into x13 (111670), the target into x12 (111674). A null target
+# slot faulted at 1116d4 (its pending count at +0x28); with that guarded, a null source slot of the next edge faulted
+# at 1116a4 (its link list at +0x18). Both were slots the build had not filled, at the last edges of the description.
+# The guards check the source before the target is loaded (111674) and the target before the link slot is taken
+# (ldadd at 111678), and go to the loop's next edge (1116fc), the path the code already takes when the link pool is
+# full (runtime/patches.c rt_guard_edge).
+guard poolguard main 111674 1116fc edge x13 f86cd9ec
+guard poolguard main 111678 1116fc edge x12 b82b01ce
 
 # #136 (1.0.0 main+0x1692c00): the call to f_7000474574 (1.0.0 f_7000534324) in the 3.2.0 walk, skipped to the loop tail at 1887e4c.
 guard poolguard main 1887df0 1887e4c ptr x0 97afb1e1

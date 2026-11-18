@@ -95,6 +95,11 @@ int input_rumble(uint16_t low, uint16_t high, uint32_t ms);
 // low band, then of the high band, sent as one SDL_SendGamepadEffect packet; ms == 0 sends neutral. While it applies,
 // input_rumble leaves that pad alone. 1 if the pad took it; any other pad returns 0. Callable from any thread.
 int input_rumble_hd(const float v[2][4], uint32_t ms);
+// Every vibration value the game sets, both sides as for input_rumble_hd (curve and strength applied to the
+// amplitudes, silent sides neutral), for a pad that plays them as they come: a Switch 2 controller over Bluetooth
+// (switch2.h, TOTK_SWITCH2), whose packets carry three 5 ms samples of both bands. While one is open, input_rumble and
+// input_rumble_hd leave it alone. 1 if the open pad took it. Callable from any thread.
+int input_rumble_stream(const float v[2][4]);
 // Motor value for a normalised amplitude: pow(a, curve) * strength, saturated to 0..65535. Pure.
 uint16_t rumble_motor(float a, float curve, float strength);
 // TOTK_RUMBLE_TRIGGERS=1: input_rumble also drives the impulse triggers (Xbox) with the high motor's value.

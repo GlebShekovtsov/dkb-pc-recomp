@@ -305,7 +305,8 @@ static float clamp01(float v) { return v > 0 ? (v < 1 ? v : 1) : 0; }   // NaN -
 // neutral frequency), all at 320 Hz and above (the high band's), log scale between.
 static float light_share(float f) { return f > 160 ? (f < 320 ? log2f(f / 160) : 1) : 0; }
 
-// Switch HD rumble -> SDL_RumbleGamepad (a Switch Pro Controller or Joy-Con gets both sides' bands as an HD packet instead). Each side's two bands split by frequency between the heavy (low) and the light
+// Switch HD rumble -> SDL_RumbleGamepad (a Switch Pro Controller or Joy-Con gets both sides' bands as an HD packet instead;
+// a Switch 2 controller over Bluetooth gets every value as it comes, input_rumble_stream). Each side's two bands split by frequency between the heavy (low) and the light
 // (high) motor (light_share) and add up as energy per motor (root of the summed squares); the stronger side drives each
 // motor. A side the game has not updated for 250 ms is silent. Each send lasts 250 ms and is renewed every 50 ms while
 // the game streams, so the pad stops by itself when the game stops sending (pause, freeze). Under vib_lock.
@@ -329,6 +330,7 @@ static void rumble_update(uint64_t now) {
         static const float neutral[2][4] = {{0, 160, 0, 320}, {0, 160, 0, 320}};
         memcpy(hd, neutral, sizeof hd);
     }
+    input_rumble_stream(hd);   // a Switch 2 controller over Bluetooth takes every value, unthrottled (switch2.c)
     static float sent_hd[2][4];
     int changed = lo != sent_low || hi != sent_high || memcmp(hd, sent_hd, sizeof hd), on = lo || hi;
     if (changed ? on && now - sent_at < RUMBLE_MIN_GAP_NS : !on || now - sent_at < RUMBLE_REFRESH_NS) return;

@@ -62,6 +62,9 @@ MacNativeGames cannot run on x86-64 as is: its CPU path executes ARM64 code nati
 Every guest thread is a host thread. TotK assumes Horizon's scheduler: three application cores, a thread runs only on a core in its affinity mask, and a higher-priority thread takes a core from a lower-priority one. The game keeps per-core data without locks and relies on that, so the host models it (`runtime/kernel.c`):
 
 - Three virtual cores. A guest thread runs guest code only while it holds a core; the others wait in a priority-ordered list.
+- Core masks as Horizon sets them: a new thread may run on its ideal core alone (core -2 is the process's, main.npdm's
+  core 0) until SetThreadCoreMask widens it. Bananza leaves some threads on that default, which then run only when the
+  main thread waits; with cores 0-2 instead, one of them changed a job graph while the main thread built it (#317).
 - Preemption. When a waiting thread has a better priority than a holder on a core it may use, exactly one holder is flagged. The holder checks the flag at its next SVC and at every indirect call (`rt_dispatch`: two loads when nobody waits), checks again under the kernel lock that a better thread still waits, and only then hands its core over. The indirect-call check comes from SavageWindRecomp's BotW port; checking only at SVCs left a better thread waiting up to 26 ms.
 - Asynchronous preemption (from MacNativeGames 8bf0893, on unless `TOTK_ASYNC_PREEMPT=0`). Game code can run for
   milliseconds with neither (`TOTK_CORE_DIAG=1` measures it): a waiter that has spun 250 us suspends the holder and,

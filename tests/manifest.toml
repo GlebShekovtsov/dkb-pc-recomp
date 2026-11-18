@@ -518,6 +518,12 @@ area = "gfx"
 cmd = ["{python}", "tests/sampler_book_test.py", "--cc", "{cc}"]
 
 [[test]]
+name = "astc-opaque"
+tier = 1
+area = "gfx"
+cmd = ["{python}", "tests/astc_opaque_test.py", "--cc", "{cc}"]
+
+[[test]]
 name = "geometry-feature-flags"
 tier = 1
 area = "geometry"
@@ -553,6 +559,12 @@ name = "controller-hold"
 tier = 1
 area = "os"
 cmd = ["{python}", "tests/controller_hold_test.py", "--cc", "{cc}"]
+
+[[test]]
+name = "switch2-rumble"
+tier = 1
+area = "os"
+cmd = ["{python}", "tests/switch2_rumble_test.py", "--cc", "{cc}"]
 
 [[test]]
 name = "controller-devices"
