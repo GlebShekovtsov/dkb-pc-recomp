@@ -1143,12 +1143,10 @@ static int revive_free(const Tex *e, const tex_t *t) {
         mode = v && !strcmp(v, "always") ? 3 : rt_knob("HOLD_REVIVE", "1");
         if (mode == 3) rt_log("vk: TOTK_HOLD_REVIVE=always: released textures are taken back without waiting for held slices");
     }
-    // The same description but for the serial: each Initialize gives the texture a new one (nvn_api_obj.c), and the
-    // cache never reads it.
-    if (!e || !e->released || memcmp(&e->t, t, offsetof(tex_t, serial)) || !(mode == 3 || RT_KNOB_ON(mode))) return 0;
-    int live = other_live_at(e);
-    hold_other_live += (uint64_t)live;
-    return mode == 3 || !live;
+    if (!e || !e->released || memcmp(&e->t, t, sizeof *t) || !(mode == 3 || RT_KNOB_ON(mode))) return 0;
+    if (mode == 3) return 1;
+    if (other_live_at(e)) return hold_other_live++, 0;
+    return 1;
 }
 
 static Tex *entry_of(const tex_t *t) {
