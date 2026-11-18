@@ -116,12 +116,13 @@ def is_exe(p):
 
 def write_tar(out, path):
     """The folder as a .tar.gz, the usual Linux archive: it stores the modes itself (0755 on setup.* and the shell scripts)."""
+    stamp = mr.commit_time()   # not a fixed time: a folder unpacked over an older one must not keep its byte code
     with tarfile.open(path, 'w:gz', compresslevel=6) as t:
         for p in sorted(out.rglob('*')):
             if p.is_file():
                 info = tarfile.TarInfo((Path(out.name) / p.relative_to(out)).as_posix())
                 data = p.read_bytes()
-                info.size, info.mode, info.mtime = len(data), 0o755 if is_exe(p) else 0o644, 0
+                info.size, info.mode, info.mtime = len(data), 0o755 if is_exe(p) else 0o644, stamp
                 info.uid = info.gid = 0
                 info.uname = info.gname = 'root'
                 t.addfile(info, io.BytesIO(data))
@@ -130,10 +131,11 @@ def write_tar(out, path):
 
 def write_zip(out, path):
     """The folder as a zip with the executable bit on setup.* and the shell scripts (unzip honours external_attr)."""
+    date = mr.zip_date()   # the commit's time, as tools/make_release.py write_zip
     with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as z:
         for p in sorted(out.rglob('*')):
             if p.is_file():
-                info = zipfile.ZipInfo((Path(out.name) / p.relative_to(out)).as_posix(), (1980, 1, 1, 0, 0, 0))
+                info = zipfile.ZipInfo((Path(out.name) / p.relative_to(out)).as_posix(), date)
                 info.compress_type = zipfile.ZIP_DEFLATED
                 info.external_attr = (0o755 if is_exe(p) else 0o644) << 16
                 z.writestr(info, p.read_bytes(), compresslevel=6)

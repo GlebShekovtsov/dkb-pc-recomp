@@ -525,12 +525,29 @@ def sizes(out):
     print(f'  {"total":26} {mib(sum(n for _, n in rows)):>12}')
 
 
+def commit_time():
+    """The commit's time (Unix seconds): every file of a release folder is stamped with it. A fixed date for all releases
+    let a folder unpacked over an older one keep the older Python byte code: the interpreter takes a __pycache__ entry
+    whose recorded source time and size match, and a source edited without changing its size (build_xlate.py's patch
+    count, 23 to 24) matched. The installer then ran the old code and stopped at its first step with exit code 1."""
+    r = subprocess.run(['git', '-C', ROOT, 'log', '-1', '--format=%ct', 'HEAD'], capture_output=True, text=True)
+    if r.returncode or not r.stdout.strip().isdigit():
+        sys.exit('no commit time: not a git checkout')
+    return int(r.stdout.strip())
+
+
+def zip_date():
+    """commit_time() as a zip entry's date (UTC; zip stores no zone, and two seconds is its resolution)."""
+    return time.gmtime(commit_time())[:6]
+
+
 def write_zip(out, path):
     path.parent.mkdir(parents=True, exist_ok=True)
+    date = zip_date()
     with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as z:
         for p in sorted(out.rglob('*')):
             if p.is_file():
-                info = zipfile.ZipInfo((Path(out.name) / p.relative_to(out)).as_posix(), (1980, 1, 1, 0, 0, 0))
+                info = zipfile.ZipInfo((Path(out.name) / p.relative_to(out)).as_posix(), date)
                 info.compress_type = zipfile.ZIP_DEFLATED
                 info.external_attr = 0o644 << 16
                 z.writestr(info, p.read_bytes(), compresslevel=6)
