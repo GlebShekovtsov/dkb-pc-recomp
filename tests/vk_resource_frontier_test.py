@@ -52,8 +52,10 @@ def main():
              for name in ('vk_memory.c', 'vk_texture.c', 'vk_exec_draw.c', 'vk_sync.c')}
     memory, texture, draw, sync = (texts[name] for name in texts)
     frontier = 'vk_mem_protect_until' if 'void vk_mem_protect_until(' in memory else 'vk_mem_note_submit'
-    memory_names = ('cmd_init', 'grow', 'free_staging', 'retire', 'collect_locked', 'defer', 'vk_defer_image',
-                    'vk_defer_view', frontier, 'vk_mem_collect', 'vk_mem_shutdown')
+    memory_names = ('cmd_init', 'grow', 'free_staging',
+                    *(('batch_status',) if 'static VkResult batch_status(' in memory else ()), 'retire',
+                    'collect_locked', 'defer', 'vk_defer_image', 'vk_defer_view', frontier, 'vk_mem_collect',
+                    'vk_mem_shutdown')
     texture_names = ('make_key', 'same_but_swizzle', 'rel_unlink', 'destroy_tex', 'entry_of', 'slot_resolve')
     sync_names = ('claim_slot', 'take_slot', 'vk_sync_split', 'vk_sync_submit')
     extracts = {}

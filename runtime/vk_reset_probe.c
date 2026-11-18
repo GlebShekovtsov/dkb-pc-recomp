@@ -52,12 +52,21 @@ static int span_of(ResetCase *test, uint64_t address, uint64_t bytes, VkMemSpan 
     return 1;
 }
 
+// VK_MEM_USE, and whether the span has a buffer after it (a staged pool with neither a mirror nor an import has none).
+static int use_of(ResetCase *test, VkMemSpan *span) {
+    VK_MEM_USE(*span);
+    if (span->buffer) return 1;
+    printf("probe-vkreset: FAIL %s: a staged pool has neither a mirror nor an import\n", test->name);
+    test->failed = 1;
+    return 0;
+}
+
 static int snapshot(VkExec *ex, ResetCase *test, unsigned phase) {
     VkMemSpan target;
     if (!span_of(test, test->read_target, WINDOW_BYTES, &target)) return 0;
     // This is the first indirect-consumer-like USE of the target in the cold case. A reset that wrote only the
     // imported buffer before a mirror existed leaves this consumer on stale bytes, which the exact check detects.
-    VK_MEM_USE(target);
+    if (!use_of(test, &target)) return 0;
     vk_exec_barrier(ex);
     VkBufferCopy copy = {target.offset, (VkDeviceSize)phase * WINDOW_BYTES, WINDOW_BYTES};
     vkCmdCopyBuffer(ex->cb, target.buffer, test->readback, 1, &copy);
@@ -76,13 +85,13 @@ static void work(VkExec *ex, void *context) {
     } else if (test->warm) {
         if (!span_of(test, test->target, WINDOW_BYTES, &target)) return;
         VkBuffer original = target.buffer;
-        VK_MEM_USE(target);
+        if (!use_of(test, &target)) return;
         test->warmed_mirror = target.buffer != original;
     }
 
     // LIST and TARGET are distinct pools. Resolving/using the list cannot create the target's first mirror.
     if (!span_of(test, test->list, LIST_BYTES, &list)) return;
-    VK_MEM_USE(list);
+    if (!use_of(test, &list)) return;
     vk_exec_barrier(ex);
     VkBufferCopy producer = {0, list.offset, LIST_BYTES};
     vkCmdCopyBuffer(ex->cb, test->producer, list.buffer, 1, &producer);
@@ -96,7 +105,7 @@ static void work(VkExec *ex, void *context) {
         for (unsigned i = 0; i < 3; i++) {
             uint64_t address = test->target + 0x40 + 0x40 * i;
             if (!span_of(test, address, 4, &target)) return;
-            VK_MEM_USE(target);
+            if (!use_of(test, &target)) return;
             vk_exec_barrier(ex);
             vkCmdFillBuffer(ex->cb, target.buffer, target.offset, 4, 3);
             ex->recorded++;

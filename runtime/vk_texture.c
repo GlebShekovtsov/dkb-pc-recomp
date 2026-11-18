@@ -1568,6 +1568,25 @@ const VkTexImage *vk_texture_by_id_locked(const dpool_ref *pool, int id, view_t 
     return e ? &e->pub : NULL;
 }
 
+// What vk_texture_by_id_locked would answer from the slot's kept resolution, without resolving, creating or checking
+// anything. For vk_exec.c vk_exec_lookahead, which looks at slots ahead of the replay: an entry it created or uploaded
+// there would come before the GPU writes the replay records meanwhile. Without a kept resolution that still holds (a
+// slot registered since its last draw, as most are in a chain of passes made anew each frame) it returns NULL with
+// *target the NVN target of the registered descriptor and the slot's own view; *target is -1 when the slot holds no
+// texture.
+const VkTexImage *vk_texture_peek_by_id_locked(const dpool_ref *pool, int id, view_t *view, int *has_view, int *target) {
+    *target = -1;
+    DescSlot *d = descriptor_slot(pool, id, 1u << 20, 0);
+    if (!d || d->kind != DESC_TEXTURE) return NULL;
+    TexSlot *s = &d->u.tex;
+    if (!s->ce || s->cgen != agen[agen_idx((uintptr_t)s->t.mem)]) {
+        *view = s->v, *has_view = s->has_view, *target = s->t.d.target;
+        return NULL;
+    }
+    *view = s->cview, *has_view = s->chas_view;
+    return &s->ce->pub;
+}
+
 // vk_dump: the swizzle selectors of the descriptor registered in slot id; 0 when the slot is empty.
 int vk_texture_slot_swz(const dpool_ref *pool, int id, uint8_t swz[4]) {
     lock();

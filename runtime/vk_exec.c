@@ -1178,8 +1178,10 @@ int vk_exec_read_buffer(VkExec *ex, uint64_t addr, uint64_t size, void *out) {
     if (!x_here || ex != &X || !ex->cb || !out || !addr || !size || size > (8ull << 20) ||
         addr > UINT64_MAX - size || (addr & 3) || (size & 3)) return 0;
     VkMemSpan source;
-    if (!vk_mem_resolve(addr, size, &source) || !source.buffer || source.avail < size || (source.offset & 3)) return 0;
-    VK_MEM_PICK(source);   // choose an existing mirror; a read does not create a new one
+    if (!vk_mem_resolve(addr, size, &source) || source.avail < size || (source.offset & 3)) return 0;
+    // Choose an existing mirror; a read does not create a new one, except for a staged pool (vk_memory.c staged
+    // mirror), whose span has no buffer before VK_MEM_PICK gives it the mirror.
+    VK_MEM_PICK(source);
     if (!source.buffer) return 0;
     VkCtx *c = vk_ctx();
     VkBuffer buffer = VK_NULL_HANDLE;
@@ -2775,9 +2777,92 @@ static int merge_walk(VkExec *ex, const op_hdr **hp) {
     return 1;
 }
 
+// ---- one-shot lookahead (issue 309; vk_exec.h vk_exec_lookahead)
+// On a first run a burst of passes into targets the game renders once (probes, captures) met about 120 pipelines no
+// draw had asked for. Each one-shot draw waits for its own (prepare_draw), so they were built one after the other while
+// the pool sat idle, 60 to 230 ms each: a 10 s frame. Before such a wait the next draws of the submission have their
+// pipelines queued, so the pool builds them while the replay waits. The walk follows jumps, calls and the
+// submission's later command buffers, and stops after LOOKAHEAD_DRAWS draws, LOOKAHEAD_OPS ops or LOOKAHEAD_NS (the
+// replay waits meanwhile, and a stage not translated yet is read from the disk cache); it looks again once
+// the replay passed the draws it covered. A render target change sets the formats of the key from the textures and
+// views, as resolve_rt would derive them for a plain colour or depth target (la_set_rt). TOTK_LOOKAHEAD=0 turns it off.
+#define LOOKAHEAD_DRAWS 256
+#define LOOKAHEAD_OPS 16384
+#define LOOKAHEAD_NS 20000000   // only a one-shot wait looks ahead, and it waits 60-90 ms for its own cold build: 3 ms
+                                // covered 9 draws of a burst and left the first cold stall at 4.1 s against 3.0 s
+static _Thread_local const op_hdr *walk_at;              // the op walk replays on the replay thread's context X
+static _Thread_local const op_hdr *walk_ret[CALL_DEPTH];  // where the calls walk is inside return to
+static _Thread_local int walk_depth;                     // walk_at's call depth
+static const uint64_t *la_handles;                       // the submission's command buffers, and the one walk is in
+static int la_n, la_i;
+static uint64_t la_fence, la_until;                      // the last lookahead's submission, and draws_total where it ended
+
+static void la_set_rt(VkExec *s, const p_set_rt *r) {
+    int n = r->n < 0 ? 0 : r->n > 8 ? 8 : r->n, samples = 0;
+    for (int i = 0; i < 8; i++) {
+        const tex_t *t = i < n ? r->color[i] : NULL;
+        s->pipe.color_fmt[i] = !t ? 0 : r->has_cview[i] && r->cview[i].set_format ? r->cview[i].format : t->d.format;
+        if (t && !samples) samples = t->d.samples;
+    }
+    s->pipe.depth_fmt = r->depth ? r->depth->d.format : 0;
+    if (r->depth && !samples) samples = r->depth->d.samples;
+    s->pipe.samples = (uint8_t)(samples > 1 ? samples : 1);
+    s->rt = *r, s->rt_resolved = 0;
+}
+
+void vk_exec_lookahead(VkExec *ex) {
+    static int mode = -1;
+    if (mode < 0) mode = rt_knob("LOOKAHEAD", "1");
+    if (!RT_KNOB_ON(mode) || ex != &X || !x_here || !walk_at || !vk_pipeline_async_on()) return;
+    if (ex->fence == la_fence && draws_total < la_until) return;   // these draws were looked at already
+    static VkExec S;   // the replay thread's only (ex == &X)
+    memcpy(&S, ex, sizeof S);
+    uint64_t t0 = kern_now_ns();
+    const op_hdr *ret[CALL_DEPTH];
+    int depth = walk_depth, hi = la_i;
+    memcpy(ret, walk_ret, sizeof ret);
+    uint32_t draws = 0;
+    const op_hdr *h = nvn_op_next(walk_at);
+    for (int n = 0; n < LOOKAHEAD_OPS && draws < LOOKAHEAD_DRAWS; n++) {
+        if (!(n & 15) && n && kern_now_ns() - t0 > LOOKAHEAD_NS) break;
+        if (h->size < sizeof *h || (h->size & 7) || h->op >= OP_COUNT_) break;
+        const void *a = nvn_op_payload(h);
+        switch (h->op) {
+        case OP_END:
+            if (depth) h = ret[--depth];
+            else if (la_handles && ++hi < la_n && la_handles[hi]) h = nvn_op_first(la_handles[hi]);
+            else n = LOOKAHEAD_OPS;
+            continue;
+        case OP_JUMP: h = (const op_hdr *)(uintptr_t)((const p_jump *)a)->target; continue;
+        case OP_CALL:
+            if (depth >= CALL_DEPTH) break;
+            ret[depth++] = nvn_op_next(h);
+            h = nvn_op_first(((const p_jump *)a)->target);
+            continue;
+        case OP_SET_RT: la_set_rt(&S, a); break;
+        case OP_DRAW: case OP_DRAW_IDX: case OP_DRAW_IDX_IND: draws++;   // fall through
+        case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_TEX: case OP_BIND_IMG:
+            vk_exec_draw_prefetch(&S, h->op, a);
+            break;
+        default: state_op(&S, h->op, a);   // fixed-function and pool state; other ops leave the key alone
+        }
+        h = nvn_op_next(h);
+    }
+    la_fence = ex->fence, la_until = draws_total + draws;
+    static uint32_t looks;
+    if (draws && (++looks <= 8 || !(looks & 63))) {   // the first ones, then every 64th
+        uint64_t queued, used;
+        vk_pipeline_guess_counts(&queued, &used);
+        rt_log("vk_exec: one-shot lookahead %u: the pipelines of the next %u draws looked up in %.2f ms; so far %llu "
+               "pipelines queued ahead, %llu of them asked for by a draw since", looks, draws,
+               (kern_now_ns() - t0) / 1e6, (unsigned long long)queued, (unsigned long long)used);
+    }
+}
+
 static void walk(VkExec *ex, const op_hdr *h, int depth) {
     for (;;) {
         while (h == P.next && !depth) h = par_step(ex, h);
+        if (ex == &X) walk_at = h, walk_depth = depth;
         if (h->size < sizeof *h || (h->size & 7) || h->op >= OP_COUNT_)
             rt_fatal("vk: corrupt command record at %p: op %u size %u", (const void *)h, h->op, h->size);
         const void *a = nvn_op_payload(h);
@@ -2802,6 +2887,7 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
         case OP_JUMP: h = (const op_hdr *)(uintptr_t)((const p_jump *)a)->target; continue;
         case OP_CALL:
             if (depth >= CALL_DEPTH) rt_fatal("vk: command buffer calls nested deeper than %d", CALL_DEPTH);
+            if (ex == &X) walk_ret[depth] = nvn_op_next(h);
             walk(ex, nvn_op_first(((const p_jump *)a)->target), depth + 1);
             break;
         case OP_SET_RT: set_rt(ex, a); break;
@@ -2880,9 +2966,11 @@ static int record_impl(VkCommandBuffer cb, const uint64_t *handles, int n, uint6
             if (!handles[i]) rt_fatal("vk: command handle %d of a submission is null", i);
             const op_hdr *first = nvn_op_first(handles[i]);
             if (par) P.state = PS_SCAN, P.next = first;
+            la_handles = handles, la_n = n, la_i = i;
             walk(ex, first, 0);
         }
         par_close(ex);
+        walk_at = NULL, la_handles = NULL;   // the ops may go with the submission
     }
     if (par_collecting()) par_end_op[OP_COUNT_]++;
     par_settle_all(ex);   // ahead of the collection still open, which goes into the last part

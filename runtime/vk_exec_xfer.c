@@ -457,6 +457,11 @@ static int buffer_side(const VkExec *ex, const Sub *s, uint64_t addr, uint64_t *
         return 0;
     }
     VK_MEM_PICK(m);
+    if (!m.buffer) {   // a staged pool left unbacked (vk.h VK_MEM_PICK)
+        warn_once(W_BUFFER, "texture copy buffer %#llx (%llu bytes) is not one backed span: skipped",
+                  (unsigned long long)addr, (unsigned long long)*size);
+        return 0;
+    }
     *span = m;
     *c = (VkBufferImageCopy){.bufferOffset = m.offset, .bufferRowLength = (uint32_t)(row / (uint64_t)s->bpb) * (uint32_t)s->bw,
                              .bufferImageHeight = hb * (uint32_t)s->bh, .imageSubresource = sub_layers(s),
@@ -668,6 +673,11 @@ static void copy_b2b(VkExec *ex, const p_copy_b2b *p) {
         if (n > d.avail) n = d.avail;
         VK_MEM_PICK(s);
         VK_MEM_PICK(d);
+        if (!s.buffer || !d.buffer) {   // a staged pool left unbacked (vk.h VK_MEM_PICK)
+            warn_once(W_BUFFER, "buffer copy %#llx -> %#llx (%llu bytes) leaves backed memory: rest skipped",
+                      (unsigned long long)p->src, (unsigned long long)p->dst, (unsigned long long)p->size);
+            break;
+        }
         if (s.buffer == d.buffer && s.offset < d.offset + n && d.offset < s.offset + n) {
             warn_once(W_OVERLAP, "buffer copy %#llx -> %#llx overlaps within one buffer: skipped",
                       (unsigned long long)p->src, (unsigned long long)p->dst);
@@ -708,6 +718,11 @@ static void clear_buf(VkExec *ex, const p_clear_buf *p) {
         if (!n) break;
         if (!started) vk_exec_pass_end(ex), vk_exec_barrier(ex), started = 1;
         VK_MEM_PICK(d);
+        if (!d.buffer) {   // a staged pool left unbacked (vk.h VK_MEM_PICK)
+            warn_once(W_BUFFER, "buffer fill at %#llx (%llu bytes) leaves backed memory: rest skipped",
+                      (unsigned long long)p->addr, (unsigned long long)p->size);
+            break;
+        }
         vkCmdFillBuffer(ex->cb, d.buffer, d.offset, n, p->value);
         vk_mem_gpu_wrote(&d, n);
         ex->recorded++;

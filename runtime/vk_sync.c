@@ -520,7 +520,7 @@ static VkCommandBuffer prologue(VkCtx *c, uint64_t fence) {
                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
     vkBeginCommandBuffer(cb, &bi);
     int pair = ts_open(cb);
-    vk_mem_mirror_prologue(cb);
+    vk_mem_mirror_prologue(cb, fence);
     ts_close(cb, pair, fence, NULL);
     vkEndCommandBuffer(cb);
     return cb;

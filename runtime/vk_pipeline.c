@@ -75,7 +75,8 @@ static struct {
     int indep;                         // stage-independent layouts (vk_caps.gpl): vertex set 0, fragment set 1
     int push_stage;                    // GFX_STAGE_* whose set is pushed with independent layouts
     int gpl;                           // draws whose pipeline is building get a fast-linked one (vk_caps.gpl)
-    struct { uint64_t links, wlinks, dlinks, requeued, link_fail, defer, lib_n[4], lib_fail, swaps, slow, pre_used[4], stolen_jobs; double link_ms, link_max, lib_ms[4], lib_max[4], dlink_ms, dlink_max; } g;
+    int guessing;                      // graphics is entering a lookahead's key (pipe_miss marks it Pipe.guess)
+    struct { uint64_t links, wlinks, dlinks, requeued, link_fail, defer, lib_n[4], lib_fail, swaps, slow, pre_used[4], stolen_jobs, la_queued, la_used; double link_ms, link_max, lib_ms[4], lib_max[4], dlink_ms, dlink_max; } g;
     int vs_outs_all;                   // TOTK_VS_OUTS: 0 union of paired fragment inputs, 1 (all) all 32 output locations
     int dyn_vi, dyn_clamp, dyn_poly, dyn_blend_en, dyn_blend_eq, dyn_wmask, dyn_a2c;
     int f_logic_op, f_depth_clamp, f_fill_non_solid, f_dual_src;
@@ -128,6 +129,8 @@ typedef struct Pipe {
     const struct Layout *lay;          // graphics: the layout it was entered with
     VkPipeline fast;                   // GPL: the fast-linked pipeline (kept until shutdown: recorded draws use it)
     uint8_t fast_tried;
+    uint8_t guess;                     // entered by a lookahead (vk_pipeline_graphics_guess), no draw asked for it yet:
+                                       // left out of the key file until one does (under P.lock)
     size_t key_size;
     uint8_t key[];
 } Pipe;
@@ -2431,7 +2434,7 @@ static void job_build(Job *j) {
     if (pipe) {
         P.stats.graphics++;
         if (!stolen) P.stats.async_built++;   // a stolen job was built by the waiting draw: graphics() counts the wait
-        if (!j->prebuild) keys_note(&j->s);
+        if (!j->prebuild && !j->p->guess) keys_note(&j->s);
     } else {
         P.stats.failures++;
         rt_log("vk_pipeline: graphics pipeline not built: pipeline creation failed");
@@ -2614,9 +2617,10 @@ static Pipe *pipe_miss(const VkPipeState *s, const GKey *k, uint64_t h, int mode
         rt_log("vk_pipeline: graphics pipeline not built: %s", why);
     } else if (!j) {
         P.stats.graphics++;
-        if (mode != 2) keys_note(s);
+        if (mode != 2 && !P.guessing) keys_note(s);
     }
     Pipe *p = pipe_add(k, sizeof *k, h, pipe, l, l ? &B : NULL, VK_PIPELINE_BIND_POINT_GRAPHICS, gfx_shader_inputs(s->vs, NULL));
+    if (p && P.guessing) p->guess = 1, P.g.la_queued++;
     if (!j || !p) {
         free(j);
         return p;
@@ -2735,7 +2739,8 @@ static void lib_wait(const VkPipeState *s, const GKey *k, Layout *l, double end)
     }
 }
 
-static VkPipeline graphics(const VkPipeState *s, const VkPipeInfo **info, int async, int *pending, uint32_t wait_ms) {
+static VkPipeline graphics(const VkPipeState *s, const VkPipeInfo **info, int async, int *pending, uint32_t wait_ms,
+                           int guess) {
     if (info) *info = NULL;
     if (pending) *pending = 0;
     if (!s->vs || !ensure_init()) return VK_NULL_HANDLE;
@@ -2745,10 +2750,24 @@ static VkPipeline graphics(const VkPipeState *s, const VkPipeInfo **info, int as
     plat_mutex_lock(&P.lock);
     Pipe *p = pipe_find(&k, sizeof k, h);
     int queued;
+    if (p && guess) {
+        plat_mutex_unlock(&P.lock);   // a lookahead's key that exists: nothing to do or to count
+        return VK_NULL_HANDLE;
+    }
     if (p) {
         if (!p->building) P.stats.hits++;
+        if (p->guess) {   // the first draw that asks for a lookahead's pipeline: its key goes to the file now
+            p->guess = 0, P.g.la_used++;
+            if (!p->building && p->info.pipeline) keys_note(s);
+        }
     } else {
+        P.guessing = guess;
         p = pipe_miss(s, &k, h, async, &queued);
+        P.guessing = 0;
+        if (guess) {
+            plat_mutex_unlock(&P.lock);
+            return VK_NULL_HANDLE;
+        }
     }
     // A draw that would wait (wait_ms) gets its missing shader libraries built at once, the vertex and fragment ones in
     // parallel on idle workers (lib_wait; about 0.12 ms per library from the driver's disk cache, 5-180 ms cold), and
@@ -2820,11 +2839,21 @@ static VkPipeline graphics(const VkPipeState *s, const VkPipeInfo **info, int as
 }
 
 VkPipeline vk_pipeline_graphics(const VkPipeState *s, const VkPipeInfo **info) {
-    return graphics(s, info, 0, NULL, 0);
+    return graphics(s, info, 0, NULL, 0, 0);
 }
 
 VkPipeline vk_pipeline_graphics_async(const VkPipeState *s, const VkPipeInfo **info, int *pending, uint32_t wait_ms) {
-    return graphics(s, info, A.on, pending, wait_ms);
+    return graphics(s, info, A.on, pending, wait_ms, 0);
+}
+
+void vk_pipeline_graphics_guess(const VkPipeState *s) {
+    if (A.on) graphics(s, NULL, 1, NULL, 0, 1);
+}
+
+void vk_pipeline_guess_counts(uint64_t *queued, uint64_t *used) {
+    plat_mutex_lock(&P.lock);
+    *queued = P.g.la_queued, *used = P.g.la_used;
+    plat_mutex_unlock(&P.lock);
 }
 
 // ---- boot prewarm from the key file (comment at "pipeline keys")

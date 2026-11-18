@@ -40,6 +40,9 @@ static uint32_t slots_generation=7, sampler_generation=9, texture_epoch=1;
 static uint32_t address_generation;   // vk_texture.c agen of the texture's address: moves when it is destroyed
 static int keep_ab=1;                 // TOTK_DESC_KEEP is "ab" here: on while this is 1
 static unsigned remapped, replaced, sampler_overwritten, lookup_count, full_count, locked, token_reads;
+static _Thread_local int prefetching;   // vk_exec_draw_prefetch's flag: never set here
+const VkTexImage *vk_texture_peek_by_id_locked(const dpool_ref *pool,int id,view_t *view,int *has_view,int *target)
+{ (void)pool,(void)id,(void)view,(void)has_view,(void)target; return NULL; }   // the prefetch texture lookup
 static unsigned checks, failures;
 #define CHECK(c,message) do { checks++; if (!(c)) { failures++; fprintf(stderr,"FAIL: %s\n",message); } } while (0)
 #define HANDLE ((UINT64_C(257)<<20)|UINT64_C(257))

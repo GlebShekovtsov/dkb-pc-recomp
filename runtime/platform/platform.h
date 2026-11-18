@@ -242,6 +242,14 @@ void plat_mem_lazy(uint64_t base, uint64_t size);
 uint64_t plat_mem_lazy_run(uint64_t a, uint64_t e, int *known);
 void plat_mem_lazy_mark(uint64_t a, uint64_t e);   // the caller committed every whole 64 KiB chunk inside [a, e)
 uint64_t plat_mem_lazy_faults(void);
+// Windows only, for memory.c's guarded pages (the GPU-owned pages of staged mirrors, TOTK_STAGED_WB=fault, and the
+// diagnostic read probe, TOTK_STAGED_READ_PROBE): fault(addr, write, rip) sees every read or write access violation
+// first and returns 1 when it made the page accessible and the access should run again; marked(addr, n) tells
+// plat_mem_readable that the PAGE_NOACCESS pages of a range are guarded ones and count as readable; release(addr, n,
+// caller) makes the guarded pages of a range accessible before plat_mem_read hands them to the kernel. NULL hooks:
+// none.
+void plat_mem_probe_hooks(int (*fault)(uint64_t addr, int write, uint64_t rip), int (*marked)(uint64_t addr, uint64_t n),
+                          void (*release)(uint64_t addr, uint64_t n, uintptr_t caller));
 uint32_t plat_mem_lazy_failure(uint64_t *addr);   // error and address of the last failed lazy commit, 0 when none
 // Starts this program again with the same arguments and ends this process with the new one's exit code (Windows), or
 // replaces this process with it (Linux). Environment changes made before the call are passed on.

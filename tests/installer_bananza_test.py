@@ -23,6 +23,21 @@ sys.path.insert(0, str(ROOT / 'tests'))
 from nup_extract_check import build as build_nup  # noqa: E402  synthetic NUP containers
 
 
+def symlinks_allowed():
+    """Whether this account may create symbolic links: Windows allows it only with Developer Mode or administrator
+    rights (WinError 1314 otherwise). The redirect tests below need them; the junction test does not."""
+    with tempfile.TemporaryDirectory() as folder:
+        try:
+            (Path(folder) / 'link').symlink_to(Path(folder) / 'target')
+            return True
+        except OSError:
+            return False
+
+
+SYMLINKS = symlinks_allowed()
+NO_SYMLINKS = 'this account may not create symbolic links (Windows: Developer Mode off and not administrator)'
+
+
 def tree(folder):
     """A folder as the {name: bytes | tree} that build_nup takes."""
     return {p.name: tree(p) if p.is_dir() else p.read_bytes() for p in sorted(folder.iterdir())}
@@ -32,6 +47,12 @@ class InstallerTest(unittest.TestCase):
     def setUp(self):
         self.work = tempfile.TemporaryDirectory()
         self.addCleanup(self.work.cleanup)
+        # The check step asks for the space a real install needs (about 13 GiB for these tiny files, since it adds
+        # fixed headroom); the synthetic install writes kilobytes, so the free space of the test machine's temp disk
+        # must not decide the result. A test that wants the space error patches disk_usage itself.
+        roomy = patch.object(b.shutil, 'disk_usage', return_value=SimpleNamespace(free=1 << 50))
+        roomy.start()
+        self.addCleanup(roomy.stop)
         base = Path(self.work.name)
         self.root, self.exefs, self.romfs = base / 'source', base / 'dump exefs', base / 'dump romfs'
         self.dest, self.temp = base / 'installed [game]', base / 'temporary'
@@ -466,6 +487,7 @@ assert '--full-build' in a and pathlib.Path(a[a.index('--expected')+1]).name=='e
         self.assertEqual(self.run_install(cancel)[0], 3)
         return next(self.temp.glob('dkb-*'))
 
+    @unittest.skipUnless(SYMLINKS, NO_SYMLINKS)
     def test_owned_workspace_directory_redirects_rejected_before_writers(self):
         workspace = self.cancelled_workspace()
         outside = Path(self.work.name) / 'outside workspace'
@@ -490,6 +512,7 @@ assert '--full-build' in a and pathlib.Path(a[a.index('--expected')+1]).name=='e
                 finally:
                     link.unlink()
 
+    @unittest.skipUnless(SYMLINKS, NO_SYMLINKS)
     def test_owned_workspace_leaf_and_owner_links_rejected_before_writers(self):
         workspace = self.cancelled_workspace()
         outside = Path(self.work.name) / 'outside-file.txt'
@@ -514,6 +537,7 @@ assert '--full-build' in a and pathlib.Path(a[a.index('--expected')+1]).name=='e
                     if old is not None:
                         link.write_bytes(old)
 
+    @unittest.skipUnless(SYMLINKS, NO_SYMLINKS)
     def test_managed_destination_redirect_rejected_before_writers(self):
         self.cancelled_workspace()
         outside = Path(self.work.name) / 'outside-exefs'
@@ -525,6 +549,7 @@ assert '--full-build' in a and pathlib.Path(a[a.index('--expected')+1]).name=='e
         self.assertEqual(next(e['id'] for e in events if e['type']=='error'), 'dkb.path_link')
         self.assertEqual(self.calls, [])
 
+    @unittest.skipUnless(SYMLINKS, NO_SYMLINKS)
     def test_subprocess_writer_rechecks_workspace_before_opening_log_or_spawning(self):
         workspace = self.cancelled_workspace()
         outside = Path(self.work.name)/'outside-writer'

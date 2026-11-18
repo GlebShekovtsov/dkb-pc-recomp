@@ -24,7 +24,7 @@ As far as we know, no other static recompilation of a Switch 2 game is public.
 ## Status
 
 **Playable on recent NVIDIA cards, well past the first level.** Players report runs through layer -101, sublayer 200,
-the Glacier layer, Snow World (Layer 500) and the Tempest layer. The current release is 0.4.1 (17 November), a smaller one with the 38 pull requests since 0.4.0. The
+the Glacier layer, Snow World (Layer 500) and the Tempest layer. The current release is 0.4.2 (18 November), with fewer stalls on first runs and on 4 to 7 thread CPUs and the community pull requests since 0.4.1. The
 [latest release](https://github.com/Lucas-blip-png/dkb-pc-recomp/releases/latest) carries an installer that
 builds the game from your own dump (`.nup`, `.nx` or folders), and a Linux AppImage: [docs/installer.md](docs/installer.md).
 0.4.0 fixes the Snow World and Glacier device loss on NVIDIA (#196, #197, #264), turns the Vulkan recorder off on AMD's
@@ -49,10 +49,10 @@ both FSR upscalers as native anti-aliasing on 3.2.0 when `scene_res = full`, fra
 window scaling filters (`window_filter`), sharper text above 1080p behind `DKB_FONT_SCALE=1` (#214), Polish
 (`lang = pl`, #335), evenly paced audio (#133), HD rumble on Switch Pro Controllers and Joy-Con (#285, untested),
 the AppImage setup fix (#293) and the setup check on CPUs without AVX2 (#318). The CRT and window filters and the
-FSR 3.1 frame interpolation come from community pull requests and have had little testing in play. On `bananza` since 0.4.1: HD rumble is off by default (`rumble_hd = auto` turns it on; third-party pads broke with it, #363, #383) and falls back to two motors for the session
+FSR 3.1 frame interpolation come from community pull requests and have had little testing in play. New in 0.4.2: HD rumble is off by default (`rumble_hd = auto` turns it on; third-party pads broke with it, #363, #383) and falls back to two motors for the session
 after a pad drops (#363), and fewer lock waits and scans in the replay (#354, #361, #365). The Landfill Layer device loss
 on NVIDIA 50-series (#304) is avoided by skipping one vertex stage (45e1a6f48cb7872e), `console = 0` works with Windows
-Terminal (#238), and 23 more community pull requests landed (samplers, Linux memory and lazy write-back, GPU write bookkeeping, fewer VirtualQuery calls, HDR screenshots, DLSS warm-up). The smash blur ends above 60 fps on 1.0.0 too (#389, #390), and DLC from a container whose base package has title id 0 installs (#388).
+Terminal (#238), and 23 more community pull requests landed (samplers, Linux memory and lazy write-back, GPU write bookkeeping, fewer VirtualQuery calls, HDR screenshots, DLSS warm-up). The smash blur ends above 60 fps on 1.0.0 too (#389, #390), and DLC from a container whose base package has title id 0 installs (#388). PCs with 4 to 7 logical processors now record big passes on 3 threads (frames over 50 ms in the heaviest scene tested fell about tenfold on 6), and a first run with an empty pipeline cache stalls far less: the longest wait for one pipeline fell from 2.4 s to 0.23 s and the first heavy frame from about 10 s to 3 s (#309). The layer -200 scene holds 60 fps on a Ryzen 7 5700X and RTX 5060 Ti with warm caches.
 
 RecompLauncher on Linux and macOS: [docs/recomp-launcher.md](docs/recomp-launcher.md). Progress, day by day: [docs/devlog.md](docs/devlog.md). Last updated: 18 November 2026.
 

@@ -64,6 +64,8 @@ def main():
         record = function(execute, 'static int record_impl(') + '\n' + record
     if 'static void views_to_fence(' in execute:   # the view list of a command buffer, shared with the part split
         record = function(execute, 'static void views_to_fence(') + '\n' + record
+    if 'static _Thread_local const op_hdr *walk_at;' in execute:   # the lookahead's view of the walk, cleared after it
+        record = 'static _Thread_local const op_hdr *walk_at __attribute__((unused));\nstatic const uint64_t *la_handles;\nstatic int la_n, la_i;\n' + record
     replacements = {'@API@': str(int(api)), '@GLOBALS@': globals_, '@REPLAY_TYPES@': types,
                     '@COUNTERS@': callback + function(xfer, 'static void report_counter('),
                     '@RECORD@': record,

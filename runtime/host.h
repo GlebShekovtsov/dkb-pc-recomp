@@ -201,13 +201,39 @@ void mem_freeze_exclude(uint64_t a, uint64_t n);
 void mem_thaw_hook(void (*fn)(uint64_t a, uint64_t n));
 void mem_thaw(uint64_t a, uint64_t n);                     // makes the frozen regions over [a, a+n) writable again;
                                                            // before a kernel write (file read) into guest memory
-int mem_guest_readable(uint64_t a, uint64_t n);            // 1 a read of [a, a+n) cannot fault (heap, mapped alias
-                                                           // pages), 0 it can, -1 not guest heap or alias memory;
-                                                           // from memory.c's own map, no system call
+int mem_guest_readable(uint64_t a, uint64_t n);            // 1 a read of [a, a+n) succeeds (heap, mapped alias pages;
+                                                           // GPU-owned staged pages fault into the fetch), 0 it may
+                                                           // not, -1 not guest heap or alias memory; from memory.c's
+                                                           // own map, no system call
 void mem_touch_stats(uint64_t out[4]);                     // mem_touch totals: calls, 64 KiB chunks the commit map
                                                            // answered, chunks queried, map errors (TOTK_TOUCH_MAP=verify)
 void mem_touch(uint64_t a, uint64_t n);                    // commits the lazy guest heap (TOTK_HEAP_LAZY) over [a, a+n)
                                                            // before a kernel or driver access; no-op otherwise
+// Read probe (memory.c, TOTK_STAGED_READ_PROBE, Windows only): mem_probe_on reads the switch once; mem_probe_protect
+// makes the pages of a range PAGE_NOACCESS until their first access, which is counted; mem_probe_release lifts it
+// uncounted; mem_probe_copy copies guest memory without lifting it; mem_probe_log logs the counts (final: the totals).
+int mem_probe_on(void);
+void mem_probe_protect(uint64_t a, uint64_t n);
+void mem_probe_release(uint64_t a, uint64_t n);
+void mem_probe_copy(void *dst, uint64_t src, uint64_t n);
+void mem_probe_log(uint64_t frame, int final);
+extern volatile uint64_t mem_probe_frame;                  // the present being made (vk_mem_census)
+// GPU-owned pages (memory.c, vk_memory.c staged mirror with TOTK_STAGED_WB=fault, Windows only): mem_guard_own makes a
+// page PAGE_NOACCESS (1 when it changed the protection); its first access, or a kernel-path release (mem_thaw,
+// mem_touch, plat_mem_read), calls the hook with the page read-write and claimed, and the hook fetches the GPU's bytes
+// and calls mem_guard_clear. mem_guard_tryclaim claims another owned page the same way (0: not owned or busy).
+// mem_guard_state: 1 owned, 2 being settled, 0 neither. mem_guard_drop opens a range's owned pages without fetching
+// (the pool goes away) and returns how many; *claimed: the pages it left to the threads that claim them. mem_thaw_keep
+// is mem_thaw without settling guarded pages.
+void mem_guard_hook(int (*fetch)(uint64_t page, int write, uint64_t rip, int kernel));
+int mem_guard_own(uint64_t p);
+int mem_guard_own_range(uint64_t a, uint64_t n, int *failed);   // mem_guard_own over a range, one protection per run
+int mem_guard_tryclaim(uint64_t p);
+void mem_guard_clear(uint64_t p);
+int mem_guard_state(uint64_t a);
+int mem_guard_drop(uint64_t a, uint64_t n, int *claimed);
+void mem_thaw_keep(uint64_t a, uint64_t n);
+void mem_touch_keep(uint64_t a, uint64_t n);               // mem_touch without settling guarded pages
 void mem_commit_report(const char *when);                  // logs where the process's commit goes (TOTK_MEM_REPORT)
 void mem_freeze_stats(uint64_t *frozen, uint64_t *freezes, uint64_t *fault_thaws, uint64_t *other_thaws);
                                                            // regions frozen now; freezes and thaws since the last call

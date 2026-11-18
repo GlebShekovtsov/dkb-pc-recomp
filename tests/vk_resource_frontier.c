@@ -202,6 +202,11 @@ static void synthetic_destroy_set_layout(VkDevice d, VkDescriptorSetLayout l, co
 static int mirror_sparse;
 static void sparse_cache_close(void) {}
 static void wb_shutdown(VkCtx *c) { (void)c; }
+static void staged_shutdown(VkCtx *c) { (void)c; }   // vk_memory.c: no staged mirror in this fixture
+static uint64_t staged_min;
+static int staged_fault;
+static void staged_own_shutdown(VkCtx *c) { (void)c; }
+static volatile uint64_t inject_lost;   // vk_memory.c batch_status: TOTK_STAGED_INJECT=fence is off here
 typedef struct WbLocal { void *a; int n, cap; void *k; int nk, ck; struct WbLocal *next; } WbLocal;
 static WbLocal *wb_locals;
 #define cmd_pool memory_cmd_pool

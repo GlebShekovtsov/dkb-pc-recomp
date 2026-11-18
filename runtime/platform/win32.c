@@ -801,10 +801,25 @@ static void lazy_fill(uint64_t addr, uint64_t n) {
 // meanwhile, continues (read or write); a write access violation (ExceptionInformation[0] == 1) otherwise goes to the
 // hook. Registered first, before the crash handler. No lock. A PAGE_NOACCESS page (the moved-stack source) still falls
 // through to the crash handler.
+static int (*probe_fault)(uint64_t addr, int write, uint64_t rip);
+static int (*probe_marked)(uint64_t addr, uint64_t n);
+static void (*probe_release)(uint64_t addr, uint64_t n, uintptr_t caller);
+
+void plat_mem_probe_hooks(int (*fault)(uint64_t addr, int write, uint64_t rip), int (*marked)(uint64_t addr, uint64_t n),
+                          void (*release)(uint64_t addr, uint64_t n, uintptr_t caller)) {
+    probe_marked = marked, probe_release = release;
+    __atomic_store_n(&probe_fault, fault, __ATOMIC_RELEASE);
+}
+
 static LONG CALLBACK fault_veh(EXCEPTION_POINTERS *ep) {
     const EXCEPTION_RECORD *er = ep->ExceptionRecord;
     if (er->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || er->NumberParameters < 2) return EXCEPTION_CONTINUE_SEARCH;
     uint64_t a = (uint64_t)er->ExceptionInformation[1];
+    // memory.c's guarded PAGE_NOACCESS pages (probe_fault: GPU-owned pages and the read probe's), before anything else:
+    // the lazy-heap path below lets a read on a committed page that is not readable go to the crash handler.
+    int (*pf)(uint64_t, int, uint64_t) = __atomic_load_n(&probe_fault, __ATOMIC_ACQUIRE);
+    if (pf && er->ExceptionInformation[0] <= 1 && pf(a, (int)er->ExceptionInformation[0], (uint64_t)ep->ContextRecord->Rip))
+        return EXCEPTION_CONTINUE_EXECUTION;
     uint64_t hi = __atomic_load_n(&lazy_end, __ATOMIC_ACQUIRE), lo = __atomic_load_n(&lazy_base, __ATOMIC_RELAXED);
     if (er->ExceptionInformation[0] <= 1 && a >= lo && a < hi) {
         MEMORY_BASIC_INFORMATION mbi;
@@ -1060,6 +1075,7 @@ void plat_reexec(void) {
 
 int plat_mem_read(uint64_t addr, void *out, size_t n) {
     lazy_fill(addr, n);
+    if (probe_release) probe_release(addr, n, (uintptr_t)__builtin_return_address(0));   // the kernel reads it
     SIZE_T got = 0;
     return ReadProcessMemory(GetCurrentProcess(), (const void *)(uintptr_t)addr, out, n, &got) && got == n;
 }
@@ -1072,7 +1088,10 @@ int plat_mem_readable(uint64_t addr, uint64_t n) {
         int lazy = mbi.State == MEM_RESERVE && a >= __atomic_load_n(&lazy_base, __ATOMIC_RELAXED) &&
                    a < __atomic_load_n(&lazy_end, __ATOMIC_ACQUIRE);
         if (!lazy && mbi.State != MEM_COMMIT) return 0;
-        if (!lazy && (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return 0;
+        if (!lazy && (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) {
+            uint64_t re = (uint64_t)(uintptr_t)mbi.BaseAddress + mbi.RegionSize, e2 = re < end ? re : end;
+            if ((mbi.Protect & PAGE_GUARD) || !probe_marked || !probe_marked(a, e2 > a ? e2 - a : 1)) return 0;
+        }
         a = (uint64_t)(uintptr_t)mbi.BaseAddress + mbi.RegionSize;
         // A reserved region can run past the lazy heap's end; clip so the part beyond is judged on its own.
         if (lazy && a > __atomic_load_n(&lazy_end, __ATOMIC_ACQUIRE)) a = __atomic_load_n(&lazy_end, __ATOMIC_ACQUIRE);
