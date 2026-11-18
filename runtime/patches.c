@@ -118,22 +118,38 @@ static int guard_fail(const char *kind, uint64_t v, uint64_t w) {
 }
 
 // Range checks alone pass an aligned pointer into a page nothing maps (a crash at 410df0 after the first fix), so a
-// pointer must also be readable over the bytes the code reads next. plat_mem_readable is a syscall, and the guards run
-// once per list entry (thousands a frame), so each thread keeps the last few pages it found readable: the valid entries
-// name a handful of layer records and cells, and only a stale pointer misses and pays the syscall.
+// pointer must also be readable over the bytes the code reads next. The guards run once per list entry (about 20,000
+// a frame on Hilltop Layer), so each thread keeps the last few pages it found readable. Those cover most entries but
+// not all (60 to 70 misses a frame there), and a miss is answered from memory.c's map of the guest heap and alias
+// region (mem_guest_readable) before plat_mem_readable, a system call, is asked: on Windows that VirtualQuery scanned
+// the run of like pages around the pointer, up to 308 MiB of committed heap with TOTK_HEAP_LAZY=0, up to 10 ms for one
+// call and 23 ms of the game threads' time a frame, and the back end's GetWriteWatch over the same reservation waited
+// behind it (#317: 5.2 to 6.5 ms a frame of queries that worked 0.4 to 0.5 ms; 36 and 45 fps on Hilltop, 74 and 71
+// with this map). rt_guard_stats counts the checks (in per-thread batches, so the hit path makes no shared write) and
+// the misses.
 #define GUARD_PAGES 16
+#define GUARD_COUNT_BATCH 1024
 static _Thread_local uint64_t g_good[GUARD_PAGES];
-static _Thread_local unsigned g_good_next;
+static _Thread_local unsigned g_good_next, g_checks;
+static volatile int64_t g_check_total, g_miss_total;
 static int guard_readable(uint64_t p, uint64_t n) {
+    if (++g_checks == GUARD_COUNT_BATCH) __atomic_add_fetch(&g_check_total, GUARD_COUNT_BATCH, __ATOMIC_RELAXED), g_checks = 0;
     uint64_t first = p >> 12, last = (p + n - 1) >> 12;
     for (uint64_t pg = first; pg <= last; pg++) {
         int hit = 0;
         for (int i = 0; i < GUARD_PAGES && !hit; i++) hit = g_good[i] == pg + 1;
         if (hit) continue;
-        if (!plat_mem_readable(pg << 12, 1)) return 0;
+        __atomic_add_fetch(&g_miss_total, 1, __ATOMIC_RELAXED);
+        int known = mem_guest_readable(pg << 12, 4096);
+        if (!known || (known < 0 && !plat_mem_readable(pg << 12, 1))) return 0;
         g_good[g_good_next++ % GUARD_PAGES] = pg + 1;
     }
     return 1;
+}
+
+void rt_guard_stats(uint64_t *checks, uint64_t *misses) {
+    *checks = (uint64_t)plat_xchg64(&g_check_total, 0);
+    *misses = (uint64_t)plat_xchg64(&g_miss_total, 0);
 }
 
 // A pointer the code reads from next: a layer record (+0x30, +0x40, +0x44), a cell's +0x48 target, a cell's element

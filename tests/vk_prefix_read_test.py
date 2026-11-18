@@ -30,6 +30,8 @@ def main():
     execute = (ROOT / 'runtime/vk_exec.c').read_text()
     code = '\n'.join(function(sync, name) for name in (
         'static VkCommandBuffer split_impl(', 'VkCommandBuffer vk_sync_split(', 'VkCommandBuffer vk_sync_split_wait('))
+    if 'VkResult vk_sync_queue_submit(' in sync:   # the parts' vkQueueSubmit2 goes through it
+        code = function(sync, 'VkResult vk_sync_queue_submit(') + '\n' + code
     code += '\n' + function(execute, 'int vk_exec_read_buffer(')
     code += '\n' + function(execute, 'static void views_to_fence(')
     code += '\n' + function(execute, 'static int record_impl(')

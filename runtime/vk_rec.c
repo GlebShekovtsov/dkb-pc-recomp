@@ -882,9 +882,7 @@ static void exec_cb(VkCommandBuffer cb, uint32_t op, void *p) {
                                             {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = a->cb}};
         VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .commandBufferInfoCount = a->pro ? 2 : 1,
                             .pCommandBufferInfos = a->pro ? cbi : cbi + 1};
-        vk_queue_lock();
-        VkResult r = vkQueueSubmit2(vk_ctx()->gfx_queue, 1, &si, VK_NULL_HANDLE);
-        vk_queue_unlock();
+        VkResult r = vk_sync_queue_submit(&si, VK_NULL_HANDLE, a->fence);
         if (r != VK_SUCCESS) {
             vk_device_fault_report(r);
             rt_fatal("vk: vkQueueSubmit2 of a part of value %llu failed (%d)", (unsigned long long)a->fence, (int)r);

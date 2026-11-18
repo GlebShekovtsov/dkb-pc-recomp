@@ -575,6 +575,7 @@ int vk_init(void) {
 }
 
 void vk_shutdown(void) {
+    vk_antilag_release();   // its function and state belong to the device about to go
     plat_mutex_lock(&g_lock);
     if (g_ready) { destroy_all(); g_ready = 0; }
     plat_mutex_unlock(&g_lock);

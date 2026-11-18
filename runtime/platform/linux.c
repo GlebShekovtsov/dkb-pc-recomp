@@ -6,6 +6,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 #include <linux/fs.h>
 #include <linux/futex.h>
 #include <linux/userfaultfd.h>
@@ -32,6 +35,7 @@
 #include <SDL3/SDL_clipboard.h>
 
 #include "platform.h"
+#include "../linux_pressure.h"
 
 // The write-watch ABI of Linux 6.7 (uapi linux/fs.h and linux/userfaultfd.h), for headers older than it: the release
 // builds against the Steam Runtime's 5.10 headers and runs on newer kernels. The kernel refuses what it lacks at run time.
@@ -581,38 +585,49 @@ void plat_mutex_unlock_shared(PlatMutex *m) {
     if (!(s & LK_R) && (s & LK_S)) lk_wake(w);
 }
 
-// ---- condition variables: a sequence number in the first 32 bits. A waiter reads it before releasing the lock and
-// sleeps only while it is unchanged, so a signal between the release and the sleep is not lost.
+// ---- condition variables: a sequence number in the first 32 bits and the count of waiting threads in the second. A
+// waiter reads the number before releasing the lock and sleeps only while it is unchanged, so a signal between the
+// release and the sleep is not lost. A signal skips the futex system call when nobody waits, as Hookshot's
+// WakeConditionVariable and cv_wait do (Hookshot, host/posix/win32_posix.c). Every access is sequentially consistent:
+// a signal that reads no waiter came, in that one order, before the waiter counted itself, so either the waiter read
+// the number after the signal's increment (the signal came before the wait, which the caller's predicate under the
+// lock covers) or the futex wait finds the number changed and returns at once. Nothing is lost.
 
+_Static_assert(sizeof(PlatCond) >= 2 * sizeof(uint32_t), "PlatCond holds the sequence number and the waiter count");
 static inline volatile uint32_t *cv(PlatCond *c) { return (volatile uint32_t *)&c->p; }
+static inline volatile uint32_t *cv_waiters(PlatCond *c) { return (volatile uint32_t *)&c->p + 1; }
 
 void plat_cond_init(PlatCond *c) { c->p = 0; }
 
 void plat_cond_wait(PlatCond *c, PlatMutex *m) {
-    uint32_t seq = __atomic_load_n(cv(c), __ATOMIC_RELAXED);
+    uint32_t seq = __atomic_load_n(cv(c), __ATOMIC_SEQ_CST);
+    __atomic_add_fetch(cv_waiters(c), 1, __ATOMIC_SEQ_CST);
     plat_mutex_unlock(m);
     futex(cv(c), FUTEX_WAIT, seq, NULL);
+    __atomic_sub_fetch(cv_waiters(c), 1, __ATOMIC_SEQ_CST);
     plat_mutex_lock(m);
 }
 
 int plat_cond_wait_ns(PlatCond *c, PlatMutex *m, uint64_t ns) {
-    uint32_t seq = __atomic_load_n(cv(c), __ATOMIC_RELAXED);
+    uint32_t seq = __atomic_load_n(cv(c), __ATOMIC_SEQ_CST);
     struct timespec ts = {(time_t)(ns / 1000000000u), (long)(ns % 1000000000u)};
+    __atomic_add_fetch(cv_waiters(c), 1, __ATOMIC_SEQ_CST);
     plat_mutex_unlock(m);
     long r = futex(cv(c), FUTEX_WAIT, seq, &ts);
     int timed_out = r == -1 && errno == ETIMEDOUT;
+    __atomic_sub_fetch(cv_waiters(c), 1, __ATOMIC_SEQ_CST);
     plat_mutex_lock(m);
     return !timed_out;
 }
 
 void plat_cond_signal(PlatCond *c) {
-    __atomic_add_fetch(cv(c), 1, __ATOMIC_RELEASE);
-    futex(cv(c), FUTEX_WAKE, 1, NULL);
+    __atomic_add_fetch(cv(c), 1, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(cv_waiters(c), __ATOMIC_SEQ_CST)) futex(cv(c), FUTEX_WAKE, 1, NULL);
 }
 
 void plat_cond_broadcast(PlatCond *c) {
-    __atomic_add_fetch(cv(c), 1, __ATOMIC_RELEASE);
-    futex(cv(c), FUTEX_WAKE, INT_MAX, NULL);
+    __atomic_add_fetch(cv(c), 1, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(cv_waiters(c), __ATOMIC_SEQ_CST)) futex(cv(c), FUTEX_WAKE, INT_MAX, NULL);
 }
 
 // ---- files
@@ -957,11 +972,13 @@ void plat_mem_prewrite(uint64_t addr, uint64_t n) {
 // write-fault hook first (memory.c thaws a frozen region); a fault in this executable's code then goes to the crash
 // hook (main.c); anything else gets the default action. Runs on the thread's signal stack.
 static int (*fault_hook)(uint64_t addr);
+static int (*access_hook)(uint64_t addr);
 static void (*crash_fn)(const PlatCrash *c);
 
 static void fault_handler(int sig, siginfo_t *si, void *uc) {
     ucontext_t *u = uc;
     long err = u->uc_mcontext.gregs[REG_ERR];
+    if (sig == SIGSEGV && access_hook && access_hook((uint64_t)(uintptr_t)si->si_addr)) return;   // a sealed page
     if (sig == SIGSEGV && fault_hook && (err & 2) && fault_hook((uint64_t)(uintptr_t)si->si_addr)) return;
     uintptr_t rip = (uintptr_t)u->uc_mcontext.gregs[REG_RIP];
     Dl_info at, self;
@@ -987,6 +1004,17 @@ static void fault_install(void) {
     sigaction(SIGBUS, &sa, NULL);
     sigaction(SIGILL, &sa, NULL);
     sigaction(SIGFPE, &sa, NULL);
+}
+
+int plat_mem_seal(uint64_t addr, uint64_t n, int on) {
+    // pstate stays: see platform.h
+    return !mprotect((void *)(uintptr_t)addr, n, on ? PROT_NONE : PROT_READ | PROT_WRITE);
+}
+
+int plat_mem_access_hook(int (*fn)(uint64_t addr)) {
+    access_hook = fn;
+    fault_install();
+    return 1;
 }
 
 void plat_mem_fault_hook(int (*fn)(uint64_t addr)) {
@@ -1597,10 +1625,36 @@ void plat_mem_info(float *used_mb, float *total_mb, float *proc_mb) {
     if (f) fclose(f);
 }
 
+int plat_mem_avail(uint64_t *avail, uint64_t *swap_free, uint64_t *total, int *has_swap) {
+    char buf[4096];
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (!f) return 0;
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    return lp_parse_meminfo(buf, avail, swap_free, total, has_swap);
+}
+
+int plat_mem_trim(void) {
+#ifdef __GLIBC__
+    return malloc_trim(0);
+#else
+    return 0;
+#endif
+}
+
 // No walk of the address space on this host: mem_commit_report then sums nothing.
 void plat_mem_walk(void (*fn)(uint64_t, uint64_t, int, void *), void *arg) { (void)fn, (void)arg; }
 // Not implemented on this host (the commit report is Windows only): reports 0.
 uint64_t plat_mem_resident(uint64_t base, uint64_t size) { (void)base, (void)size; return 0; }
+// No VirtualQuery-like scan here: nothing is counted.
+void plat_vm_stats(PlatVmStat out[PLAT_VM_N]) { memset(out, 0, PLAT_VM_N * sizeof *out); }
+
+uint64_t plat_self_cpu_ns(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
+    return (uint64_t)t.tv_sec * 1000000000u + (uint64_t)t.tv_nsec;
+}
 
 void plat_process_memory(uint64_t *resident, uint64_t *private_bytes) {
     *resident = *private_bytes = 0;

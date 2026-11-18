@@ -141,7 +141,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
                             "A window smaller than the picture is filtered over the pixels each window pixel covers.",
     [UI_MENU_FILTER_LINEAR] = "Linear", [UI_MENU_FILTER_CATMULL_ROM] = "Catmull-Rom", [UI_MENU_FILTER_LANCZOS] = "Lanczos",
     [UI_MENU_FILTER_FSR1] = "AMD FSR 1",
-    [UI_MENU_FILTER_NOT_NEEDED] = "Not needed (window = output)",
+    [UI_MENU_FILTER_SHARPNESS_ONLY] = "window = output: only matters for Sharpness",
     [UI_MENU_ASPECT] = "Display scaling",
     [UI_MENU_ASPECT_DESC] = "Default keeps the game's shape and adds black bars if needed.\n"
                             "Stretch to fill uses the whole window or screen. The image stretches only if the shapes differ.",
@@ -152,6 +152,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_SHARPNESS_DESC] = "Sharpens the finished picture as it is scaled to the window: with AMD FSR 1 where it enlarges, and "
                                "with Linear, Catmull-Rom or Lanczos at any window size, the output's size included. 0 turns it off. "
                                "Too much shows halos around edges.",
+    [UI_MENU_SHARPNESS_NO_EFFECT] = "no effect with this scaling filter here: choose another",
     [UI_MENU_NO_UPSCALING] = "Requires a smaller game image",
     [UI_MENU_SMAA] = "Anti-aliasing (SMAA)",
     [UI_MENU_SMAA_DESC] = "Smooths jagged edges in the game image and HUD. Higher settings use more GPU time.",
@@ -536,7 +537,7 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
                             "Окно меньше картинки фильтруется по пикселям, которые покрывает каждый пиксель окна.",
     [UI_MENU_FILTER_LINEAR] = "Линейный", [UI_MENU_FILTER_CATMULL_ROM] = "Catmull-Rom", [UI_MENU_FILTER_LANCZOS] = "Lanczos",
     [UI_MENU_FILTER_FSR1] = "AMD FSR 1",
-    [UI_MENU_FILTER_NOT_NEEDED] = "Не требуется (окно = вывод)",
+    [UI_MENU_FILTER_SHARPNESS_ONLY] = "окно = вывод: влияет только на резкость",
     [UI_MENU_ASPECT] = "Масштабирование вывода",
     [UI_MENU_ASPECT_DESC] = "По умолчанию пропорции игры сохраняются, при необходимости появляются чёрные полосы.\n"
                             "В режиме «Растянуть» изображение заполняет всё окно или экран. Оно растягивается, только "
@@ -548,6 +549,7 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_SHARPNESS_DESC] = "Повышает резкость готовой картинки при масштабировании под окно: с AMD FSR 1, когда он увеличивает "
                                "картинку, а с линейным фильтром, Catmull-Rom или Lanczos при любом размере окна, в том числе равном "
                                "разрешению вывода. 0 выключает его. При слишком большом значении вокруг краёв появляются ореолы.",
+    [UI_MENU_SHARPNESS_NO_EFFECT] = "здесь не действует с этим фильтром масштабирования: выберите другой",
     [UI_MENU_NO_UPSCALING] = "Нужно меньшее разрешение игры",
     [UI_MENU_SMAA] = "Сглаживание (SMAA)",
     [UI_MENU_SMAA_DESC] = "Сглаживает лесенки на готовой картинке после масштабирования под окно и до отрисовки этого "

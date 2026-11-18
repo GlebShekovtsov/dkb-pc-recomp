@@ -139,7 +139,7 @@ class GeometryTest(unittest.TestCase):
             'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMDATA', 'SYSTEMDRIVE'}}
         cls.env.update(DOTNET_ROOT=str(args.dotnet.parent), DOTNET_PROCESSOR_COUNT='2',
                        DOTNET_CLI_TELEMETRY_OPTOUT='1', DOTNET_GENERATE_ASPNET_CERTIFICATE='false',
-                       DOTNET_SKIP_FIRST_TIME_EXPERIENCE='1', DOTNET_NOLOGO='1')
+                       DOTNET_SKIP_FIRST_TIME_EXPERIENCE='1', DOTNET_NOLOGO='1', DOTNET_ADD_GLOBAL_TOOLS_TO_PATH='false')
 
     def translate(self, jobs, valid=True, translator=None):
         run = subprocess.run(command(translator or args.xlate) + ['--serve'], env=self.env,

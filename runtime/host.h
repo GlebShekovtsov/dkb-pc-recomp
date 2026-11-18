@@ -34,6 +34,25 @@ void prof_write(void);                          // idempotent; boot.c calls it b
 uint64_t perf_begin(void);                      // start time of a wait; pair with perf_end
 void perf_end(int kind, uint64_t t0);           // counts render-thread time only
 void perf_replay(uint64_t t0);                  // replay (NVN -> Vulkan recording) time on any thread, waits inside it included
+// TOTK_TRACE=perf: the replay of a slow frame by part (perf.c, "replay by part"). submit_record (vk_sync.c) brackets its
+// recording with perf_ph_replay_begin/end; inside, each part named here is timed on the recording thread, every
+// perf_begin/perf_end pair among them (the PERF_ kinds above keep their numbers), and each part's time is its own, the
+// named parts inside it taken out. The rest of the replay is printed as such. perf_ph_begin returns 0 on a thread that is
+// not recording or with the trace off, and perf_ph_end does nothing then; perf_ph_begin_cpu also takes the thread's CPU
+// time, for the parts where waiting and working are to be told apart.
+enum { PERF_PH_IMPORT = PERF_N, PERF_PH_MIRROR, PERF_PH_MIRROR_BEGIN, PERF_PH_MSYNC, PERF_PH_WW, PERF_PH_SHADER,
+       PERF_PH_IMAGE, PERF_PH_DLSS_CREATE, PERF_PH_DLSS_EVAL, PERF_PH_TEMPORAL, PERF_PH_SPIRV_HASH, PERF_PH_SLICE_START,
+       PERF_PH_SLICE_WAIT, PERF_PH_SUBMIT, PERF_PH_USNAP, PERF_PH_BUDGET, PERF_PH_N };
+int perf_ph_replay_begin(void);                 // returns what perf_ph_replay_end takes
+void perf_ph_replay_end(int prev);
+int perf_ph_worker_begin(void);                 // a slice worker records a slice: its parts go to a bank of their own
+void perf_ph_worker_end(int prev);
+uint64_t perf_ph_begin(void);
+uint64_t perf_ph_begin_cpu(void);
+void perf_ph_end(int part, uint64_t t0);
+// A pass the replay recorded unsliced because its targets had no history (vk_exec.c vk_exec_pass_end): its time,
+// with the parts inside it, for the same line.
+void perf_ph_unsliced(uint64_t ns, uint32_t draws);
 // Running totals after a replay: draws and dispatches recorded, descriptor pools taken and created (the per-draw cost
 // and pool line of TOTK_TRACE=perf).
 void perf_replay_totals(uint64_t draws, uint64_t pools_taken, uint64_t pools_created);
@@ -176,8 +195,17 @@ int mem_freeze(uint64_t a);                                // makes the 2 MiB re
                                                            // mem_thaw thaws it; 1 frozen (or already), 0 refused
 int mem_frozen(uint64_t a);                                // the 2 MiB region of a is frozen: no page in it changed
                                                            // since its freeze
+// Thaws the regions over [a, a+n) for good: mem_freeze refuses them.
+void mem_freeze_exclude(uint64_t a, uint64_t n);
+// Called by mem_thaw, before its lock, for a range with such regions.
+void mem_thaw_hook(void (*fn)(uint64_t a, uint64_t n));
 void mem_thaw(uint64_t a, uint64_t n);                     // makes the frozen regions over [a, a+n) writable again;
                                                            // before a kernel write (file read) into guest memory
+int mem_guest_readable(uint64_t a, uint64_t n);            // 1 a read of [a, a+n) cannot fault (heap, mapped alias
+                                                           // pages), 0 it can, -1 not guest heap or alias memory;
+                                                           // from memory.c's own map, no system call
+void mem_touch_stats(uint64_t out[4]);                     // mem_touch totals: calls, 64 KiB chunks the commit map
+                                                           // answered, chunks queried, map errors (TOTK_TOUCH_MAP=verify)
 void mem_touch(uint64_t a, uint64_t n);                    // commits the lazy guest heap (TOTK_HEAP_LAZY) over [a, a+n)
                                                            // before a kernel or driver access; no-op otherwise
 void mem_commit_report(const char *when);                  // logs where the process's commit goes (TOTK_MEM_REPORT)
@@ -295,6 +323,7 @@ int dkb_native_aa(void);                                   // Bananza: the game'
 int dkb_native_aa_issued_by(uint64_t caller);              // ... and a dispatch issued at that guest address is it
 void dkb_native_aa_live(void);                             // re-read the Upscaler setting (frame_step_present)
 int dkb_wide_output(unsigned out[2]);                      // active mode; optional output gets its size or the stock size
+void dkb_wide_upscale_output(unsigned out[2]);             // Bananza: the size the game's upscaler writes
 int res_sizes(unsigned out[2], unsigned scene[2]);         // the output and scene sizes in effect (the game's own
                                                            // until res_init switched the sets on). Bananza: the game's
                                                            // upscaler output and input; 0 (both zero) when none ran
@@ -315,6 +344,7 @@ void rt_patch_disable(int set);                            // before the guest s
 void rt_patch_switch(int set, int on);                     // at run time (live settings): each site takes the new code
                                                            // the next time it runs
 void *rt_patch_page(void);                                 // the page the patched code reads (NULL without the table)
+void rt_guard_stats(uint64_t *checks, uint64_t *misses);   // pointer guards run and page-cache misses since the last call
 void dkb_camera_init(void);                                // camera patch callbacks, before hostfn_seal
 void frame_step_init(void);                                // after rt_patches_init: the real-time step's first value
 int frame_step_realtime(void);                             // the real-time step is on: presents ignore the interval

@@ -516,16 +516,17 @@ static void display_main(void *arg) {
             on_time = late = skipped = 0, since = at;
         }
         const int timed = st->timed, shown = st->n;
-        // The flight thumbnail names the game's frame (vk_thumbs_frame): its own frame when the set shows it, else the
-        // set's last frame, the one nearest it (Auto shows the game's frame only when a refresh falls on it).
+        // The frame that stands for the game's: its own when the set shows it, else the set's last frame, the one nearest
+        // it (Auto shows the game's frame only when a refresh falls on it). It names the flight thumbnail
+        // (vk_thumbs_frame) and, like the game's own frame, is never left out, so no set loses its thumbnail.
         int tag = shown - 1;
         for (int k = 0; k < shown; k++)
             if (st->game[k]) tag = k;
         const int64_t step = interval / (shown > 1 ? shown : 1);
         for (int k = 0; k < shown; k++) {
             // A made frame is left out when the next set is already waiting: the display thread behind the game holds
-            // its sets, and the game waits for them. The set's game frame is always shown.
-            if (!st->game[k]) {
+            // its sets, and the game waits for them. The frame that stands for the game's (tag) is always shown.
+            if (!st->game[k] && k != tag) {
                 plat_mutex_lock(&D.mu);
                 const int newer = D.count > 0;
                 plat_mutex_unlock(&D.mu);

@@ -26,7 +26,8 @@ static inline int wf_resolve(const char *window_filter, int filter_set, const ch
 }
 
 // Whether the filter has anything to do: the picture (pw x ph, the crop of the game's image) is not the size the window
-// shows it at (ww x wh, the fitted rectangle). The menu shows "Not needed (window = output)" while this is 0.
+// shows it at (ww x wh, the fitted rectangle). While this is 0 the menu's filter row says the filter only matters for
+// Sharpness there (wf_plan: Linear, Catmull-Rom and Lanczos still sharpen at the picture's size).
 static inline int wf_needed(int pw, int ph, int ww, int wh) { return pw != ww || ph != wh; }
 
 // What the present records for one frame.
@@ -60,4 +61,12 @@ static inline WfPlan wf_plan(int filter, int sharpness, int native_hdr, int pw, 
     p.sharp = sharp;
     p.pass = sharp > 0 || (needed && p.mode != WF_LINEAR);
     return p;
+}
+
+// Whether the Sharpness slider does anything with this filter at these sizes: the plan for a non-zero sharpness runs
+// FSR 1 (whose RCAS takes it) or the pass. 0 for FSR 1 where the window is not larger than an SDR picture, and for the
+// legacy plain blit; the menu says so under the Sharpness row.
+static inline int wf_sharpens(int filter, int native_hdr, int pw, int ph, int ww, int wh) {
+    WfPlan p = wf_plan(filter, 100, native_hdr, pw, ph, ww, wh);
+    return p.fsr1 || p.pass;
 }

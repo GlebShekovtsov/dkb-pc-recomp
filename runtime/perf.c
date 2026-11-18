@@ -50,6 +50,7 @@ void prof_start(void) {
     flight_init();
     atexit(perf_summary_flush);   // boot.c's _exit path goes through prof_write instead
     perf_base = (rt_trace & RT_TRACE_PERF) || flight_on;
+    if (rt_trace & RT_TRACE_PERF) plat_op_trace();   // operations in flight (platform.h), for ops_frame_log and vk_memory.c
     perf_on = perf_base || overlay >= 2;
     if (prof_sampler_start()) atexit(prof_write);   // a --seconds run ends in _exit: boot.c calls prof_write itself first
 }
@@ -64,13 +65,106 @@ void prof_write(void) {
 // flight recorder (TOTK_FLIGHT=1, flight.c) takes the same numbers per frame.
 static uint64_t wait_ns[PERF_N], frame_ns[PERF_N], worst_ns[PERF_N];   // window totals, this frame, the slowest frame
 
-uint64_t perf_begin(void) { return kern_now_ns(); }
+// ---- TOTK_TRACE=perf: the replay of a slow frame by part (host.h PERF_PH_). The recording thread keeps a stack of the
+// parts open on it: a part's time is its interval less the intervals of the parts that ended inside it, so the parts
+// add up to no more than the replay and what is left is the replay's own walk. Only the thread inside submit_record
+// pushes (ph_on), and the slice workers while they record a slice (perf_ph_worker_begin), so the other threads'
+// perf_begin costs one thread-local load more. A perf_begin whose perf_end never comes (an early return) stays on the
+// stack until the part below it ends, and the time of the parts inside it goes to that part's children all the same
+// (ph_close). Two banks of sums: the recording thread's (0) and the slice workers' together (1), whose work the
+// recording thread sees only as its waits for slices. The sums are per present, cleared by the render thread there.
+#define PH_DEPTH 32
+typedef struct { uint64_t t0, child, cpu0; } PhFrame;
+static _Thread_local int ph_on, ph_n, ph_bank;
+static _Thread_local PhFrame ph_st[PH_DEPTH];
+static volatile int64_t ph_ns[2][PERF_PH_N], ph_cnt[2][PERF_PH_N], ph_max[2][PERF_PH_N], ph_cpu[2][PERF_PH_N];
+static volatile int64_t ph_all_ns[2], ph_all_cpu[2];   // the time inside the brackets and the thread CPU time in them
 
-void perf_replay_thread(void) { prof_replay_tid = plat_thread_id(); }
+static void ph_push(uint64_t t, uint64_t cpu0) {
+    if (ph_n < PH_DEPTH) ph_st[ph_n++] = (PhFrame){t, 0, cpu0};
+}
+
+static void ph_close(int part, uint64_t t0, uint64_t now) {
+    int i = ph_n - 1;
+    while (i >= 0 && ph_st[i].t0 != t0) i--;
+    uint64_t d = now - t0, child = 0, cpu0 = 0;
+    if (i >= 0) {
+        for (int j = ph_n - 1; j > i; j--) ph_st[j - 1].child += ph_st[j].child;   // perf_begins without their end
+        child = ph_st[i].child, cpu0 = ph_st[i].cpu0;
+        ph_n = i;
+    }
+    if (ph_n) ph_st[ph_n - 1].child += d;
+    if (part < 0 || part >= PERF_PH_N) return;
+    int b = ph_bank;
+    plat_add64(&ph_ns[b][part], (int64_t)(d > child ? d - child : 0));
+    plat_inc64(&ph_cnt[b][part]);
+    int64_t m = __atomic_load_n(&ph_max[b][part], __ATOMIC_RELAXED);
+    while ((int64_t)d > m && !__atomic_compare_exchange_n(&ph_max[b][part], &m, (int64_t)d, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
+    if (cpu0) plat_add64(&ph_cpu[b][part], (int64_t)(plat_self_cpu_ns() - cpu0));
+}
+
+static _Thread_local uint64_t ph_t_start, ph_cpu_start;
+
+static int ph_open(int bank) {
+    int prev = ph_on | ph_bank << 1;
+    ph_on = (rt_trace & RT_TRACE_PERF) != 0;
+    ph_n = 0, ph_bank = bank;
+    if (ph_on) ph_cpu_start = plat_self_cpu_ns(), ph_t_start = kern_now_ns();
+    return prev;
+}
+
+static void ph_shut(int prev) {
+    if (ph_on) {
+        plat_add64(&ph_all_ns[ph_bank], (int64_t)(kern_now_ns() - ph_t_start));
+        plat_add64(&ph_all_cpu[ph_bank], (int64_t)(plat_self_cpu_ns() - ph_cpu_start));
+    }
+    ph_on = prev & 1, ph_bank = prev >> 1, ph_n = 0;
+}
+
+int perf_ph_replay_begin(void) { return ph_open(0); }
+void perf_ph_replay_end(int prev) { ph_shut(prev); }
+int perf_ph_worker_begin(void) { return ph_open(1); }
+void perf_ph_worker_end(int prev) { ph_shut(prev); }
+
+uint64_t perf_ph_begin(void) {
+    if (!ph_on) return 0;
+    uint64_t t = kern_now_ns();
+    ph_push(t, 0);
+    return t;
+}
+
+uint64_t perf_ph_begin_cpu(void) {
+    if (!ph_on) return 0;
+    uint64_t c = plat_self_cpu_ns(), t = kern_now_ns();
+    ph_push(t, c ? c : 1);
+    return t;
+}
+
+void perf_ph_end(int part, uint64_t t0) {
+    if (t0 && ph_on) ph_close(part, t0, kern_now_ns());
+}
+
+static volatile int64_t ph_new_ns, ph_new_draws, ph_new_passes;
+
+void perf_ph_unsliced(uint64_t ns, uint32_t draws) {
+    plat_add64(&ph_new_ns, (int64_t)ns), plat_add64(&ph_new_draws, draws), plat_inc64(&ph_new_passes);
+}
+
+uint64_t perf_begin(void) {
+    uint64_t t = kern_now_ns();
+    if (ph_on) ph_push(t, 0);
+    return t;
+}
+
+void perf_replay_thread(void) {
+    prof_replay_tid = plat_thread_id();
+    plat_op_role(PLAT_OP_REPLAY);
+}
 void perf_main_thread(void) { prof_main_tid = plat_thread_id(); }
 
 void perf_end(int kind, uint64_t t0) {
     if (!t0) return;
+    if (ph_on) ph_close(kind, t0, kern_now_ns());
     uint32_t tid = plat_thread_id();
     if (tid != prof_render_tid && tid != prof_replay_tid) return;
     uint64_t d = kern_now_ns() - t0;
@@ -318,10 +412,103 @@ static void lock_waits_log(uint64_t frame) {
     rt_log("perf: frame %llu: lock waits over 100 us: %s", (unsigned long long)frame, line);
 }
 
+// A slow frame's replay by part (TOTK_TRACE=perf): every part that took 0.05 ms or more, longest first, with its count,
+// its longest single interval (with the parts inside it) and, for the parts timed with perf_ph_begin_cpu, the thread's
+// CPU time in them. "rest of the walk" is the replay less the parts: the walk's own work and everything it does that no
+// part names. "outside the replay" is the frame interval less the replay; with TOTK_REPLAY_ASYNC the replay runs on its
+// own thread beside the render thread, so the two need not add up to the interval. A second line gives the slice
+// workers' slices the same way, summed over the workers (they run side by side, so it can exceed the frame). Every
+// present clears the sums, so the lines hold what was recorded since the previous one.
+static void ph_frame(uint64_t frame, uint64_t d, uint64_t rep, int slow) {
+    static const char *const name[PERF_PH_N] = {
+        [PERF_FENCE] = "fence waits", [PERF_DRAIN] = "recorder drains", [PERF_PIPE] = "pipeline waits",
+        [PERF_XLATE] = "shader translation", [PERF_TEX] = "texture uploads", [PERF_ASTC] = "ASTC decode",
+        [PERF_PH_IMPORT] = "pool imports on first use", [PERF_PH_MIRROR] = "mirrors made on first use",
+        [PERF_PH_MIRROR_BEGIN] = "mirror pre-snapshot", [PERF_PH_MSYNC] = "mirror syncs",
+        [PERF_PH_WW] = "write-watch queries", [PERF_PH_SHADER] = "shader lookups (new program stages)",
+        [PERF_PH_IMAGE] = "texture images made", [PERF_PH_DLSS_CREATE] = "DLSS feature creation",
+        [PERF_PH_DLSS_EVAL] = "DLSS evaluation", [PERF_PH_TEMPORAL] = "temporal inputs (motion pass)",
+        [PERF_PH_SPIRV_HASH] = "SPIR-V hashes (upscaler match)", [PERF_PH_SLICE_START] = "slice worker start",
+        [PERF_PH_SLICE_WAIT] = "waits for slices", [PERF_PH_SUBMIT] = "part submits",
+        [PERF_PH_USNAP] = "uniform snapshot", [PERF_PH_BUDGET] = "VRAM budget queries"};
+    int64_t ns[2][PERF_PH_N], cnt[2][PERF_PH_N], mx[2][PERF_PH_N], cpu[2][PERF_PH_N], all[2], allc[2];
+    for (int b = 0; b < 2; b++) {
+        for (int i = 0; i < PERF_PH_N; i++)
+            ns[b][i] = plat_xchg64(&ph_ns[b][i], 0), cnt[b][i] = plat_xchg64(&ph_cnt[b][i], 0),
+            mx[b][i] = plat_xchg64(&ph_max[b][i], 0), cpu[b][i] = plat_xchg64(&ph_cpu[b][i], 0);
+        all[b] = plat_xchg64(&ph_all_ns[b], 0), allc[b] = plat_xchg64(&ph_all_cpu[b], 0);
+    }
+    int64_t nns = plat_xchg64(&ph_new_ns, 0), ndraws = plat_xchg64(&ph_new_draws, 0), npass = plat_xchg64(&ph_new_passes, 0);
+    if (!slow) return;
+    for (int b = 0; b < 2; b++) {
+        if (b && !all[1]) break;
+        int order[PERF_PH_N], k = 0;
+        int64_t parts = 0;
+        for (int i = 0; i < PERF_PH_N; i++) {
+            parts += ns[b][i];
+            if (name[i] && ns[b][i] >= 50000) order[k++] = i;
+        }
+        for (int a = 1; a < k; a++)
+            for (int c = a; c > 0 && ns[b][order[c]] > ns[b][order[c - 1]]; c--) {
+                int t = order[c];
+                order[c] = order[c - 1], order[c - 1] = t;
+            }
+        char line[2048];
+        size_t o = 0;
+        line[0] = 0;
+        for (int j = 0; j < k && o < sizeof line - 160; j++) {
+            int i = order[j];
+            o += (size_t)snprintf(line + o, sizeof line - o, "; %s %.1f (%lld, longest %.1f", name[i], ns[b][i] / 1e6,
+                                  (long long)cnt[b][i], mx[b][i] / 1e6);
+            if (cpu[b][i]) o += (size_t)snprintf(line + o, sizeof line - o, ", cpu %.1f", cpu[b][i] / 1e6);
+            o += (size_t)snprintf(line + o, sizeof line - o, ")");
+        }
+        if (!b)
+            rt_log("perf: slow frame %llu replay by part: %.1f ms on the recording thread (cpu %.1f)%s; rest of the walk "
+                   "%.1f; outside the replay %.1f of the %.1f ms frame; passes left unsliced for new targets %lld (%lld "
+                   "draws, %.1f ms with the parts inside them)", (unsigned long long)frame, rep / 1e6, allc[0] / 1e6,
+                   line, ((int64_t)rep - parts) / 1e6, ((int64_t)d - (int64_t)rep) / 1e6, d / 1e6, (long long)npass,
+                   (long long)ndraws, nns / 1e6);
+        else
+            rt_log("perf: slow frame %llu slice workers by part: %.1f ms recording slices, summed over the workers (cpu "
+                   "%.1f)%s; rest of their slices %.1f", (unsigned long long)frame, all[1] / 1e6, allc[1] / 1e6, line,
+                   (all[1] - parts) / 1e6);
+    }
+}
+
+// TOTK_TRACE=perf: the host operations (platform.h plat_op_begin) that ended in a slow frame, by thread role and kind,
+// so that a long frame outside the replay (a layer's teardown and load) splits into pool finalizes, thaws, imports,
+// releases, file reads and the system calls inside them. Taken every present, logged for the slow ones.
+static void ops_frame_log(uint64_t frame, int slow) {
+    static PlatOpTotal t[PLAT_OP_ROLES][PLAT_OP_N];
+    plat_op_totals(t);
+    if (!slow) return;
+    static const int order[PLAT_OP_ROLES] = {PLAT_OP_GAME, PLAT_OP_REPLAY, PLAT_OP_RENDER, PLAT_OP_OTHER};
+    char line[3000];
+    size_t o = 0;
+    line[0] = 0;
+    for (int i = 0; i < PLAT_OP_ROLES; i++) {
+        int r = order[i], first = 1;
+        for (int k = 0; k < PLAT_OP_N && o < sizeof line - 160; k++) {
+            if (!t[r][k].calls) continue;
+            if (first) o += (size_t)snprintf(line + o, sizeof line - o, "%s%s: ", o ? "; " : "", plat_op_role_name(r));
+            o += (size_t)snprintf(line + o, sizeof line - o, "%s%s %llu (%.2f ms, longest %.2f)", first ? "" : ", ",
+                                  plat_op_name(k), (unsigned long long)t[r][k].calls, t[r][k].ns / 1e6,
+                                  t[r][k].max_ns / 1e6);
+            first = 0;
+        }
+    }
+    rt_log("perf: slow frame %llu host operations that ended in it (nested ones also count in their outer one): %s",
+           (unsigned long long)frame, o ? line : "none");
+}
+
 void perf_present(uint64_t frame) {
     static uint64_t last, sum, max, n, win_start, ab_b;
     static int64_t win_prev[PERF_CNT_N];
+    static uint32_t op_render;   // the thread plat_op_role was told is the render thread
     prof_render_tid = plat_thread_id();
+    if (op_render != prof_render_tid && prof_render_tid != prof_replay_tid)
+        op_render = prof_render_tid, plat_op_role(PLAT_OP_RENDER);
     if (rt_trace & RT_TRACE_SCHED) kern_sched_report(frame);
     uint64_t now = kern_now_ns(), d = last ? now - last : 0;
     prof_sampler_frame(frame, now, last ? d : 0);
@@ -349,11 +536,13 @@ void perf_present(uint64_t frame) {
         n++;
         if (d > max) max = d, memcpy(worst_ns, frame_ns, sizeof worst_ns);
         if (d >= slow_ns)
-            rt_log("perf: slow frame %llu: %.1f ms; blocked pipeline %.1f xlate %.1f texture %.1f astc %.1f fence %.1f pacing %.1f",
-                   (unsigned long long)frame, d / 1e6, frame_ns[PERF_PIPE] / 1e6, frame_ns[PERF_XLATE] / 1e6,
+            rt_log("perf: slow frame %llu: %.1f ms; blocked pipeline %.1f xlate %.1f texture %.1f astc %.1f fence %.1f pacing %.1f; "
+                   "replay %.1f", (unsigned long long)frame, d / 1e6, frame_ns[PERF_PIPE] / 1e6, frame_ns[PERF_XLATE] / 1e6,
                    frame_ns[PERF_TEX] / 1e6, frame_ns[PERF_ASTC] / 1e6, frame_ns[PERF_FENCE] / 1e6,
-                   frame_ns[PERF_PACE] / 1e6);
+                   frame_ns[PERF_PACE] / 1e6, rep / 1e6);
     }
+    ph_frame(frame, d, rep, last && d >= slow_ns);
+    ops_frame_log(frame, last && d >= slow_ns);
     memset(frame_ns, 0, sizeof frame_ns);
     last = now;
     if (!win_start) win_start = now;

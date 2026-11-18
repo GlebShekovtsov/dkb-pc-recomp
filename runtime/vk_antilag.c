@@ -16,6 +16,8 @@
 //
 // The input stage stands for the game's simulation start only roughly: it is given on the thread that presents, and
 // under asynchronous replay (TOTK_REPLAY_ASYNC) the game has by then run up to a frame ahead.
+#include <string.h>
+
 #include "cfg.h"
 #include "host.h"
 #include "vk.h"
@@ -46,14 +48,25 @@ static int ready(void) {
     return A.ready;
 }
 
-// The mode to the driver, with one of the frame's stages or none (the mode alone).
-static void update(int on, const VkAntiLagPresentationInfoAMD *stage) {
+// The mode to the driver, with one of the frame's stages or none (the mode alone), through fn on dev; nothing without
+// them (no device, or the module reset by vk_antilag_release).
+static void update_on(PFN_vkAntiLagUpdateAMD fn, VkDevice dev, int on, const VkAntiLagPresentationInfoAMD *stage) {
+    if (!fn || !dev) return;
     VkAntiLagDataAMD d = {.sType = VK_STRUCTURE_TYPE_ANTI_LAG_DATA_AMD,
                           .mode = on ? VK_ANTI_LAG_MODE_ON_AMD : VK_ANTI_LAG_MODE_OFF_AMD,
                           .maxFPS = 0,   // no limit of its own: the game's frame rate limit paces
                           .pPresentationInfo = stage};
-    A.update(vk_ctx()->device, &d);
+    fn(dev, &d);
 }
+
+// With al held: the device of now, or VK_NULL_HANDLE between a vk_shutdown and the next device.
+static VkDevice device_now(void) {
+    VkCtx *c = vk_ctx();
+    return c ? c->device : VK_NULL_HANDLE;
+}
+
+// With al held.
+static void update(int on, const VkAntiLagPresentationInfoAMD *stage) { update_on(A.update, device_now(), on, stage); }
 
 // With al held: the setting on, and the extension and its feature. Turning off tells the driver once.
 static int on(void) {
@@ -97,15 +110,30 @@ void vk_antilag_present(uint64_t frame) {
 
 void vk_antilag_input(void) {
     uint64_t frame = 0;
+    PFN_vkAntiLagUpdateAMD fn = NULL;
+    VkDevice dev = VK_NULL_HANDLE;
     plat_mutex_lock(&al);
     if (on()) {
         frame = ++A.frame;
         A.frame_marked = 1;
+        fn = A.update, dev = device_now();   // taken under the lock, with the frame
     }
     plat_mutex_unlock(&al);
     // The driver's input stage is where it waits, when it wants to: outside the lock, so vk_antilag_present on the
     // present thread is not held up for the length of that wait.
-    if (frame) stage(VK_ANTI_LAG_STAGE_INPUT_AMD, frame);
+    if (frame) {
+        VkAntiLagPresentationInfoAMD p = {.sType = VK_STRUCTURE_TYPE_ANTI_LAG_PRESENTATION_INFO_AMD,
+                                          .stage = VK_ANTI_LAG_STAGE_INPUT_AMD, .frameIndex = frame};
+        update_on(fn, dev, 1, &p);
+    }
+}
+
+// Before the device goes (vk_device.c vk_shutdown): the function and the state belong to that device, so they are
+// let go; a device made again finds the extension and its feature anew (ready).
+void vk_antilag_release(void) {
+    plat_mutex_lock(&al);
+    memset(&A, 0, sizeof A);
+    plat_mutex_unlock(&al);
 }
 
 #else   // Vulkan headers older than VK_AMD_anti_lag: never available
@@ -114,5 +142,6 @@ int vk_antilag_available(void) { return 0; }
 uint64_t vk_antilag_frame(void) { return 0; }
 void vk_antilag_present(uint64_t frame) { (void)frame; }
 void vk_antilag_input(void) {}
+void vk_antilag_release(void) {}
 
 #endif

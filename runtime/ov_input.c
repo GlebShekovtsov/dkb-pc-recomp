@@ -323,6 +323,12 @@ static void rumble_update(uint64_t now) {
         if (l > light) light = l;
     }
     uint16_t lo = motor(clamp01(heavy)), hi = motor(clamp01(light));
+    // Silent motors send the neutral HD values: otherwise a frequency the game changes at zero amplitude counts as a
+    // change and goes out at once, past RUMBLE_MIN_GAP_NS, a packet stream that drops some clone pads (#363).
+    if (!lo && !hi) {
+        static const float neutral[2][4] = {{0, 160, 0, 320}, {0, 160, 0, 320}};
+        memcpy(hd, neutral, sizeof hd);
+    }
     static float sent_hd[2][4];
     int changed = lo != sent_low || hi != sent_high || memcmp(hd, sent_hd, sizeof hd), on = lo || hi;
     if (changed ? on && now - sent_at < RUMBLE_MIN_GAP_NS : !on || now - sent_at < RUMBLE_REFRESH_NS) return;

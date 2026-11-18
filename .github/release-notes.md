@@ -1,10 +1,53 @@
-## Draft: next release (since 0.4.0)
+## Draft: next release (since 0.4.1)
 
-Draft, not released. It lists what is on `bananza` since the tag `v0.4.0`. The 0.4.0 notes follow below, unchanged.
+Draft, not released. The 0.4.1 notes follow below, unchanged.
+
+- `console = 0` also closes a Windows Terminal window: the game frees its console instead of hiding the window (#238, #364).
+- #372 Leave the translator's emulated compare-exchange loop after 1024 attempts (@roverdrubber)
+- dotnet no longer adds a dead folder to the user's PATH on each install (c222918).
+- The draws of vertex stage 45e1a6f48cb7872e are skipped on NVIDIA, for the device loss at the Landfill Layer's first checkpoint on 3.2.0 (#304).
+- #393 Copy the indirect reset's disjoint records in address order (@wrothgaril)
+- #400 Log where a large pool's first GPU use spends its time, and resume write-watch queries where a full answer stopped (@wrothgaril)
+- #409 Save TOTK_SHOTS and --shot pictures of an RGB10A2 (HDR) presented image (@wrothgaril)
+- #378 Lazy write-back of shader storage writes on Linux, off by default (@roverdrubber)
+- #405 Thaw a pool's whole frozen regions without VirtualQuery (@wrothgaril)
+- #406 Split the replay of a slow frame into its parts in the perf trace (@wrothgaril)
+- #407 Create the DLSS feature and the motion pass's pipeline ahead of the first upscale (@wrothgaril)
+- #408 Skip mem_touch's VirtualQuery for lazy-heap chunks known to be committed (@wrothgaril)
+- HD rumble is off by default (`rumble_hd = auto` turns it on): three third-party Switch Pro pads broke with it (#363, #383).
+- HD rumble sends neutral values while the motors are silent, so a frequency change at zero amplitude no longer floods the pad (#363).
+- A refused `output_res` now says which sizes work (#403).
+- On a first run with an empty pipeline cache, a draw that has to wait for its pipeline (a cutscene or menu quad) builds it itself instead of queueing behind dozens of pipelines of skipped draws: on the AMD path the longest wait fell from 2.4 s to 0.23 s (#309). A ~10 s stall on the very first heavy frame remains.
+- The radial blur a smash starts ends above 60 fps with `realtime = 1` on 1.0.0 too, as #159 did for 3.2.0 (#389, #390).
+- The installer keeps the DLC of a container whose base package has title id 0, warns for any add-on it cannot place, and the game logs a missing add-on (#388, fix by @Ki1z).
+- #357 Slice passes whose draws sample an image through a depth twin (@GlebShekovtsov)
+- #360 Scripted game runs with a verdict: tools/scenario.py, save_warp.py and perf_check.py (@thatbananaman08)
+- #373 Skip the futex wake of a Linux condition variable signal when no thread waits (@roverdrubber)
+- #374 Give the heap's freed pages back under Linux memory pressure (@roverdrubber)
+- #376 Share one sampler per create info and retire the least used near the driver's limit (@roverdrubber)
+- #379 Copy the full-size 3D through native anti-aliasing's upscale step (@roverdrubber)
+- #385 Stamp the GPU writes of a command buffer in batches at its fence (@wrothgaril)
+- #386 Write the GPU writes of a held part back to guest memory once the part is submitted (@wrothgaril)
+- #392 Let a recording thread note its GPU writes in a list of its own (@wrothgaril)
+- #399 Keep the window scaling filter row open when the window is the picture size (@wrothgaril)
+- #401 Answer the pointer guards' readability checks without VirtualQuery (@wrothgaril)
+- HD rumble falls back to the two-motor path for the rest of the session when a pad disconnects after HD packets (#363, untested on that pad).
+- #354 Read indirect-reset pointer lists from guest memory instead of through a GPU read-back (TOTK_RESET_CPU_LIST) (@thatbananaman08, landed with a host-pool check)
+- #361 Scan a pool's pages for its mirror sync under the pool's own lock, and take mirror_lock only to queue the copies (@thatbananaman08)
+- #365 Skip the submit scans of copies that hold nothing for them (@thatbananaman08)
+- #366 Log the scheduler state when no frame has been presented for a while (TOTK_STALL_DUMP, default 5 s) (@thatbananaman08)
+- #367 Opt-in orders for consecutive dispatches: the game's barriers alone, or compute barriers (TOTK_CS_BARRIER) (@GlebShekovtsov)
+- #368 Apply the follow-ups from the review of #338: Anti-Lag 2 across a device restart, Auto's flight thumbnails, and the frame_gen_by text (@roverdrubber)
+
+---
+
+DKB Recomp 0.4.1: a static recompilation of *Donkey Kong Bananza* (Switch 2) to a native Windows exe with a Vulkan renderer. It is still experimental (0.x). This is a smaller release: what landed in the two days after 0.4.0, most of it from contributors.
+
+**The packages hold no game data, and no release ever will.** You build the game on your own PC from your own dump of **1.0.0 or the 3.2.0 update**, given as a `.nup` or `.nx` file or as ExeFS and RomFS folders. Other updates are not supported.
 
 Not run in play by us: the Lanczos window filter at 1440p, AMD FSR 3.1 frame interpolation, AMD Anti-Lag 2 on AMD hardware, FSR 4 on AMD hardware and HD rumble on real controllers. The CRT and window filters and the frame interpolation come from community pull requests and have had little testing in play.
 
-### What is new
+## What is new since 0.4.0
 
 - **Crashes.** A null edge target in the job graph builder is guarded on 1.0.0 and 3.2.0 (#317). A call that crashed after the Forest Layer snow tunnel gets a guard that skips it when its slot is null (#136, still open until the reporter retests). A GPU that finishes nothing for 30 seconds is reported as a device loss instead of a silent freeze (#329). A failed swapchain rebuild destroys the retired swapchain (#332). The frame generation display thread no longer takes its start lock under the present lock (#343).
 - **Picture and upscalers.** `upscaler = fsr3` is AMD FSR 3.1 temporal upscaling and `upscaler = fsr4` is AMD FSR 4 through your own AMD DLLs (#270, #333); both are off by default and fsr4 has not been run on AMD hardware by us. DLSS, FSR 3.1 and FSR 4 also run as native anti-aliasing at `scene_res = full` on 3.2.0 (#345). Only draws that test or write depth are jittered (#321, #325), and the upscaler dispatch is found by its shape when its hash is not a listed one (#323). The upscaler row stays open on Bananza, and DLSS says in the log why it does not run (#152, #306). Window scaling filter: `window_filter = fsr1`, `linear`, `catmull_rom` or `lanczos`, with Sharpness at any window size (#340); `fsr1` stays the default, and Lanczos at 1440p has not been run by us. CRT filters: `crt_filter = off` (default), `lottes_grille`, `lottes_tv`, `hyllian` or `zfast`, with `crt_lines` (#342). ASTC textures stored as BC3 are copied instead of skipped, which is meant to bring back the Ingot Isle textures (#310, awaiting the reporter). Text above 1080p is sharper behind `DKB_FONT_SCALE=1` (#214, off by default). Dug terrain builds on RADV (#322).
@@ -14,11 +57,12 @@ Not run in play by us: the Lanczos window filter at 1440p, AMD FSR 3.1 frame int
 - **Languages and text.** Polish (`pl`, `EUpl`, `pl-PL`) is a language choice (#335).
 - **Input.** `pad:touchpad` can be bound, so the DualSense or DualShock 4 touchpad click can open the map (#291). HD rumble goes to a Switch Pro Controller or Joy-Con as amplitude and frequency (#285, not run on real controllers by us). The Controls tab builds against SDL older than 3.4.18 (#324).
 - **Installer and Linux.** The setup's host check builds against the release sysroot on Linux, so the AppImage no longer fails at step 1 (#293), and its last check accepts a CPU that has no AVX2 when you build for x86-64-v2 (#318). `vulkan_driver` runs a Mesa build of your own on Linux without a wrapper script (#339). The `--warm-shaders` and `--prepare-shaders` library builds run at below-normal priority on one core fewer than the machine has, from 4 cores up (#3).
-- **Diagnostics.** The performance overlay has a Breakdown mode that stacks each frame's parts in the graph (#341) and a Counter mode, a large FPS number with a small label (#350); both are values of `perf_overlay`. AMD Anti-Lag 2 is `antilag = 1`, off by default, on an AMD GPU whose driver has VK_AMD_anti_lag (#338); not run on AMD hardware by us. `TOTK_MEM_REPORT=N` logs where the process's commit goes, and `tools/lowend_bench.py` runs a low-end benchmark.
+- **Diagnostics.** The performance overlay has a Breakdown mode that stacks each frame's parts in the graph (#341) and a Counter mode, a large FPS number with a small label (#350); both are values of `perf_overlay`. AMD Anti-Lag 2 is `antilag = 1`, off by default, on an AMD GPU whose driver has VK_AMD_anti_lag (#338); not run on AMD hardware by us. `TOTK_MEM_REPORT=N` logs where the process's commit goes, and `tools/lowend_bench.py` runs a low-end benchmark. The perf trace counts the waits on the generation-table lock.
+- **Long sessions.** The VRAM mirror sync asks Windows for written pages before it takes the mirror lock, so the replay and its slices wait less on it (#317, partial: the query itself gets slower as the process ages).
 
-### Pull requests in this release
+## Pull requests in this release
 
-Thank you to everyone who sent code. Each one below is on `bananza` since 0.4.0:
+Thank you to everyone who sent code. Each one below is new since 0.4.0:
 
 - #292 Hold back the end of a sliced pass without the recorder thread too (@GlebShekovtsov)
 - #294 Read page stamps under gen_lock in TOTK_MEMORY=verify (@Zorkats)
@@ -56,9 +100,11 @@ Thank you to everyone who sent code. Each one below is on `bananza` since 0.4.0:
 - #349 Add Frame generation and its Made by row to the Display tab (@roverdrubber)
 - #350 Add a Counter value to the performance overlay: a large FPS number with a small label, after Hookshot's (@roverdrubber)
 - #351 Let an upscaler no longer chosen release its images, feature or context after 120 frames (@roverdrubber)
+- #353 Slice indirect draws and cut the slice threads' lock waits, Canyon Layer replay 11.8 to 10.0 ms a frame (TOTK_PAR_INDIRECT) (@Zorkats)
+- #358 Say in inline_recording's comment that TOTK_CALL_REF records a call instead of a copy (@thatbananaman08)
 - #352 Count frame generation's set waits, name Auto's flight thumbnails, and correct its pacing comment and docs (@roverdrubber)
 
-### Issues closed or answered by this release
+## Issues closed or answered by this release
 
 Thank you to everyone who reported a problem. Open ones wait for the reporter to retest.
 
@@ -76,96 +122,9 @@ Thank you to everyone who reported a problem. Open ones wait for the reporter to
 - #136 Forest Layer snow tunnel crash (@luis-7654), open
 - #214 Blurry text at 1440p (@Felitendo), open: `DKB_FONT_SCALE=1`
 
-### Thanks
-
-Pull requests since 0.4.0: roverdrubber, Zorkats, GlebShekovtsov, thatbananaman08, Gabinou22s. Thank you.
-
----
-
-DKB Recomp 0.4.0: a static recompilation of *Donkey Kong Bananza* (Switch 2) to a native Windows exe with a Vulkan renderer. It is still experimental (0.x). On recent NVIDIA cards players get well past the first level (Glacier, Snow World, Tempest), and it can crash.
-
-**The packages hold no game data, and no release ever will.** You build the game on your own PC from your own dump of **1.0.0 or the 3.2.0 update**, given as a `.nup` file or as ExeFS and RomFS folders. Other updates are not supported.
-
-## What is new since 0.3.0
-
-- **Crashes fixed or guarded.** The Snow World descent device loss on NVIDIA is gone: one light quad (vertex stage ba1dd1e7ae8abb33) is skipped (#196, #197, #264). A crash while loading a save or the title screen at main+0x82fee0 is guarded (#157, #206, #173). The 3.2.0 game now has the layer-change guards 1.0.0 had (#218, as #126), a crash at a layer change when an id cache runs out of nodes is guarded on both versions (#218), and so is a record loop that reads through an unset table index (#229). A Linux crash report now gets as far as the game's function and frames (#148). On AMD's Windows driver the Vulkan recorder thread is off by default, which stopped the device loss for several players (#84, #124, #142, #155, #167, #176).
-- **Picture.** The #9 light quads are drawn again, so their particles are back (#62), and the Tower light quads are drawn with a fold of their selector instead of faulting (#220). `scene_res = full` draws the 3D scene at the full output size instead of the 2/3 the game settles at (#210), on 1.0.0 and 3.2.0 (#223). Draws get depth twins like compute passes, so the validation layer is clean in the first level.
-- **Performance.** Big render passes are recorded on 4 threads by default from 8 logical processors (not on AMD), dynamic uniform buffers are on by default (not on Intel), and the guest heap is lazy by default on Windows (commit about 9.3 GiB instead of 14.5 GiB). In the heavy -101 scene on an RTX 5060 Ti: about 57.5 fps with a 1% low of about 29 fps (0.3.0: 51.8 and 20.6). The end of a sliced pass no longer waits for its slices (#265), and small VRAM mirror write-backs are copied by one compute dispatch on NVIDIA (#269), and the destructible terrain's geometry-stage storage stays in VRAM instead of being copied back every frame (#268; Hilltop Layer on an RTX 5090: GPU time 16.1 to 12.4 ms a frame), with its bookkeeping kept off the mirror lock (#288). Command recordings reuse cached blocks and hand their buffer over instead of being copied, which removes almost all page faults in the Hilltop Layer (about 470,000 a second before, #289). Many lock and copy cuts in the sliced replay come from contributors (see Thanks).
-- **DLC and mods.** Setup installs add-on content from a `.nup` into `aoc-<n>` folders (#183, #111, #258, #263). Loose RomFS mods load from a `mods` folder beside `dkb.exe` (#252).
-- **Sound.** A Windows or macOS device that opens with a period that is not a multiple of the renderer's block is reopened with one block per period, which stopped the crackling on a 1024-frame device (#272).
-- **High resolutions.** The game's GSys heap grows with the render-target pool, so `scene_res = full` at 3840x2160 and very large outputs no longer crash at start (#244, #279). A guide for 4 GB VRAM cards and laptops: `docs/4gb-vram-optimization.md` (#260).
-- **Settings and input.** PlayStation button prompts when a DualShock or DualSense is connected at start (`pad_prompts`, #274). The vertical mouse camera no longer locks during automatic camera moves (#245). Big passes use 6 replay threads from 12 logical processors (#271). NVIDIA DLSS is listed in the upscaler row (#241), and its warm-up waits when another upscaler is chosen at start (#280). DLSS uses preset K except in Ultra Performance, which is cheaper than M on the GPU (`dlss_preset`, #287). `console = 0` hides the console window for frontends such as Playnite (#238). Controller connection handling, DK moving on walls and ceilings above 60 fps (#201), the 3.2.0 version on the title screen.
-- **Installer.** It refuses a RomFS folder that holds a RomFS image (#278), compiles only the sources a release ships (#203, #208), recompiles every runtime source when any of them changes (#275), and builds the ultrawide overlays. RecompLauncher can set up and start the Linux and macOS packages, and the release now has a self-contained Linux AppImage, `DKB-Setup-0.4.0-x86_64.AppImage`, beside the `.tar.gz` (#242, #174). `.nx` (NXFormat) dumps are accepted next to `.nup` (#224). CPUs without AVX2 can build the game: setup compiles it for x86-64-v2, which is slower (#231). The shader library prebuild of `--warm-shaders` resumes where it stopped after a restart (#3).
-- **Diagnostics.** A crash outside the executable (a driver, a Vulkan layer) is reported with its module, and every crash writes a minidump to `logs/` after the report (#219); keep it on your PC and send it only when asked, privately.
-- **Project.** Issue forms ask for the build, game version and OS; a security policy and an accessibility page were added.
-
-## Pull requests in this release
-
-Thank you to everyone who sent code. Each one below is on `bananza` and in this release:
-
-- #209 Slice passes under DLSS, and close the follow-ups of #195 (@GlebShekovtsov)
-- #211 Take the texture and mirror locks out of the sliced draws, and reuse a draw's texture descriptors (@GlebShekovtsov)
-- #213 Let RecompLauncher set up and start the Linux and macOS packages (@Felitendo)
-- #217 Fail a store exclusive after another thread's change and change back (@thatbananaman08)
-- #219 Report crashes outside the executable and write a minidump for every crash (@thatbananaman08)
-- #220 Draw the faulting light quads with a fold of their selector instead of skipping them, and fix Tower's device loss (@thatbananaman08)
-- #222 Run every test from one command, and fix three tests that no longer built or ran (@thatbananaman08)
-- #223 Make scene_res draw the 3D scene at its ratio on 3.2.0 too (@wrothgaril)
-- #225 Make the DLSS feature ahead of play and once for every input size (@wrothgaril)
-- #226 Batch small GPU writebacks and reuse copy buffers (@oshoubber)
-- #227 Keep the texture cache generation stable during replay (@oshoubber)
-- #228 Batch terrain reset copy commands (@oshoubber)
-- #234 Take the texture lock off a guest read's GPU wait, and sort only the new GPU write ranges of the uniform snapshot (@GlebShekovtsov)
-- #235 docs: keep the 3.2.0 build status sentence in one tense (@lunar-me)
-- #236 docs: fix the verb for the shader census step (@lunar-me)
-- #237 docs: add the missing preposition in the cursor-release list (@lunar-me)
-- #242 Add selfcontained AppImage build (@Osohow)
-- #244 Grow Bananza's GSys heap with the render-target pool, so scene_res and large outputs no longer crash at start (@PorlocK-BR)
-- #245 Fix intermittent vertical mouse camera lock in Bananza (@oshoubber)
-- #246 Keep DK moving on walls and ceilings above 60 fps (@Zorkats)
-- #250 Show the 3.2.0 version on the title screen (@Zorkats)
-- #254 Improve controller connectivity, selection and hot-swapping (@shadowlink1174)
-- #255 Retire a released pool's descriptors from an index instead of the whole table (@wrothgaril)
-- #256 vk_exec_draw: add depth variant origin for mine voxel native GS on RDNA 1/2 (@MatyMeatBoy)
-- #257 Take the texture and pipeline locks out of most sliced draws (@wrothgaril)
-- #259 Wait for a texture write-back's GPU copy without the texture lock (@wrothgaril)
-- #260 perf(docs): add 4GB VRAM optimization guide and config profile (@devadobe11-pixel)
-- #261 Prepare Bananza ultrawide overlays during installation (@Marjaperse)
-- #262 Find a resolved pool through a per-thread sorted list and a block map (@wrothgaril)
-- #265 Let the end of a sliced pass go on without waiting for its slices, by default (@wrothgaril)
-- #268 Keep the storage the geometry stage writes in VRAM (@wrothgaril)
-- #269 Copy small VRAM mirror write-backs with the compute dispatch by default (@wrothgaril)
-- #271 Record sliced passes on 6 threads by default from 12 logical processors (@wrothgaril)
-- #273 Wait for an upload batch's fence without cmd_lock (@wrothgaril)
-- #274 Show PlayStation button prompts in Bananza when a DualShock or DualSense pad is connected at start (@GlebShekovtsov)
-- #275 Compile every runtime source of an install build again whenever its contents change (@GlebShekovtsov)
-- #277 Document Steam Deck menu access when the fullscreen hold is enabled (@shadowlink1174)
-- #280 Let the DLSS warm-up wait while another upscaler is chosen (@wrothgaril)
-- #287 Ask DLSS for preset K outside Ultra Performance, with dlss_preset to choose (@wrothgaril)
-- #288 Keep the kept-write bookkeeping off mirror_lock's hot path (@wrothgaril)
-- #289 Keep large recording copies in cached blocks and hand the recording buffer over (@wrothgaril)
-
-## Issues resolved
-
-Thank you to everyone who reported a problem, with logs, saves and recordings:
-
-- Device loss on NVIDIA in the Snow World descent and the Glacier rock ride: #197 (@hotcoffeek), #264 (@dudesh34), #196 (@philneitz)
-- Device loss or black screen on AMD's Windows driver, with the recorder thread now off by default: #84 (@philneitz), #123 (@BloodThirstyQ), #124 (@TeknaPT), #142 (@beijingpunk), #155 (@bubblesnout), #167 (@jesusen904), #176 (@BoySKAyt), #193 (@stuzukila82-bit), #215 (@thabans), #267 (@350Plays)
-- DLC and the update from a `.nup`: #111 (@infinitytom), #183 (@Blinkk000), #258 (@ElBusAlv), #263 (@evylmen)
-- Loose mods: #252 (@Caladbolg95)
-- Render scale and 3D resolution: #149 (@formandfunctionlab), #210 (@dancaiman), #279 (@Dimiduh)
-- DLSS: #152 (@Gavury), #241 (@thecharted135-sketch)
-- Performance in heavy scenes: #154 (@patrickfuly), #156 (@supermahdi-enjoyer), #194 (@li-beihai), #207 (@solidaytug), #230 (@zachcristallguy-netizen), #284 (@wrothgaril)
-- Above 60 fps, climbing walls: #201 (@XDM-Inc)
-- Raw mouse camera: #177 (@pritomroyreal-cloud)
-- Controllers: #253 (@shadowlink1174)
-- Installer: #203 (@bika66), #208 (@Sapo2099), #278 (@sonic-un), #138 (@asluan287-gif)
-
 ## Thanks
 
-Pull requests: wrothgaril (#223, #225, #255, #257, #259, #262, #265, #269, #268, #271, #273, #280, #287, #288, #289), GlebShekovtsov (#209, #211, #234, #274, #275), oshoubber (#226, #227, #228, #245), PorlocK-BR (#244), devadobe11-pixel (#260), Osohow (#242), thatbananaman08 (#217, #219, #220, #222), shadowlink1174 (#254, #277), Zorkats (#246, #250), Marjaperse (#261), MatyMeatBoy (#256), Felitendo (#213), lunar-me (#235, #236, #237). Thank you.
-
-Testing and reports: everyone who sent logs, saves and input recordings, in particular luis-7654, philneitz, Felitendo and Dimiduh.
+Pull requests since 0.4.0: roverdrubber, Zorkats, GlebShekovtsov, thatbananaman08, Gabinou22s. Thank you.
 
 ## Download
 
@@ -186,12 +145,13 @@ Testing and reports: everyone who sent logs, saves and input recordings, in part
 - GPU hangs under RADV on Linux (#99, #122, #198, #204), and a driver fault on Intel Arc (#3).
 - Crashes reported without a reproduction here: #126 (Lagoon to Hilltop tunnel, retest asked), #136 (Forest snow tunnel landing: needs a guard on a call, after this release), #148 (Linux, after the first boss: the next log will name the function).
 - Black shards where salt or acid meets slime (#139, #266).
-- Text is soft at 1440p and above: the game's fonts are drawn at a fixed size (#214).
+- Text is soft at 1440p and above: the game's fonts are drawn at a fixed size (#214; `DKB_FONT_SCALE=1` helps small text).
+- A device loss on an RTX 5070 in the Landfill Layer that we cannot reproduce (#304), and frame rate falling after a long session (#317).
 - Heavy scenes can still fall under 60 fps, and the first visit to an area can stutter.
 - Checkerboard textures (#5), #112 and unrecorded NVN 2 calls (#6).
 
 ## Reporting a bug
 
-Open an issue with the log (`dkb.log`), the build line at its top (`dkb 0.4.0+<commit>`), your GPU and driver, and what you did before it failed. **Never share generated files, keys or screenshots that show game content.**
+Open an issue with the log (`dkb.log`), the build line at its top (`dkb 0.4.1+<commit>`), your GPU and driver, and what you did before it failed. **Never share generated files, keys or screenshots that show game content.**
 
 Roadmap: #10.

@@ -257,11 +257,24 @@ uint64_t plat_counter_hz(void) { return qpc_freq(); }
 void plat_timer_1ms(void) { timeBeginPeriod(1); }
 
 // Only a console this process got for itself (the only process attached to it): a console the game was started from,
-// such as a command prompt, stays visible. The window is hidden, not freed, so stdout and stderr stay valid handles.
+// such as a command prompt, stays visible. The console is freed rather than its window hidden: with Windows Terminal
+// as the default terminal, GetConsoleWindow returns a stand-in that ShowWindow does not hide, while detaching closes
+// the terminal window (#238). The standard streams then go to NUL, so no write reaches a closed console handle whose
+// value a later file or pipe could take. Runs on the main thread before the boot starts other threads.
 void plat_console_hide(void) {
     HWND w = GetConsoleWindow();
     DWORD pids[2];
-    if (w && GetConsoleProcessList(pids, 2) == 1) ShowWindow(w, SW_HIDE);
+    if (!w || GetConsoleProcessList(pids, 2) != 1) return;
+    fflush(stdout);
+    fflush(stderr);
+    if (!FreeConsole()) {
+        ShowWindow(w, SW_HIDE);
+        return;
+    }
+    // The UCRT's freopen on the standard streams also points the process's standard handles at the new file.
+    freopen("NUL", "r", stdin);
+    freopen("NUL", "w", stdout);
+    freopen("NUL", "w", stderr);
 }
 
 static PlatScale qpc_ns;   // set before main, so no thread reads it half written
@@ -551,21 +564,91 @@ int plat_mem_reserve_in(uint64_t lo, uint64_t hi, uint64_t n, uint64_t align, in
 void *plat_mem_alloc(size_t n) { return VirtualAlloc(NULL, n, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE); }
 
 int plat_mem_commit(uint64_t addr, size_t n) {
-    return VirtualAlloc((void *)(uintptr_t)addr, n, MEM_COMMIT, PAGE_READWRITE) != NULL;
+    int op = plat_op_begin(PLAT_OP_COMMIT, addr, n);
+    int ok = VirtualAlloc((void *)(uintptr_t)addr, n, MEM_COMMIT, PAGE_READWRITE) != NULL;
+    plat_op_end(op, 0);
+    return ok;
 }
 
 // Decommitted pages come back zeroed when committed again.
-int plat_mem_decommit(uint64_t addr, uint64_t n) { return VirtualFree((void *)(uintptr_t)addr, n, MEM_DECOMMIT) != 0; }
+int plat_mem_decommit(uint64_t addr, uint64_t n) {
+    int op = plat_op_begin(PLAT_OP_DECOMMIT, addr, n);
+    int ok = VirtualFree((void *)(uintptr_t)addr, n, MEM_DECOMMIT) != 0;
+    plat_op_end(op, 0);
+    return ok;
+}
+
+// plat_vm_stats: every VirtualQuery and VirtualProtect of the host goes through vm_query or plat_mem_protect, which
+// time it (QueryPerformanceCounter, tens of ns against a call of a microsecond or more) and count it by kind.
+static volatile int64_t vm_calls[PLAT_VM_N], vm_ticks[PLAT_VM_N], vm_max_ticks[PLAT_VM_N], vm_max_run[PLAT_VM_N];
+
+static void vm_max(volatile int64_t *m, int64_t v) {
+    int64_t o = __atomic_load_n(m, __ATOMIC_RELAXED);
+    while (v > o && !__atomic_compare_exchange_n(m, &o, v, 1, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
+}
+
+static void vm_count(int kind, int64_t t0, uint64_t run) {
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    int64_t dt = t.QuadPart - t0;
+    __atomic_add_fetch(&vm_calls[kind], 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&vm_ticks[kind], dt, __ATOMIC_RELAXED);
+    vm_max(&vm_max_ticks[kind], dt);
+    vm_max(&vm_max_run[kind], (int64_t)run);
+}
+
+// The PLAT_VM_* kinds are the PLAT_OP_VQ_* ones (platform.h), so a query is also an operation in flight.
+static SIZE_T vm_query(uint64_t addr, MEMORY_BASIC_INFORMATION *mbi, int kind) {
+    int op = plat_op_begin(kind, addr, 0x1000);
+    LARGE_INTEGER t0;
+    QueryPerformanceCounter(&t0);
+    SIZE_T r = VirtualQuery((void *)(uintptr_t)addr, mbi, sizeof *mbi);
+    vm_count(kind, t0.QuadPart, r ? mbi->RegionSize : 0);
+    plat_op_end(op, r ? mbi->RegionSize : 0);
+    return r;
+}
+
+void plat_vm_stats(PlatVmStat out[PLAT_VM_N]) {
+    for (int k = 0; k < PLAT_VM_N; k++) {
+        out[k].calls = (uint64_t)plat_xchg64(&vm_calls[k], 0);
+        out[k].ns = plat_scaled(qpc_ns, (uint64_t)plat_xchg64(&vm_ticks[k], 0));
+        out[k].max_ns = plat_scaled(qpc_ns, (uint64_t)plat_xchg64(&vm_max_ticks[k], 0));
+        out[k].max_run = (uint64_t)plat_xchg64(&vm_max_run[k], 0);
+    }
+}
+
+// QueryThreadCycleTime counts the thread's time on a CPU in time-stamp-counter ticks; the TSC rate is measured once
+// against QueryPerformanceCounter over 2 ms, at the first call (TOTK_TRACE=perf only).
+uint64_t plat_self_cpu_ns(void) {
+    static volatile int64_t tsc_per_ms;   // 0: not measured yet
+    int64_t r = __atomic_load_n(&tsc_per_ms, __ATOMIC_ACQUIRE);
+    if (!r) {
+        uint64_t q0 = plat_now_ns(), c0 = __rdtsc(), q1;
+        do q1 = plat_now_ns(); while (q1 - q0 < 2000000u);
+        r = (int64_t)((__rdtsc() - c0) * 1000000u / (q1 - q0));
+        if (r < 1) r = 1;
+        __atomic_store_n(&tsc_per_ms, r, __ATOMIC_RELEASE);
+    }
+    ULONG64 c = 0;
+    QueryThreadCycleTime(GetCurrentThread(), &c);
+    return (uint64_t)(c / (uint64_t)r * 1000000u + c % (uint64_t)r * 1000000u / (uint64_t)r);
+}
 
 int plat_mem_protect(uint64_t addr, uint64_t n, int prot) {
     DWORD old;
     DWORD p = prot == PLAT_PROT_RW ? PAGE_READWRITE : prot == PLAT_PROT_READ ? PAGE_READONLY : PAGE_NOACCESS;
-    return VirtualProtect((void *)(uintptr_t)addr, n, p, &old) != 0;
+    int op = plat_op_begin(PLAT_OP_PROTECT, addr, n);
+    LARGE_INTEGER t0;
+    QueryPerformanceCounter(&t0);
+    int ok = VirtualProtect((void *)(uintptr_t)addr, n, p, &old) != 0;
+    vm_count(PLAT_VM_PROTECT, t0.QuadPart, 0);
+    plat_op_end(op, 0);
+    return ok;
 }
 
 int plat_mem_state(uint64_t addr, uint64_t limit, uint64_t *end) {
     MEMORY_BASIC_INFORMATION mbi;
-    if (!VirtualQuery((void *)(uintptr_t)addr, &mbi, sizeof mbi)) {
+    if (!vm_query(addr, &mbi, PLAT_VM_STATE)) {
         *end = limit;
         return PLAT_MEM_FREE;
     }
@@ -578,6 +661,9 @@ int plat_mem_state(uint64_t addr, uint64_t limit, uint64_t *end) {
 }
 
 void plat_mem_prewrite(uint64_t addr, uint64_t n) { (void)addr, (void)n; }   // a watched write costs nothing extra here
+// Not on this platform: the lazy write-back stays off.
+int plat_mem_seal(uint64_t addr, uint64_t n, int on) { (void)addr, (void)n, (void)on; return 0; }
+int plat_mem_access_hook(int (*fn)(uint64_t addr)) { (void)fn; return 0; }
 
 // Adapted from LAS Recomp runtime/platform/windows.c:40-63 @ da35b83 (MIT, Copyright (c) 2026 Peiikai): GetWriteWatch
 // with the reset flag.
@@ -586,10 +672,11 @@ uint64_t plat_mem_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t m
     ULONG_PTR got = (ULONG_PTR)max;
     DWORD gran;
     _Static_assert(sizeof(PVOID) == sizeof(uint64_t), "page addresses are written straight into a uint64_t array");
-    if (GetWriteWatch(reset ? WRITE_WATCH_FLAG_RESET : 0, (void *)(uintptr_t)addr, (SIZE_T)n, (PVOID *)pages, &got,
-                      &gran))
-        return UINT64_MAX;
-    return got;
+    int op = plat_op_begin(PLAT_OP_WRITE_WATCH, addr, n);
+    UINT r = GetWriteWatch(reset ? WRITE_WATCH_FLAG_RESET : 0, (void *)(uintptr_t)addr, (SIZE_T)n, (PVOID *)pages, &got,
+                           &gran);
+    plat_op_end(op, 0);
+    return r ? UINT64_MAX : got;
 }
 
 static int (*fault_hook)(uint64_t addr);
@@ -597,9 +684,61 @@ static int (*fault_hook)(uint64_t addr);
 // The lazily committed heap range (memory.c mem_set_heap_size, TOTK_HEAP_LAZY): read by fault_veh without a lock.
 static volatile uint64_t lazy_base, lazy_end, lazy_faults;
 
+// The 64 KiB chunks of the lazy heap known to be wholly committed: one bit per chunk from lazy_base, set by lazy_commit
+// when it leaves a whole chunk committed and by plat_mem_lazy_mark, read by plat_mem_lazy_run. memory.c mem_touch asks
+// the map before it queries the pages itself: a VirtualQuery of a committed page reports the whole run of like pages
+// after it, which in the lazy heap reaches tens of MiB, and on the first frame of the Hilltop Layer of Surf Hills the
+// replay thread's mem_touch calls for 282 first-use pool imports were 10 of its 28 samples in those imports (a
+// TOTK_PROFILE_SLOW dump), while every page was already committed by the CPU writes that filled the pools.
+// plat_mem_lazy clears the bits of a range that leaves the heap and again of one that joins it, before the new end is
+// published: a fault in flight during a shrink may set a bit for a chunk the shrink then decommits, and the clear on
+// growth drops it before any caller can ask for that chunk again. All commits in the lazy heap go through lazy_commit or
+// mem_touch, which marks what it commits. The map covers 16 GiB from the heap base, the size of memory.c's stack and
+// heap block; chunks beyond it are never known.
+#define LAZY_CHUNK_SHIFT 16
+#define LAZY_MAP_CHUNKS ((16ull << 30) >> LAZY_CHUNK_SHIFT)
+static volatile uint64_t lazy_map[LAZY_MAP_CHUNKS / 64];
+
+// Clears the bits of the chunks in [lo, hi), offsets from lazy_base, chunk-aligned.
+static void lazy_map_clear(uint64_t lo, uint64_t hi) {
+    uint64_t c0 = lo >> LAZY_CHUNK_SHIFT, c1 = hi >> LAZY_CHUNK_SHIFT;
+    if (c1 > LAZY_MAP_CHUNKS) c1 = LAZY_MAP_CHUNKS;
+    for (uint64_t c = c0; c < c1; c++) __atomic_fetch_and(&lazy_map[c >> 6], ~(1ull << (c & 63)), __ATOMIC_RELAXED);
+}
+
 void plat_mem_lazy(uint64_t base, uint64_t size) {
+    uint64_t old_base = __atomic_load_n(&lazy_base, __ATOMIC_RELAXED), old_end = __atomic_load_n(&lazy_end, __ATOMIC_RELAXED);
+    if (old_base != base) memset((void *)lazy_map, 0, sizeof lazy_map);   // the first call (memory.c never moves the heap)
+    else if (base + size < old_end) lazy_map_clear(size, old_end - base);
+    else if (base + size > old_end) lazy_map_clear(old_end - base, size);
     __atomic_store_n(&lazy_base, base, __ATOMIC_RELAXED);
     __atomic_store_n(&lazy_end, base + size, __ATOMIC_RELEASE);
+}
+
+// The chunk index of addr in lazy_map, or -1 when addr is outside the heap or the map.
+static int64_t lazy_chunk(uint64_t addr) {
+    uint64_t lo = __atomic_load_n(&lazy_base, __ATOMIC_RELAXED), hi = __atomic_load_n(&lazy_end, __ATOMIC_ACQUIRE);
+    if ((lo & ((1ull << LAZY_CHUNK_SHIFT) - 1)) || addr < lo || addr >= hi) return -1;
+    uint64_t c = (addr - lo) >> LAZY_CHUNK_SHIFT;
+    return c < LAZY_MAP_CHUNKS ? (int64_t)c : -1;
+}
+
+static int lazy_known(int64_t c) {
+    return c >= 0 && (__atomic_load_n(&lazy_map[c >> 6], __ATOMIC_ACQUIRE) >> (c & 63) & 1);
+}
+
+uint64_t plat_mem_lazy_run(uint64_t a, uint64_t e, int *known) {
+    *known = lazy_known(lazy_chunk(a));
+    uint64_t x = (a & ~((1ull << LAZY_CHUNK_SHIFT) - 1)) + (1ull << LAZY_CHUNK_SHIFT);
+    while (x < e && lazy_known(lazy_chunk(x)) == *known) x += 1ull << LAZY_CHUNK_SHIFT;
+    return x < e ? x : e;
+}
+
+void plat_mem_lazy_mark(uint64_t a, uint64_t e) {
+    for (uint64_t x = a & ~((1ull << LAZY_CHUNK_SHIFT) - 1); x + (1ull << LAZY_CHUNK_SHIFT) <= e; x += 1ull << LAZY_CHUNK_SHIFT) {
+        int64_t c = lazy_chunk(x);
+        if (c >= 0 && x >= a) __atomic_fetch_or(&lazy_map[c >> 6], 1ull << (c & 63), __ATOMIC_RELEASE);
+    }
 }
 
 uint64_t plat_mem_lazy_faults(void) { return __atomic_load_n(&lazy_faults, __ATOMIC_RELAXED); }
@@ -626,7 +765,7 @@ static int lazy_commit(uint64_t addr, uint64_t lo, uint64_t hi) {
     if (e > hi) e = hi;
     for (uint64_t x = a, y; x < e; x = y) {
         MEMORY_BASIC_INFORMATION mbi;
-        if (!VirtualQuery((void *)(uintptr_t)x, &mbi, sizeof mbi)) return 0;
+        if (!vm_query(x, &mbi, PLAT_VM_LAZY)) return 0;
         y = (uint64_t)(uintptr_t)mbi.BaseAddress + mbi.RegionSize;
         if (y > e) y = e;
         if (mbi.State != MEM_RESERVE) continue;
@@ -635,8 +774,10 @@ static int lazy_commit(uint64_t addr, uint64_t lo, uint64_t hi) {
         int ok = 0;
         for (int t = 0; t < 5 && !ok; t++) {
             if (t) Sleep(20);
+            int op = plat_op_begin(PLAT_OP_COMMIT, x, y - x);
             ok = VirtualAlloc((void *)(uintptr_t)x, y - x, MEM_COMMIT, PAGE_READWRITE) != NULL;
             if (!ok) err = GetLastError();
+            plat_op_end(op, 0);
         }
         if (!ok) {
             __atomic_store_n(&lazy_fail_addr, x, __ATOMIC_RELAXED);
@@ -644,6 +785,7 @@ static int lazy_commit(uint64_t addr, uint64_t lo, uint64_t hi) {
             return 0;
         }
     }
+    if (a == (addr & ~0xffffull) && e == a + 0x10000) plat_mem_lazy_mark(a, e);   // a whole chunk, not one clipped at an end
     return 1;
 }
 
@@ -666,12 +808,12 @@ static LONG CALLBACK fault_veh(EXCEPTION_POINTERS *ep) {
     uint64_t hi = __atomic_load_n(&lazy_end, __ATOMIC_ACQUIRE), lo = __atomic_load_n(&lazy_base, __ATOMIC_RELAXED);
     if (er->ExceptionInformation[0] <= 1 && a >= lo && a < hi) {
         MEMORY_BASIC_INFORMATION mbi;
-        if (VirtualQuery((void *)(uintptr_t)a, &mbi, sizeof mbi) && mbi.State == MEM_RESERVE) {
+        if (vm_query(a, &mbi, PLAT_VM_LAZY) && mbi.State == MEM_RESERVE) {
             lazy_commit(a, lo, hi);
             __atomic_add_fetch(&lazy_faults, 1, __ATOMIC_RELAXED);
         }
         // Whoever committed it (this thread or the one that won the race): retry when the access is allowed now.
-        if (VirtualQuery((void *)(uintptr_t)a, &mbi, sizeof mbi) && mbi.State == MEM_COMMIT && !(mbi.Protect & PAGE_GUARD)) {
+        if (vm_query(a, &mbi, PLAT_VM_LAZY) && mbi.State == MEM_COMMIT && !(mbi.Protect & PAGE_GUARD)) {
             DWORD p = mbi.Protect & 0xff;
             if (p == PAGE_READWRITE || (p == PAGE_READONLY && er->ExceptionInformation[0] == 0))
                 return EXCEPTION_CONTINUE_EXECUTION;
@@ -925,7 +1067,7 @@ int plat_mem_read(uint64_t addr, void *out, size_t n) {
 int plat_mem_readable(uint64_t addr, uint64_t n) {
     for (uint64_t a = addr, end = addr + n; a < end || a == addr;) {
         MEMORY_BASIC_INFORMATION mbi;
-        if (!VirtualQuery((void *)(uintptr_t)a, &mbi, sizeof mbi)) return 0;
+        if (!vm_query(a, &mbi, PLAT_VM_READABLE)) return 0;
         // A reserved page of the lazy heap reads as zero: the CPU's first read commits it (fault_veh).
         int lazy = mbi.State == MEM_RESERVE && a >= __atomic_load_n(&lazy_base, __ATOMIC_RELAXED) &&
                    a < __atomic_load_n(&lazy_end, __ATOMIC_ACQUIRE);
@@ -1656,6 +1798,13 @@ void plat_mem_info(float *used_mb, float *total_mb, float *proc_mb) {
     PROCESS_MEMORY_COUNTERS pmc;
     if (K32GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof pmc)) *proc_mb = (float)(pmc.WorkingSetSize >> 20);
 }
+
+int plat_mem_avail(uint64_t *avail, uint64_t *swap_free, uint64_t *total, int *has_swap) {
+    (void)avail, (void)swap_free, (void)total, (void)has_swap;
+    return 0;   // the memory-pressure policy (vk_mem_pressure.c) is Linux only
+}
+
+int plat_mem_trim(void) { return 0; }
 
 void plat_commit_info(double *proc_mb, double *used_mb, double *limit_mb) {
     *proc_mb = *used_mb = *limit_mb = -1;

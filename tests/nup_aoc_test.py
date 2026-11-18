@@ -45,6 +45,11 @@ class AocTest(unittest.TestCase):
         self.assertEqual([i for i, _ in got], [0, 3, 5])
         self.assertEqual(got[2][1].version, 2)
 
+    def test_zero_title_id_base(self):
+        n, _ = self.open([(0, 0, 1, {'exefs': {'main': b'x'}}), (1, APP + 0x800, 2, {'exefs': {'main': b'y'}}),
+                          dlc(1)])
+        self.assertEqual([i for i, _ in nup.aoc_packs(n)], [1])
+
     def test_no_program_package(self):
         n, _ = self.open([dlc(0)])
         self.assertEqual(nup.aoc_packs(n), [])

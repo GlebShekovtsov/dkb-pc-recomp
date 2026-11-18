@@ -989,6 +989,9 @@ int plat_mem_state(uint64_t addr, uint64_t limit, uint64_t *end) {
 }
 
 void plat_mem_prewrite(uint64_t addr, uint64_t n) { (void)addr, (void)n; }   // a watched write costs nothing extra here
+// Not on this platform: the lazy write-back stays off.
+int plat_mem_seal(uint64_t addr, uint64_t n, int on) { (void)addr, (void)n, (void)on; return 0; }
+int plat_mem_access_hook(int (*fn)(uint64_t addr)) { (void)fn; return 0; }
 
 // No userfaultfd, no PAGEMAP_SCAN: the pages the CPU wrote since the last reset cannot be read back. The caller
 // (vk_memory.c) uploads the whole range again when it sees this.
@@ -1541,10 +1544,25 @@ void plat_mem_info(float *used_mb, float *total_mb, float *proc_mb) {
     if (resident) *proc_mb = (float)(resident >> 20);
 }
 
+int plat_mem_avail(uint64_t *avail, uint64_t *swap_free, uint64_t *total, int *has_swap) {
+    (void)avail, (void)swap_free, (void)total, (void)has_swap;
+    return 0;   // the memory-pressure policy (vk_mem_pressure.c) is Linux only
+}
+
+int plat_mem_trim(void) { return 0; }
+
 // No walk of the address space on this host: mem_commit_report then sums nothing.
 void plat_mem_walk(void (*fn)(uint64_t, uint64_t, int, void *), void *arg) { (void)fn, (void)arg; }
 // Not implemented on this host (the commit report is Windows only): reports 0.
 uint64_t plat_mem_resident(uint64_t base, uint64_t size) { (void)base, (void)size; return 0; }
+// No VirtualQuery-like scan here: nothing is counted.
+void plat_vm_stats(PlatVmStat out[PLAT_VM_N]) { memset(out, 0, PLAT_VM_N * sizeof *out); }
+
+uint64_t plat_self_cpu_ns(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
+    return (uint64_t)t.tv_sec * 1000000000u + (uint64_t)t.tv_nsec;
+}
 
 void plat_process_memory(uint64_t *resident, uint64_t *private_bytes) {
     *resident = *private_bytes = 0;

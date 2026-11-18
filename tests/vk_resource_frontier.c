@@ -54,6 +54,7 @@ _Noreturn void rt_fatal(const char *format, ...) {
     fputc('\n', stderr); ExitProcess(21);
 }
 void rt_log(const char *format, ...) { (void)format; }
+uint64_t kern_now_ns(void) { return 0; }   // vk_sync.c vk_sync_queue_submit times the submit
 unsigned rt_trace;
 static void wb_async_forget(const void *e) { (void)e; }
 void vk_dlss_image_gone(VkImage image) { (void)image; }
@@ -61,6 +62,12 @@ void perf_count(int kind) { (void)kind; }
 uint64_t perf_begin(void) { return 0; }
 void perf_replay(uint64_t start) { (void)start; }
 void perf_replay_totals(uint64_t d, uint64_t t, uint64_t c) { (void)d; (void)t; (void)c; }
+// perf.c's replay parts (TOTK_TRACE=perf), off in the fixture
+int perf_ph_replay_begin(void) { return 0; }
+void perf_ph_replay_end(int prev) { (void)prev; }
+uint64_t perf_ph_begin(void) { return 0; }
+uint64_t perf_ph_begin_cpu(void) { return 0; }
+void perf_ph_end(int part, uint64_t t0) { (void)part; (void)t0; }
 uint64_t vk_exec_draws_total(void) { return 0; }
 void vk_exec_pool_counts(uint64_t *c, uint64_t *t) { *c = *t = 0; }
 // No helper translator runs (vk_spec.c): every texture call is the replay thread's, and no part is out to give up.
@@ -194,6 +201,7 @@ static void synthetic_destroy_set_layout(VkDevice d, VkDescriptorSetLayout l, co
 // The sparse mirror cache and the slice threads' write-back lists (vk_memory.c) stay empty in this fixture.
 static int mirror_sparse;
 static void sparse_cache_close(void) {}
+static void wb_shutdown(VkCtx *c) { (void)c; }
 typedef struct WbLocal { void *a; int n, cap; void *k; int nk, ck; struct WbLocal *next; } WbLocal;
 static WbLocal *wb_locals;
 #define cmd_pool memory_cmd_pool
@@ -216,6 +224,7 @@ static int alias_copy(Tex *a, const Tex *b) { (void)a; (void)b; check(0, "no liv
 static void init_image(Tex *image, VkCommandBuffer cb) { (void)image; (void)cb; }
 VkCommandBuffer vk_upload_begin(void) { return (VkCommandBuffer)(uintptr_t)0xC200; }
 void vk_upload_end(void) {}
+void vk_mem_pressure_check(void) {}   // vk_mem_collect calls it after each collection (vk_mem_pressure.c, #374)
 int vk_mem_changed(uint64_t a, uint64_t n, uint32_t before, uint32_t *now) {
     (void)a; (void)n; (void)before; (void)now; check(0, "not a mirrored image"); return 0;
 }

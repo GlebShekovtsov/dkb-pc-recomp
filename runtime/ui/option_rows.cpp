@@ -471,12 +471,13 @@ bool opt_choice(const char *key, UiTextId label, const UiTextId *names, int n, U
     return opt_choice_list(key, label, values, shown, n, desc, -1, note);
 }
 
-bool opt_slider(const char *key, UiTextId label, float lo, float hi, UiTextId desc, float step, const char *fmt) {
+bool opt_slider(const char *key, UiTextId label, float lo, float hi, UiTextId desc, float step, const char *fmt,
+                const char *note) {
     const CfgMeta *m = cfg_meta(key);
     double v = cfg_double(key), def = m ? strtod(m->def, NULL) : lo;
     char shown[48];
     snprintf(shown, sizeof shown, fmt, v);
-    RowView rv = {shown, fabs(v - def) < step * 0.01, true, NULL};
+    RowView rv = {shown, fabs(v - def) < step * 0.01, true, note};
     rv.frac = hi > lo ? (float)fmin(1.0, fmax(0.0, (v - lo) / (hi - lo))) : 0;
     int s = row(key, label, desc, rv);
     if (!s) return false;

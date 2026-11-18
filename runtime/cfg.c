@@ -35,22 +35,22 @@ static const char *const known[] = {
     "BIND_LSTICK_RIGHT", "BIND_LSTICK_UP", "BIND_MINUS",
     "BIND_PLUS", "BIND_R", "BIND_RCLICK", "BIND_RIGHT", "BIND_RSTICK_DOWN", "BIND_RSTICK_LEFT", "BIND_RSTICK_RIGHT", "BIND_RSTICK_UP",
     "BIND_SKIP", "BIND_STATS", "BIND_UP", "BIND_X", "BIND_Y",
-    "BIND_ZL", "BIND_ZR", "BLOCK_VIEWS_3D", "CLOTH_REALTIME", "COLOR_BRIGHTNESS", "COLOR_CONTRAST", "COLOR_GAMMA", "COLOR_PRESET", "COLOR_SATURATION", "CORE_DIAG", "CRIT", "CRUMB_BIND", "CRIT_OUT", "CRT_FILTER", "CRT_LINES", "DESC_C0_SERIAL", "DESC_KEEP", "DESC_SAMP_GEN", "DESC_STAGE_ORIGIN", "DESC_TD_HASH", "DESC_TEMPLATE", "DEVICE_PROFILE", "DLSS_PRESET", "DRAW_MERGE", "DRAW_PROFILE", "DUMP", "DUMP_BUF", "DUMP_DIR", "DUMP_LOG", "DYN_UBO",
+    "BIND_ZL", "BIND_ZR", "BLOCK_VIEWS_3D", "CLOTH_REALTIME", "COLOR_BRIGHTNESS", "COLOR_CONTRAST", "COLOR_GAMMA", "COLOR_PRESET", "COLOR_SATURATION", "CORE_DIAG", "CRIT", "CRUMB_BIND", "CRIT_OUT", "CRT_FILTER", "CRT_LINES", "DESC_C0_SERIAL", "DESC_KEEP", "DESC_SAMP_GEN", "DESC_STAGE_ORIGIN", "DESC_TD_HASH", "DESC_TEMPLATE", "DEVICE_PROFILE", "DLSS_PRESET", "DLSS_WARM_FULL", "DRAW_MERGE", "DRAW_PROFILE", "DUMP", "DUMP_BUF", "DUMP_DIR", "DUMP_LOG", "DYN_UBO",
     "EXEFS", "EXPERIMENTAL_GEOMETRY", "FEEDBACK", "FIXED_STEP", "FIX_C0", "FIX_INDIRECT_RESET", "FIX_LQ_FOLD", "FIX_SCREEN_UV", "FIX_VS_FAULT", "FIX_ZERO", "FLIGHT", "FLIGHT_AT", "FLIGHT_DIR", "FLIGHT_FRAMES", "FLIGHT_SPIKE_MS",
-    "FLIGHT_THUMBS", "CONSOLE", "FMZ", "FMZ_SEL", "FOV", "FOV_PATCH", "FPS60", "FPS_LIMIT", "FRAME_GEN", "FRAME_GEN_BY", "FREEZE_IDLE", "FSR4_LDR", "FSR_DIR", "FREE_CORES", "FULLSCREEN", "GPL", "GPL_DRAW_BUILD", "GPU", "GPU_CHECKPOINTS", "GPU_HANG_S",
+    "FLIGHT_THUMBS", "CONSOLE", "FMZ", "FMZ_SEL", "FOV", "FOV_PATCH", "FPS60", "FPS_LIMIT", "FRAME_GEN", "FRAME_GEN_BY", "FREEZE_IDLE", "FRZ_WHOLE", "FSR4_LDR", "FSR_DIR", "FREE_CORES", "FULLSCREEN", "GPL", "GPL_DRAW_BUILD", "GPU", "GPU_CHECKPOINTS", "GPU_HANG_S",
     "GPU_INDEX", "GPU_NAME", "GS_STORAGE_WRITEBACK", "HDR", "HDR_GAME_NITS", "HDR_NATIVE", "HDR_PEAK_NITS", "HDR_SHOULDER", "HDR_TRACE", "HDR_UI_NITS", "HEAP_LAZY", "HIGHFPS_FIX", "HOST_PROPS_CACHE", "INPUT", "INPUT_RECORD", "INPUT_SCRIPT", "LANG", "LIB_PREBUILD",
-    "LIB_PREBUILD_KEEP", "LIB_PREBUILD_THREADS", "LIST_RESTART", "LOCALE", "LOCK_HOLDS", "LOD_GUARD", "MEMORY", "MEM_REPORT", "MENU_LANG", "MENU_THEME", "MENU_TEST",
+    "LIB_PREBUILD_KEEP", "LIB_PREBUILD_THREADS", "LIST_RESTART", "LOCALE", "LOCK_HOLDS", "LOD_GUARD", "MEMORY", "MEM_AVAIL_RESERVE_MB", "MEM_COMMIT_RESERVE_MB", "MEM_REPORT", "MEM_TRIM", "MENU_LANG", "MENU_THEME", "MENU_TEST",
     "MENU_TEST_DIR", "MENU_TEST_SET", "MERGE_STATS", "MINIMAL_LAYOUT", "MIRROR_GAP", "MIRROR_OWN", "MIRROR_PRESNAP", "MOTION", "MOUSE_CAMERA", "MOUSE_SENS", "MOVIE_HOST", "MOVIE_PACE", "MVK_UPSCALE_BLIT", "NAN_GUARD", "NATIVE_GS", "NX2_READ_NOWAIT",
-    "NVN2_MODE_TRACE", "NVN2_MODE_TRACE_START_MS", "NVN2_MODE_TRACE_DURATION_MS", "ONE_PER_CORE", "OPERATION_MODE", "OUTPUT_RES", "PAD_DEVICE", "PAD_FULLSCREEN_HOLD", "PAD_LAYOUT", "PAD_PROMPTS", "PAR_DEFER", "PAR_DEFER_DEPTH", "PAR_INDIRECT", "PATCH_OUTPUT", "PATCH_SCENE", "PCACHE_GATE", "PERF_OVERLAY", "PERF_SLOW_GPU_MS", "PERF_SLOW_MS", "PIPELINE_CACHE", "PIPE_MEMO", "PIPE_PREBUILD", "PIPE_SKIP", "PIPE_SYNC", "PIPE_WAIT", "POOL_FINI_WAIT", "POOL_LAZY",
+    "NVN2_MODE_TRACE", "NVN2_MODE_TRACE_START_MS", "NVN2_MODE_TRACE_DURATION_MS", "ONE_PER_CORE", "OPERATION_MODE", "OUTPUT_RES", "PAD_DEVICE", "PAD_FULLSCREEN_HOLD", "PAD_LAYOUT", "PAD_PROMPTS", "PAR_DEFER", "PAR_DEFER_DEPTH", "PAR_INDIRECT", "PATCH_OUTPUT", "PATCH_SCENE", "PCACHE_GATE", "PERF_OVERLAY", "PERF_SLOW_GPU_MS", "PERF_SLOW_MS", "PIPELINE_CACHE", "PIPE_MEMO", "PIPE_PREBUILD", "PIPE_SKIP", "PIPE_SYNC", "PIPE_WAIT", "POOL_FINI_WAIT", "POOL_IMPORT_LOG", "POOL_LAZY",
     "PRESENT_HOLD", "PREWARM_XLATE", "PROBE_MOVIE", "PROBE_MOVIE_SHOT", "PROFILE", "PROFILE_CHAINS", "PROFILE_DIR", "PROFILE_FRAMES",
-    "PROFILE_MAIN", "PROFILE_RENDER", "PROFILE_REPLAY", "PUSH_SKIP", "PUSH_STAGE", "RDOC", "RDOC_DIR", "RDOC_DLL", "REALTIME", "REC_BEGIN", "REC_END", "REC_SUBMIT", "REEXEC",
-    "RENDER_SCALE", "SCENE_RES", "REPLAY_ASYNC", "REPLAY_HELPERS", "REPLAY_PAR", "REPLAY_THREADS", "CALL_REF",
+    "PROFILE_MAIN", "PROFILE_RENDER", "PROFILE_REPLAY", "PROFILE_SLOW", "PROFILE_VQ", "PUSH_SKIP", "PUSH_STAGE", "RDOC", "RDOC_DIR", "RDOC_DLL", "REALTIME", "REC_BEGIN", "REC_END", "REC_SUBMIT", "REEXEC",
+    "RENDER_SCALE", "SCENE_RES", "REPLAY_ASYNC", "REPLAY_HELPERS", "REPLAY_PAR", "REPLAY_THREADS", "CALL_REF", "RESET_BATCH", "RESET_CPU_LIST",
     "REPLAY_CHECK", "RESOLVE_CHECK", "ROMFS", "ROMFS_INDEX", "ROMFS_MMAP", "ROMFS_MODS", "ROMFS_PATCHES",
     "ROMFS_PROOF_DIR", "ROMFS_VERIFY", "RUMBLE", "RUMBLE_CURVE", "RUMBLE_HD", "RUMBLE_STRENGTH", "RUMBLE_TRIGGERS", "SHADER_CACHE",
-    "SHADER_MEMO", "SHARED_FONTS", "SHARPNESS", "SHOTS", "SHOTS_DIR", "SHOTS_FULL", "SKIP_CS", "SKIP_FS", "SKIP_VS", "SMAA", "SPARSE_MIRROR_COPY", "SPEED_PROBE", "SPIN", "SPIN_HANDOFF_US", "SPLIT_DRAWS", "SPLIT_US", "STICK_DEADZONE", "SVC_SLOW", "SWKBD_ANSWER",
-    "SWKBD_TEST", "TEST_PAD", "TEST_PREPARE_SHADERS", "TEX_ALIAS", "TEX_CHECK_SHARE", "TEX_HASH", "TEX_MEMO", "TEX_REPEAT", "CS_BARRIER", "HOLD_REVIVE", "TEX_VRAM_PRESSURE", "TIMER_1MS", "REC_BATCH", "TRACE", "UBO_SNAPSHOT", "UPSCALER", "USNAP_FAST", "VK_DYN_A2C", "VK_DYN_VERTEX", "VK_NO_FLOAT64",
-    "VK_PRESENT", "VK_RECORDER", "VK_SSBO_ALIGN", "VK_SUBGROUP", "VK_SUBGROUP_PIN", "VK_VALIDATION", "VOLUME", "VULKAN_DRIVER", "VRAM_HEADROOM", "VS_OUTS",
-    "ULTRAWIDE", "HUD_POSITION", "WB_ASYNC", "WB_EXACT", "WB_FENCE_LIMIT", "WB_UNLOCKED", "WINDOW_FILTER", "WINDOW_MODE", "WINDOW_SIZE", "XLATE", "XLATE_ID", "XLATE_PROCS", "ZSTD_CHECK", "ZSTD_NATIVE",
+    "SHADER_MEMO", "SHARED_FONTS", "SHARPNESS", "SHOTS", "SHOTS_DIR", "SHOTS_FULL", "SKIP_CS", "SKIP_FS", "SKIP_VS", "SMAA", "SPARSE_MIRROR_COPY", "SPEED_PROBE", "STALL_DUMP", "SPIN", "SPIN_HANDOFF_US", "SPLIT_DRAWS", "SPLIT_US", "STAMP_BATCH", "STICK_DEADZONE", "SVC_SLOW", "SWKBD_ANSWER",
+    "SWKBD_TEST", "TEST_PAD", "TEST_PREPARE_SHADERS", "TEX_ALIAS", "TEX_CHECK_SHARE", "TEX_HASH", "TEX_MEMO", "TEX_REPEAT", "CS_BARRIER", "HOLD_REVIVE", "TEX_VRAM_PRESSURE", "TIMER_1MS", "TOUCH_MAP", "REC_BATCH", "TRACE", "UBO_SNAPSHOT", "UPSCALER", "USNAP_DROP_LOCAL", "USNAP_FAST", "VK_DYN_A2C", "VK_DYN_VERTEX", "VK_NO_FLOAT64",
+    "VK_PRESENT", "VK_RECORDER", "VK_SSBO_ALIGN", "VK_SUBGROUP", "VK_SUBGROUP_PIN", "VK_VALIDATION", "VOLUME", "VULKAN_DRIVER", "VRAM_HEADROOM", "VRAM_LIMIT", "VS_OUTS",
+    "ULTRAWIDE", "HUD_POSITION", "WB_ASYNC", "WB_EARLY", "WB_EXACT", "WB_FENCE_LIMIT", "WB_LAZY", "WB_UNLOCKED", "WINDOW_FILTER", "WINDOW_MODE", "WINDOW_SIZE", "WW_SLOW_MS", "XLATE", "XLATE_ID", "XLATE_PROCS", "ZSTD_CHECK", "ZSTD_NATIVE",
 };
 
 // The totk.ini section a key cfg_set may write goes to when the file lacks it (totk.ini.example's sections).
@@ -75,10 +75,10 @@ static const struct { const char *key, *section; } sections[] = {
     {"BIND_RIGHT", "input"}, {"BIND_DOWN", "input"}, {"BIND_LSTICK_LEFT", "input"}, {"BIND_LSTICK_UP", "input"},
     {"BIND_LSTICK_RIGHT", "input"}, {"BIND_LSTICK_DOWN", "input"}, {"BIND_RSTICK_LEFT", "input"},
     {"BIND_RSTICK_UP", "input"}, {"BIND_RSTICK_RIGHT", "input"}, {"BIND_RSTICK_DOWN", "input"},
-    {"ASYNC_PREEMPT", "performance"}, {"REPLAY_ASYNC", "performance"}, {"REPLAY_THREADS", "performance"}, {"CALL_REF", "performance"}, {"FREE_CORES", "performance"},
+    {"ASYNC_PREEMPT", "performance"}, {"REPLAY_ASYNC", "performance"}, {"REPLAY_THREADS", "performance"}, {"CALL_REF", "performance"}, {"RESET_CPU_LIST", "performance"}, {"FREE_CORES", "performance"},
     {"TIMER_1MS", "performance"}, {"PIPE_WAIT", "performance"}, {"PIPE_SKIP", "performance"},
     {"LIB_PREBUILD", "performance"}, {"LIB_PREBUILD_THREADS", "performance"}, {"PIPE_PREBUILD", "performance"},
-    {"PREWARM_XLATE", "performance"}, {"GPL", "performance"}, {"ASTC", "performance"}, {"MEMORY", "performance"},
+    {"PREWARM_XLATE", "performance"}, {"GPL", "performance"}, {"ASTC", "performance"}, {"MEMORY", "performance"}, {"WB_LAZY", "performance"},
     {"EXPERIMENTAL_GEOMETRY", "performance"}, {"NATIVE_GS", "performance"},
     {"REC_BATCH", "performance"},
     {"TEX_ALIAS", "performance"}, {"TEX_VRAM_PRESSURE", "performance"}, {"ASTC_BC", "performance"}, {"LOD_GUARD", "performance"}, {"FIX_C0", "performance"}, {"FIX_INDIRECT_RESET", "performance"}, {"FIX_VS_FAULT", "performance"}, {"FIX_LQ_FOLD", "performance"}, {"FIX_ZERO", "performance"}, {"FIX_SCREEN_UV", "performance"}, {"LIST_RESTART", "performance"},
@@ -89,7 +89,7 @@ static const struct { const char *key, *section; } sections[] = {
     {"VK_DYN_VERTEX", "performance"}, {"VK_DYN_A2C", "performance"}, {"VK_SUBGROUP_PIN", "performance"},
     {"TRACE", "diagnostics"}, {"MEM_REPORT", "diagnostics"}, {"HEAP_LAZY", "diagnostics"}, {"FLIGHT", "diagnostics"}, {"FLIGHT_SPIKE_MS", "diagnostics"},
     {"WB_FENCE_LIMIT", "diagnostics"}, {"WB_EXACT", "diagnostics"}, {"NX2_READ_NOWAIT", "diagnostics"},
-    {"NVN2_MODE_TRACE", "diagnostics"}, {"HDR_TRACE", "diagnostics"}, {"HDR_SHOULDER", "diagnostics"},
+    {"NVN2_MODE_TRACE", "diagnostics"}, {"STALL_DUMP", "diagnostics"}, {"HDR_TRACE", "diagnostics"}, {"HDR_SHOULDER", "diagnostics"},
     {"NVN2_MODE_TRACE_START_MS", "diagnostics"}, {"NVN2_MODE_TRACE_DURATION_MS", "diagnostics"},
 };
 
@@ -147,7 +147,7 @@ static const CfgMeta metas[] = {
     // Sound, Controls, Menu
     {"VOLUME", "100", "0..100", LIVE}, {"AUDIO_CHANNELS", "auto", "auto|stereo|5.1", RESTART},
     {"MOTION", "1", "0|1", LIVE}, {"RUMBLE_STRENGTH", "130", "0..300", LIVE}, {"RUMBLE_CURVE", "0.6", "0.2..1.5", LIVE},
-    {"RUMBLE_TRIGGERS", "0", "0|1", LIVE}, {"RUMBLE_HD", "auto", "auto|off", LIVE}, {"PAD_LAYOUT", "auto", "auto|nintendo|xbox|xbox_prompts", LIVE},
+    {"RUMBLE_TRIGGERS", "0", "0|1", LIVE}, {"RUMBLE_HD", "off", "auto|off", LIVE}, {"PAD_LAYOUT", "auto", "auto|nintendo|xbox|xbox_prompts", LIVE},
     {"PAD_DEVICE", "auto", NULL, LIVE}, {"PAD_FULLSCREEN_HOLD", "0", "0|1", LIVE}, {"PAD_PROMPTS", "auto", "auto|switch|playstation", RESTART},
     {"STICK_DEADZONE", "8", "0..50", LIVE}, {"MOUSE_CAMERA", "0", "0|1", LIVE}, {"MOUSE_SENS", "1", "0..10", LIVE},
     {"MENU_LANG", "", "en|ru", LIVE}, {"MENU_THEME", "dk", "dk|classic", LIVE},
@@ -155,6 +155,7 @@ static const CfgMeta metas[] = {
     {"ASYNC_PREEMPT", "1", "0|1|2", RESTART}, {"REPLAY_ASYNC", "0", "0|1", RESTART},
     {"REPLAY_THREADS", "", "0..16", RESTART},     // sliced passes (vk_exec.c par_threads): 0 off, else the recording threads; unset: 6 from 12 logical processors, 4 from 8, on AMD only the RX 9070 and 9070 XT on the proprietary driver (vk_caps.amd_slices), else 0
     {"CALL_REF", "1", "0|1", RESTART},   // CallCommands of a recording without deferred records records an OP_CALL (nvn_api_cmd.c inline_recording)
+    {"RESET_CPU_LIST", "1", "0|1|2", RESTART},   // indirect-reset pointer lists read from guest memory (vk_exec_draw.c vk_exec_reset_indirect)
     {"FREE_CORES", "0", "0|1", RESTART}, {"TIMER_1MS", "1", "0|1", RESTART}, {"REC_BATCH", "0", "0..64", RESTART},
     // shaders and pipelines
     {"PIPE_WAIT", "default", "default|draw", RESTART}, {"PIPE_SKIP", "fullscreen", "strict|any|fullscreen", RESTART},
@@ -162,6 +163,7 @@ static const CfgMeta metas[] = {
     {"PIPE_PREBUILD", "1", "0|1", RESTART}, {"PREWARM_XLATE", "", "1..64", RESTART}, {"GPL", "", "0|1", RESTART},
     // textures and memory
     {"ASTC", "auto", "auto|gpu|native|cpu", RESTART}, {"MEMORY", "auto", "auto|import|mirror|verify", RESTART},
+    {"WB_LAZY", "0", "0|1", RESTART},   // vk_memory.c, the lazy write-back; Linux
     {"TEX_ALIAS", "1", "0|1", RESTART}, {"TEX_HASH", "1", "0|1", RESTART}, {"TEX_VRAM_PRESSURE", "90", "0..100", RESTART}, {"ASTC_BC", "0", "0|1", RESTART}, {"ZSTD_NATIVE", "1", "0|1", RESTART}, {"ZSTD_CHECK", "0", "0|1", RESTART},
     // render fixes
     {"EXPERIMENTAL_GEOMETRY", "0", "0|1", RESTART}, {"NATIVE_GS", "1", "0|1", RESTART},
@@ -180,7 +182,7 @@ static const CfgMeta metas[] = {
     {"VK_VALIDATION", "0", "0|1", RESTART}, {"VK_DYN_VERTEX", "", "0|1", RESTART},
     {"VK_DYN_A2C", "", "0|1", RESTART}, {"VK_SUBGROUP_PIN", "1", "0|1", RESTART},
     // diagnostics
-    {"TRACE", "", NULL, RESTART}, {"MEM_REPORT", "0", "0..1000000", RESTART}, {"HEAP_LAZY", "1", "0|1", RESTART}, {"FLIGHT", "0", "0|1", RESTART}, {"FLIGHT_SPIKE_MS", "100", "0..60000", RESTART},
+    {"TRACE", "", NULL, RESTART}, {"MEM_REPORT", "0", "0..1000000", RESTART}, {"STALL_DUMP", "5", "0..3600", RESTART}, {"HEAP_LAZY", "1", "0|1", RESTART}, {"FLIGHT", "0", "0|1", RESTART}, {"FLIGHT_SPIKE_MS", "100", "0..60000", RESTART},
     {"WB_FENCE_LIMIT", "65536", "0..1073741824", RESTART}, {"WB_EXACT", "1", "0|1", RESTART},
     {"NX2_READ_NOWAIT", "0", "0|1", RESTART},
     {"NVN2_MODE_TRACE", "0", "0|1", RESTART},

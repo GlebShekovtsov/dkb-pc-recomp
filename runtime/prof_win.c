@@ -17,6 +17,17 @@
 // chain where the thread stopped) and, after a present at least <ms> after the previous one, writes
 // that interval's samples (plus the 20 ms before) to <TOTK_PROFILE>.f<frame>: the profile format, one `stack 1` line per
 // sample, and `tstack <tid> <ms into the window> <rip>...` lines that keep the thread and the time. At most 64 dumps.
+// A sampler round that took over 5 ms is written as `tgap <ms into the window> <ms> wait <ms> list <ms> dump <ms> loop
+// <ms> worst <tid> <stop|copy|unwind> <ms>`: the timer wait, taking the new thread list, writing a dump, the round over
+// the threads, and its slowest step (stopping the thread, copying its stack, unwinding the copy). No sample is taken
+// while a round is late, so a tgap is a hole in every thread's samples.
+// The thread list is made by a thread of its own (refresher_main) every 64 ms and taken over by the sampler between two
+// rounds: CreateToolhelp32Snapshot walks every thread of the system, and while the sampler made the list itself (every
+// 64 rounds) it took 27 to 41 ms, a hole in every TOTK_PROFILE_SLOW dump of the Hilltop Layer's first frame.
+// A thread's stack ends at its StackBase (the TEB's NT_TIB, read once per thread): the copy runs from Rsp to there when
+// Rsp lies between StackLimit and StackBase, and a VirtualQuery finds the committed range only for an Rsp outside them
+// (TOTK_PROFILE_VQ=1: always, as before). A VirtualQuery takes the process's address-space lock and waits behind a long
+// query or mapping change of another thread, with the sampled thread held suspended meanwhile.
 #include <windows.h>
 #include <psapi.h>
 #include <tlhelp32.h>
@@ -44,9 +55,10 @@
 #define STK_SLACK (64u << 10)     // zeros after the copy: a frame reaching past it reads zeros, and a zero Rip ends the chain
 
 typedef struct { uint64_t rip, n; } RipCount;
-#define PROF_DEPTH 24             // frames kept per call chain, the sampled Rip first
+#define PROF_DEPTH 32             // frames kept per call chain, the sampled Rip first (driver chains run 20 deep)
 // cycles, depth, last: TOTK_PROFILE_SLOW only, the thread's cycle count and chain at its previous sample
-typedef struct { DWORD tid; HANDLE h; uint64_t n, in_exe, cycles; uint32_t depth; uint64_t last[PROF_DEPTH]; } ThreadSlot;
+// teb: the thread's TEB (its NT_TIB: StackBase, StackLimit), 0 when unknown
+typedef struct { DWORD tid; HANDLE h; uintptr_t teb; uint64_t n, in_exe, cycles; uint32_t depth; uint64_t last[PROF_DEPTH]; } ThreadSlot;
 
 static RipCount table[PROF_SLOTS];
 typedef struct { uint64_t hash, n; uint32_t depth; uint64_t rip[PROF_DEPTH]; } StackCount;
@@ -135,33 +147,92 @@ static uint32_t unwind_copy(CONTEXT *c, uintptr_t lo, size_t n, uint64_t *rip) {
     return d;
 }
 
-// Re-lists the process's threads: keeps the handle of a thread seen before, opens new ones, closes the gone ones.
-static void refresh_threads(DWORD self) {
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    if (snap == INVALID_HANDLE_VALUE) return;
+// The thread list, made by refresher_main and taken over by the sampler (take_threads). list_seq moves with each new
+// list. The refresher is never sampled, so it never holds list_lock while it is suspended.
+static SRWLOCK list_lock = SRWLOCK_INIT;
+static DWORD list_tid[PROF_THREADS];
+static int list_n;
+static volatile LONG list_seq;
+static volatile DWORD refresher_tid;
+static int use_vq;   // TOTK_PROFILE_VQ=1: every stack range from VirtualQuery
+
+static DWORD WINAPI refresher_main(void *arg) {
+    DWORD sampler_tid = (DWORD)(uintptr_t)arg, pid = GetCurrentProcessId();
+    refresher_tid = GetCurrentThreadId();
+    static DWORD tids[PROF_THREADS];
+    int told = 0;
+    while (!stop) {
+        uint64_t t0 = kern_now_ns();
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if (snap != INVALID_HANDLE_VALUE) {
+            int n = 0;
+            THREADENTRY32 te = {.dwSize = sizeof te};
+            for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te))
+                if (te.th32OwnerProcessID == pid && te.th32ThreadID != refresher_tid && te.th32ThreadID != sampler_tid &&
+                    n < PROF_THREADS)
+                    tids[n++] = te.th32ThreadID;
+            CloseHandle(snap);
+            AcquireSRWLockExclusive(&list_lock);
+            memcpy(list_tid, tids, sizeof *tids * (size_t)n);
+            list_n = n;
+            ReleaseSRWLockExclusive(&list_lock);
+            InterlockedIncrement(&list_seq);
+        }
+        double ms = (kern_now_ns() - t0) / 1e6;
+        if (ms >= 10 && told < 4) told++, rt_log("prof: the thread list took %.1f ms (CreateToolhelp32Snapshot, on the list thread)", ms);
+        Sleep(64);
+    }
+    return 0;
+}
+
+// The TEB of thread h (NtQueryInformationThread, ThreadBasicInformation), 0 when unknown.
+static uintptr_t thread_teb(HANDLE h) {
+    typedef LONG(NTAPI * QueryInfo)(HANDLE, int, void *, ULONG, ULONG *);
+    static QueryInfo q;
+    static int tried;
+    if (!tried) tried = 1, q = (QueryInfo)(void *)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread");
+    struct { LONG exit_status; void *teb; void *client_id[2]; ULONG_PTR affinity; LONG priority, base_priority; } tbi;
+    ULONG got = 0;
+    return q && q(h, 0, &tbi, sizeof tbi, &got) >= 0 ? (uintptr_t)tbi.teb : 0;
+}
+
+// Between rounds, when the list moved: keeps the slot (and handle) of a thread seen before, opens new ones, closes the
+// gone ones.
+static void take_threads(void) {
+    static LONG used = -1;
+    LONG seq = list_seq;
+    if (seq == used) return;
+    used = seq;
+    static DWORD tids[PROF_THREADS];
+    AcquireSRWLockShared(&list_lock);
+    int m = list_n;
+    memcpy(tids, list_tid, sizeof *tids * (size_t)m);
+    ReleaseSRWLockShared(&list_lock);
     static ThreadSlot next[PROF_THREADS];
     int n = 0;
-    THREADENTRY32 te = {.dwSize = sizeof te};
-    DWORD pid = GetCurrentProcessId();
-    for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
-        if (te.th32OwnerProcessID != pid || te.th32ThreadID == self || n == PROF_THREADS) continue;
+    for (int k = 0; k < m; k++) {
         ThreadSlot *old = NULL;
         for (int i = 0; i < n_threads; i++)
-            if (threads[i].tid == te.th32ThreadID) old = &threads[i];
+            if (threads[i].tid == tids[k]) old = &threads[i];
         if (old) {
             next[n++] = *old;
             old->h = NULL;
         } else {
-            HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, te.th32ThreadID);
-            if (h) next[n++] = (ThreadSlot){.tid = te.th32ThreadID, .h = h};
+            HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, tids[k]);
+            if (h) next[n++] = (ThreadSlot){.tid = tids[k], .h = h, .teb = use_vq ? 0 : thread_teb(h)};
         }
     }
-    CloseHandle(snap);
     for (int i = 0; i < n_threads; i++)
         if (threads[i].h) CloseHandle(threads[i].h);   // exited; its counts are lost with the slot
     memcpy(threads, next, sizeof(ThreadSlot) * n);
     n_threads = n;
 }
+
+// TOTK_PROFILE_SLOW: the sampler rounds that took over 5 ms (tgap lines of the dump).
+typedef struct { uint64_t t, total, wait, list, dump, loop, worst; DWORD tid; int step; } Gap;
+#define GAP_RING 256
+static Gap gaps[GAP_RING];
+static uint64_t gap_n;
 
 static void write_modules(FILE *f) {
     HMODULE mods[1024];
@@ -198,6 +269,14 @@ static void slow_dump(void) {
                 for (uint32_t d = 0; d < s->depth; d++) fprintf(f, " %llx", (unsigned long long)s->rip[d]);
                 fputc('\n', f);
             }
+        static const char *const step[] = {"stop", "copy", "unwind"};
+        for (uint64_t k = gap_n > GAP_RING ? gap_n - GAP_RING : 0; k < gap_n; k++) {
+            const Gap *g = &gaps[k & (GAP_RING - 1)];
+            if (g->t + g->total < lo || g->t > hi) continue;
+            fprintf(f, "tgap %.1f %.1f wait %.1f list %.1f dump %.1f loop %.1f worst %lu %s %.1f\n",
+                    ((double)g->t - (double)lo) / 1e6, g->total / 1e6, g->wait / 1e6, g->list / 1e6, g->dump / 1e6,
+                    g->loop / 1e6, g->tid, step[g->step], g->worst / 1e6);
+        }
         for (uint64_t k = stall_n > STALL_RING ? stall_n - STALL_RING : 0; k < stall_n; k++) {
             const Sample *s = &stalls[k & (STALL_RING - 1)];
             if (s->t + s->rip[PROF_DEPTH - 1] < lo || s->t > hi) continue;
@@ -222,13 +301,29 @@ static int in_window(void) {
     return 1;
 }
 
+// The committed stack above rsp of thread t, suspended: up to its TEB's StackBase when rsp lies in [StackLimit,
+// StackBase), else (no TEB, another stack, TOTK_PROFILE_VQ=1) the committed run VirtualQuery reports. 0 when rsp is in
+// the guard page or not committed: a thread stopped between its sub rsp and the stack probe has Rsp in the guard page,
+// and touching it would fault.
+static size_t stack_above(const ThreadSlot *t, uintptr_t rsp) {
+    if (t->teb) {
+        const NT_TIB *tib = (const NT_TIB *)t->teb;
+        uintptr_t base = (uintptr_t)tib->StackBase, limit = (uintptr_t)tib->StackLimit;
+        if (rsp >= limit && rsp < base) return base - rsp;
+    }
+    MEMORY_BASIC_INFORMATION mb;
+    if (VirtualQuery((void *)rsp, &mb, sizeof mb) && mb.State == MEM_COMMIT && !(mb.Protect & (PAGE_GUARD | PAGE_NOACCESS)))
+        return (uintptr_t)mb.BaseAddress + mb.RegionSize - rsp;
+    return 0;
+}
+
 static DWORD WINAPI sampler_main(void *arg) {
     (void)arg;
-    DWORD self = GetCurrentThreadId();
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
     HANDLE timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
     static CONTEXT ctx __attribute__((aligned(16)));
-    for (unsigned tick = 0; !stop; tick++) {
+    while (!stop) {
+        uint64_t r0 = slow_ns ? kern_now_ns() : 0;
         if (timer) {
             LARGE_INTEGER due = {.QuadPart = -10000};   // 1 ms
             SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE);
@@ -236,10 +331,16 @@ static DWORD WINAPI sampler_main(void *arg) {
         } else {
             Sleep(1);
         }
-        if (tick % 64 == 0) refresh_threads(self);
+        uint64_t r1 = slow_ns ? kern_now_ns() : 0;
+        take_threads();
+        uint64_t r2 = slow_ns ? kern_now_ns() : 0;
         if (dump_hi) slow_dump();
+        uint64_t r3 = slow_ns ? kern_now_ns() : 0;
         if (!in_window()) continue;
-        uint64_t now = slow_ns ? kern_now_ns() : 0;
+        uint64_t now = r3;
+        uint64_t worst = 0;
+        DWORD worst_tid = 0;
+        int worst_step = 0;
         for (int i = 0; i < n_threads; i++) {
             ThreadSlot *t = &threads[i];
             if ((only_render && t->tid != render_tid) || (only_main && t->tid != main_tid) ||
@@ -256,24 +357,28 @@ static DWORD WINAPI sampler_main(void *arg) {
             uint64_t stop0 = slow_ns ? kern_now_ns() : 0;
             if (SuspendThread(t->h) == (DWORD)-1) continue;
             BOOL ok = GetThreadContext(t->h, &ctx);   // returns once the thread has stopped in user mode
-            uint64_t stop_ns = slow_ns ? kern_now_ns() - stop0 : 0;
+            uint64_t stop1 = slow_ns ? kern_now_ns() : 0, stop_ns = stop1 - stop0;
             size_t n = 0;
-            MEMORY_BASIC_INFORMATION mb;
-            // a thread stopped between its sub rsp and the stack probe has Rsp in the guard page: touching it would fault
-            if (ok && chains && VirtualQuery((void *)ctx.Rsp, &mb, sizeof mb) && mb.State == MEM_COMMIT &&
-                !(mb.Protect & (PAGE_GUARD | PAGE_NOACCESS))) {
-                n = (uintptr_t)mb.BaseAddress + mb.RegionSize - ctx.Rsp;   // the committed stack above Rsp
-                size_t cap = slow_ns && (ctx.Rip < exe_lo || ctx.Rip >= exe_hi) ? 8u << 10 : STK_COPY;
+            if (ok && chains && (n = stack_above(t, ctx.Rsp))) {
+                // TOTK_PROFILE_SLOW: a thread outside the exe, mostly waiting, copies 8 KiB, but the threads the slow
+                // frames are about (render, replay, guest main) copy all of STK_COPY: their driver and DLSS chains
+                // are deep, and an 8 KiB copy lost the caller.
+                int ours = t->tid == render_tid || t->tid == replay_tid || t->tid == main_tid;
+                size_t cap = slow_ns && !ours && (ctx.Rip < exe_lo || ctx.Rip >= exe_hi) ? 8u << 10 : STK_COPY;
                 if (n > cap) n = cap;
                 memcpy(stk_buf, (void *)ctx.Rsp, n);
             }
             ResumeThread(t->h);
+            uint64_t stop2 = slow_ns ? kern_now_ns() : 0;
             if (!ok) continue;
             count_rip(ctx.Rip);
             uint64_t chain[PROF_DEPTH] = {ctx.Rip};
             uint32_t d = n ? unwind_copy(&ctx, ctx.Rsp, n, chain) : 0;
             if (d) count_stack(chain, d);
             if (slow_ns) {
+                uint64_t stop3 = kern_now_ns(), part[3] = {stop_ns, stop2 - stop1, stop3 - stop2};
+                for (int k = 0; k < 3; k++)
+                    if (part[k] > worst) worst = part[k], worst_tid = t->tid, worst_step = k;
                 Sample *s = &ring[ring_n++ & (SLOW_RING - 1)];
                 s->t = now, s->tid = t->tid, s->depth = d ? d : 1;
                 memcpy(s->rip, chain, s->depth * sizeof *chain);
@@ -291,6 +396,13 @@ static DWORD WINAPI sampler_main(void *arg) {
             total++;
             t->n++;
             if (ctx.Rip >= exe_lo && ctx.Rip < exe_hi) t->in_exe++;
+        }
+        if (slow_ns) {
+            uint64_t r4 = kern_now_ns();
+            if (r4 - r0 > 5000000)
+                gaps[gap_n++ & (GAP_RING - 1)] = (Gap){.t = r0, .total = r4 - r0, .wait = r1 - r0, .list = r2 - r1,
+                                                       .dump = r3 - r2, .loop = r4 - r3, .worst = worst, .tid = worst_tid,
+                                                       .step = worst_step};
         }
     }
     return 0;
@@ -362,7 +474,12 @@ int prof_sampler_start(void) {
         exe_lo = (uintptr_t)mi.lpBaseOfDll;
         exe_hi = exe_lo + mi.SizeOfImage;
     }
-    sampler = CreateThread(NULL, 0, sampler_main, NULL, 0, NULL);
+    const char *vq = cfg_get("TOTK_PROFILE_VQ");
+    use_vq = vq && *vq && strcmp(vq, "0");
+    DWORD sampler_tid = 0;
+    sampler = CreateThread(NULL, 0, sampler_main, NULL, 0, &sampler_tid);
+    if (sampler && !CreateThread(NULL, 0, refresher_main, (void *)(uintptr_t)sampler_tid, 0, NULL))
+        rt_log("prof: cannot start the thread list's thread (error %lu): only the threads seen so far", GetLastError());
     if (!sampler) {
         rt_log("prof: cannot start the sampler (error %lu)", GetLastError());
         out_path = NULL;

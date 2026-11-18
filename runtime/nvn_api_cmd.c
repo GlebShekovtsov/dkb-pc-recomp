@@ -78,6 +78,8 @@ static void memory_event(Cpu *c, cmd_t *o, int event, uint64_t min) {
 // The prefix of a copy and of a recording buffer (see "recording copies" below).
 typedef struct { uint64_t magic, bytes, made_at, used_at, deferred, block; uint32_t refs; uint16_t flags, depth; } copy_prefix;
 _Static_assert(sizeof(copy_prefix) % 8 == 0, "records stay 8-byte aligned");
+#define COPY_CALLS 1u   // copy_prefix.flags (see "recording copies" below)
+#define COPY_WAITS 2u
 static void put_hdr(uint8_t *p, uint32_t op, uint32_t size) {
     op_hdr h = {op, size};
     memcpy(p, &h, sizeof h);
@@ -206,8 +208,10 @@ static const tex_t *tex_pin(const NVNtexture *nt) {
 // about 500 lookups per AddControlMemory under the exclusive lock (1.4.3 field: 53 calls a frame, 2 MiB ranges, 3.7
 // copies per page), and the recording threads waited on it.
 // deferred: 0 unknown, 1 none, 2 some. block: the size of the block the prefix starts (copy_block). refs
-// (TOTK_CALL_REF): the OP_CALL records in other copies that name this one; flags bit 0: this copy holds OP_CALL records;
-// depth: the longest chain of OP_CALL records from this copy down (0 without any).
+// (TOTK_CALL_REF): the OP_CALL records in other copies that name this one; flags bit 0 (COPY_CALLS): this copy holds
+// OP_CALL records; bit 1 (COPY_WAITS): it, or a copy it calls, holds an OP_WAIT_SYNC record; depth: the longest chain of
+// OP_CALL records from this copy down (0 without any). A copy never changes after take_recording, so the submit scans
+// (wait_target, resolve_deferred) skip a copy whose prefix says it holds nothing for them.
 
 // The blocks of copies and recording buffers of 64 KiB and more (the prefix included) come in power-of-two sizes and
 // go back to a cache when released, up to BLK_CACHE bytes, instead of to the heap. The CRT hands blocks of about
@@ -347,7 +351,7 @@ static void calls_adjust(const uint8_t *p, const uint8_t *end, int delta) {
 }
 
 static void copy_free(copy_prefix *pf) {   // copy_lock held; no OP_CALL record names pf any more
-    if (pf->flags & 1) calls_adjust((const uint8_t *)(pf + 1), (const uint8_t *)(pf + 1) + pf->bytes, -1);
+    if (pf->flags & COPY_CALLS) calls_adjust((const uint8_t *)(pf + 1), (const uint8_t *)(pf + 1) + pf->bytes, -1);
     copy_block_free(pf);
 }
 
@@ -359,7 +363,7 @@ static void zombie_sweep(uint64_t replayed) {   // copy_lock held
             if (zombies[i]->used_at <= replayed && !__atomic_load_n(&zombies[i]->refs, __ATOMIC_RELAXED)) {
                 copy_prefix *pf = zombies[i];
                 zombies[i] = zombies[--nzombies];
-                again |= pf->flags & 1;
+                again |= pf->flags & COPY_CALLS;
                 copy_free(pf);
             } else {
                 i++;
@@ -429,7 +433,7 @@ static uint64_t copy_touch(uint64_t handle, uint64_t now, const char *what) {
 static uint8_t *take_recording(cmd_t *o) {
     const uint8_t *p = o->seg;
     size_t n = (size_t)(o->cur - o->seg);
-    int calls = 0, deferred = 0, depth = 0;
+    int calls = 0, deferred = 0, depth = 0, waits = 0;
     for (size_t at = 0;;) {   // the records stay checked: a corrupt one stops here, not in the replay
         op_hdr h;
         memcpy(&h, p + at, sizeof h);
@@ -439,8 +443,11 @@ static uint8_t *take_recording(cmd_t *o) {
         if (h.op == OP_CALL && h.size >= 16) {   // the callee stays allocated: this record holds a count of it
             uint64_t t;
             memcpy(&t, p + at + 8, 8);
-            int d = ((const copy_prefix *)(uintptr_t)t - 1)->depth + 1;
-            calls = 1, depth = d > depth ? d : depth;
+            const copy_prefix *cp = (const copy_prefix *)(uintptr_t)t - 1;
+            int d = cp->depth + 1;
+            calls = 1, depth = d > depth ? d : depth, waits |= (cp->flags & COPY_WAITS) != 0;
+        } else if (h.op == OP_WAIT_SYNC) {
+            waits = 1;
         } else if (h.op == OP_PUSH_CONST && h.size >= 8 + offsetof(p_push_const, w))
             deferred |= ((const p_push_const *)(const void *)(p + at + 8))->src != 0;
         else if ((h.op == OP_BIND_TEX || h.op == OP_BIND_IMG || h.op == OP_BIND_SAMP) &&
@@ -467,8 +474,8 @@ static uint8_t *take_recording(cmd_t *o) {
     }
     uint64_t block = pf->block;
     // With TOTK_CALL_REF the deferred records are known from here on (inline_recording needs it before any submit).
-    *pf = (copy_prefix){COPY_MAGIC, n, 0, 0, call_ref() ? (uint64_t)(deferred ? 2 : 1) : 0, block, 0, (uint16_t)calls,
-                        (uint16_t)depth};
+    *pf = (copy_prefix){COPY_MAGIC, n, 0, 0, call_ref() ? (uint64_t)(deferred ? 2 : 1) : 0, block, 0,
+                        (uint16_t)((calls ? COPY_CALLS : 0) | (waits ? COPY_WAITS : 0)), (uint16_t)depth};
     return (uint8_t *)(pf + 1);
 }
 
@@ -690,7 +697,7 @@ static void inline_recording(cmd_t *o, uint64_t handle, const char *what) {
             size_t body = (size_t)bytes - 16;
             cmd_reserve(o, body);
             memcpy(o->cur, (const uint8_t *)(uintptr_t)handle + 8, body);
-            if ((pf->flags & 1) && o->recording) calls_adjust(o->cur, o->cur + body, +1);
+            if ((pf->flags & COPY_CALLS) && o->recording) calls_adjust(o->cur, o->cur + body, +1);
             o->cur += body;
             o->cmd_used += body;
             o->hw_used += body;
@@ -1229,7 +1236,8 @@ static uint64_t wait_target(const uint8_t *p, int depth) {
             uint64_t called;
             memcpy(&called, p + 8, 8);
             if (depth >= 16) rt_fatal("nvn: WaitSync preparation: call depth over 16");
-            value = wait_target((const uint8_t *)(uintptr_t)called, depth + 1);
+            if (((const copy_prefix *)(uintptr_t)called - 1)->flags & COPY_WAITS)
+                value = wait_target((const uint8_t *)(uintptr_t)called, depth + 1);
         } else if (h.op == OP_WAIT_SYNC) {
             if (h.size < 8 + sizeof(p_wait_sync)) rt_fatal("nvn: short WaitSync record at %p", (const void *)p);
             const sync_t *source = ((const p_wait_sync *)(const void *)(p + 8))->sync;
@@ -1249,6 +1257,7 @@ static uint64_t wait_target(const uint8_t *p, int depth) {
 static void wait_submission(const uint64_t *handles, int n) {
     uint64_t target = 0;
     for (int i = 0; i < n; i++) {
+        if (!(((const copy_prefix *)(uintptr_t)handles[i] - 1)->flags & COPY_WAITS)) continue;   // no WaitSync in it
         uint64_t value = wait_target((const uint8_t *)(uintptr_t)handles[i], 0);
         if (value > target) target = value;
     }
@@ -1278,7 +1287,8 @@ static int resolve_deferred(const uint8_t *p, int depth) {   // returns the numb
             uint64_t t;
             memcpy(&t, p + 8, 8);
             if (depth >= 16) rt_fatal("nvn: deferred bind resolution: call depth over 16");
-            nd += resolve_deferred((const uint8_t *)(uintptr_t)t, depth + 1);
+            if (((const copy_prefix *)(uintptr_t)t - 1)->deferred != 1)   // a referenced copy holds none (inline_recording)
+                nd += resolve_deferred((const uint8_t *)(uintptr_t)t, depth + 1);
         } else if (h.op == OP_PUSH_CONST) {
             if (h.size < 8 + offsetof(p_push_const, w)) rt_fatal("nvn: short push-constant record at %p", (const void *)p);
             p_push_const *b = (p_push_const *)(uintptr_t)(p + 8);
@@ -1317,7 +1327,8 @@ void nvn_submit_prepare(const uint64_t *handles, int n) {
         nvn_mode_trace(NVN_MODE_HANDLE, 0, handle, (uint32_t)i, now);
     }
     wait_submission(handles, n);
-    for (int i = 0; i < n; i++) resolve_deferred((const uint8_t *)(uintptr_t)handles[i], 0);
+    for (int i = 0; i < n; i++)   // a copy known to hold no deferred record (take_recording, TOTK_CALL_REF) has none to read
+        if (((const copy_prefix *)(uintptr_t)handles[i] - 1)->deferred != 1) resolve_deferred((const uint8_t *)(uintptr_t)handles[i], 0);
 }
 
 // Asynchronous replay. A copy a queued submission still reads keeps that submission's deferred binds: when it holds
@@ -1346,7 +1357,7 @@ void nvn_submit_prepare_async(const uint64_t *handles, uint64_t *out, int n) {
             cl->block = block;
             cl->magic = 0;   // not a live handle: the game never sees it
             cl->refs = 0;
-            if (cl->flags & 1) calls_adjust((const uint8_t *)(cl + 1), (const uint8_t *)(cl + 1) + cl->bytes, +1);
+            if (cl->flags & COPY_CALLS) calls_adjust((const uint8_t *)(cl + 1), (const uint8_t *)(cl + 1) + cl->bytes, +1);
             cl->used_at = now;
             zombie_add(cl);
             out[i] = (uintptr_t)(cl + 1);
@@ -1358,8 +1369,10 @@ void nvn_submit_prepare_async(const uint64_t *handles, uint64_t *out, int n) {
     plat_mutex_unlock(&copy_lock);
     wait_submission(out, n);
     for (int i = 0; i < n; i++) {
+        copy_prefix *pf = (copy_prefix *)(uintptr_t)out[i] - 1;
+        if (pf->deferred == 1) continue;   // known to hold no deferred record: nothing to read
         int nd = resolve_deferred((const uint8_t *)(uintptr_t)out[i], 0);
-        if (out[i] == handles[i]) ((copy_prefix *)(uintptr_t)out[i] - 1)->deferred = nd ? 2 : 1;
+        if (out[i] == handles[i]) pf->deferred = nd ? 2 : 1;
     }
     if (now % 7200 == 0)
         rt_log("nvn: asynchronous replay at submit %llu: %llu recording clones so far, %u copies waiting for the replay",

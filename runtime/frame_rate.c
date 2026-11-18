@@ -173,7 +173,7 @@ void frame_step_init(void) {
         step_interval = (_Atomic uint32_t *)((uint8_t *)rt_patch_page() + 8);
         if (!rt_game_version) {
             dkb_rate = (_Atomic uint32_t *)((uint8_t *)rt_patch_page() + 12);
-            rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + 0x250, blur_frames);   // 3.2.0 radial blur lifetimes
+            rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + 0x250, blur_frames);   // radial blur lifetimes, both versions
             rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + 0x260, damped_sum);    // damped velocity, both versions
         }
         step_store((float)STEP_FIRST_S);

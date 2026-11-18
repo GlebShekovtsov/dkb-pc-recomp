@@ -116,6 +116,8 @@ int vk_mem_resolve(uint64_t addr,uint64_t bytes,VkMemSpan *out) {
     return 0;
 }
 void vk_mem_use(VkMemSpan *span) {uses++;span->buffer=(VkBuffer)(uintptr_t)22;span->offset+=256;}
+uint64_t perf_ph_begin(void) {return 0;}   // perf.c's replay parts (TOTK_TRACE=perf), off here
+void perf_ph_end(int part,uint64_t t0) {(void)part;(void)t0;}
 void vk_mem_gpu_wrote(const VkMemSpan *span,uint64_t bytes) {CHECK((uintptr_t)span->buffer==22 && bytes,"write uses selected backing");gpu_writes++;}
 int vk_mem_gpu_kept(const VkMemSpan *span,uint64_t bytes) {CHECK((uintptr_t)span->buffer==22 && bytes,"kept write uses selected backing");kept_writes++;return 1;}
 void vk_usnap_drop(uint64_t addr,uint64_t bytes) {CHECK(addr==(uintptr_t)output_words && bytes==sizeof output_words,"write drops exact output snapshot");drops++;}

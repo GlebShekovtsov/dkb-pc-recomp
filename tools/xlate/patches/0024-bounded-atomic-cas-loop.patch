@@ -1,0 +1,37 @@
+--- a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
+@@ -1240,9 +1240,21 @@
+                 context.ConditionalSelect(flushed, sign16, context.ConditionalSelect(overflow, infinity, normal)));
+         }
+ 
++        // The loop leaves on success or after this many attempts. Under robust buffer access an atomic on a word
++        // outside the buffer returns an undefined value, so the exchange may never succeed, and a loop that only
++        // leaves on success then hangs the GPU without a device loss. Hookshot met that on an Intel Arc GPU and bounds
++        // its loops the same way, at 1024 (gpu/vk/eden/shader_recompiler/backend/spirv/spirv_emit_context.cpp,
++        // CasLoop and CasLoopDone). On a word inside the buffer an attempt fails only when another write to the same
++        // word landed in between, so giving up there takes 1024 such writes while this one waits, and this write is
++        // then lost.
++        private const int CasLoopMaxTries = 1024;
++
+         private static Operand GenerateAtomicCasLoop(EmitterContext context, Operand wordOffset, int binding, Func<Operand, Operand> opCallback)
+         {
+             Operand lblLoopHead = Label();
++            Operand tries = Local();
++
++            context.Copy(tries, Const(0));
+ 
+             context.MarkLabel(lblLoopHead);
+ 
+@@ -1259,7 +1271,11 @@
+ 
+             Operand casFail = context.ICompareNotEqual(casResult, oldValue);
+ 
+-            context.BranchIfTrue(lblLoopHead, casFail);
++            context.Copy(tries, context.IAdd(tries, Const(1)));
++
++            Operand again = context.BitwiseAnd(casFail, context.ICompareLess(tries, Const(CasLoopMaxTries)));
++
++            context.BranchIfTrue(lblLoopHead, again);
+ 
+             return oldValue;
+         }

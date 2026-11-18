@@ -627,7 +627,9 @@ static int feature(VkCommandBuffer cb, uint64_t fence, uint32_t w, uint32_t h, u
     create_params(ow, oh, ow, oh, q);
     if (!inputs_images(cb, ow, oh)) return fail("its zero motion-vector and depth images could not be made");
     rec_drain();   // NGX records into cb on this thread: everything queued for the recorder first
+    uint64_t ph = perf_ph_begin_cpu();   // TOTK_TRACE=perf: a part of the replay (perf.c ph_frame)
     NgxResult r = ngx_create(vk_ctx()->device, cb, NGX_FEATURE_SUPER_SAMPLING, params, &F.h);
+    perf_ph_end(PERF_PH_DLSS_CREATE, ph);
     if (NGX_FAILED(r) || !F.h) {
         char why[96];
         snprintf(why, sizeof why, "creating DLSS %ux%u -> %ux%u failed (%#x)", w, h, ow, oh, r);
@@ -651,6 +653,14 @@ static int feature(VkCommandBuffer cb, uint64_t fence, uint32_t w, uint32_t h, u
 // (vk_exec_draw.c op_dispatch, before the dispatch's binds). 1 when NGX may have recorded into cb: the caller forgets
 // the bound state. The upscaler setting is live, so while another upscaler is chosen the warm-up waits for a later
 // dispatch: a switch to dlss from the menu still gets it, unless the game's upscale made a feature first.
+// TOTK_DLSS_WARM_FULL (1, the default): the warm-up makes the feature the game's first upscale will ask for and keeps
+// it, with the motion pass's pipeline, instead of a small feature that goes. feature() keys a feature on the output
+// size and the preset only (each evaluation passes the input's size), so a feature made here in Quality, preset K, for
+// the size the game's upscaler writes (Bananza: dkb_wide_upscale_output; TotK: res_wanted) is the one feature() would
+// make at the first upscale of a play session. In the Hilltop Layer's first frame (3.2.0, TOTK_TRACE=perf) that was 28
+// ms of feature creation and 11 to 12 ms of the motion pass's pipeline. If the game writes another size after all,
+// feature() replaces this one there, as before. The feature's memory is held from the title screen on. 0: the small
+// warm-up feature. A failure here turns DLSS off with its reason, as the same failure at the first upscale would.
 int vk_dlss_warm(VkCommandBuffer cb, uint64_t fence) {
     static int done;
     if (done || !vk_dlss_wanted() || strcmp(cfg_value("TOTK_UPSCALER"), "dlss")) return 0;
@@ -660,6 +670,25 @@ int vk_dlss_warm(VkCommandBuffer cb, uint64_t fence) {
     QueryPerformanceFrequency(&f);
     QueryPerformanceCounter(&t0);
     if (!init()) return 0;
+    unsigned out[2] = {0, 0};
+    if (rt_knob("DLSS_WARM_FULL", "1") == 1) {
+        if (rt_game_version) res_wanted(out);
+        else dkb_wide_upscale_output(out);   // Bananza: the display, or 2/3 of it with 3.2.0's own image scale
+    }
+    if (out[0] >= 32 && out[1] >= 32) {
+        int made = feature(cb, fence, out[0] * 2 / 3, out[1] * 2 / 3, out[0], out[1]);   // a Quality input: preset K
+        // The motion pass's pipeline too, which the first temporal frame made otherwise: 11 to 12 ms of "temporal
+        // inputs" in the Hilltop Layer's first frame (TOTK_TRACE=perf), once per process.
+        if (made > 0) mv_init();
+        QueryPerformanceCounter(&t1);
+        double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)f.QuadPart;
+        if (made > 0)
+            rt_log("dlss: NGX initialised and the feature for a %ux%u output made in %.0f ms at the warm-up, ahead of the "
+                   "game's first upscale (TOTK_DLSS_WARM_FULL)", out[0], out[1], ms);
+        else   // feature() logged why (fail)
+            rt_log("dlss: the warm-up feature for a %ux%u output failed after %.0f ms", out[0], out[1], ms);
+        return 1;   // its zero images' clears, and NGX's own commands, may be in cb
+    }
     reap();
     int slot = 0;
     while (slot < GRAVE && grave[slot].h) slot++;
@@ -772,7 +801,10 @@ int vk_dlss_record(VkCommandBuffer cb, uint64_t fence, const VkTexImage *in, con
     // Temporal when this frame's scene was noted at the input size: its depth and camera motion go to DLSS. Otherwise
     // the zero inputs and a new history, as a spatial upscaler.
     VkTemporalIn t;
-    if (!vk_temporal_inputs(cb, w, h, ow, oh, F.fresh, &t)) {
+    uint64_t ph = perf_ph_begin();   // TOTK_TRACE=perf: a part of the replay (perf.c ph_frame)
+    int inputs = vk_temporal_inputs(cb, w, h, ow, oh, F.fresh, &t);
+    perf_ph_end(PERF_PH_TEMPORAL, ph);
+    if (!inputs) {
         vk_defer_view(iv), vk_defer_view(ov);
         return fail("its zero motion-vector and depth images could not be made");
     }
@@ -798,7 +830,9 @@ int vk_dlss_record(VkCommandBuffer cb, uint64_t fence, const VkTexImage *in, con
     set_f(params, "DLSS.Pre.Exposure", 1.0f);
     set_f(params, "DLSS.Exposure.Scale", 1.0f);
     rec_drain();   // the game's images are in GENERAL (vk_texture.c); the caller's full barrier comes before this
+    ph = perf_ph_begin_cpu();
     NgxResult r = ngx_eval(cb, F.h, params, NULL);
+    perf_ph_end(PERF_PH_DLSS_EVAL, ph);
     vk_defer_view(iv), vk_defer_view(ov);
     if (NGX_FAILED(r)) {
         char why[64];

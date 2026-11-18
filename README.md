@@ -24,7 +24,7 @@ As far as we know, no other static recompilation of a Switch 2 game is public.
 ## Status
 
 **Playable on recent NVIDIA cards, well past the first level.** Players report runs through layer -101, sublayer 200,
-the Glacier layer, Snow World (Layer 500) and the Tempest layer. The current release is 0.4.0. The
+the Glacier layer, Snow World (Layer 500) and the Tempest layer. The current release is 0.4.1 (17 November), a smaller one with the 38 pull requests since 0.4.0. The
 [latest release](https://github.com/Lucas-blip-png/dkb-pc-recomp/releases/latest) carries an installer that
 builds the game from your own dump (`.nup`, `.nx` or folders), and a Linux AppImage: [docs/installer.md](docs/installer.md).
 0.4.0 fixes the Snow World and Glacier device loss on NVIDIA (#196, #197, #264), turns the Vulkan recorder off on AMD's
@@ -43,15 +43,18 @@ screen and on loads (#157, #206), on layer changes (#218) and in a record loop (
 - Add-on content: the installer unpacks DLC from a `.nup` (57eaed9); a player confirmed the DLC and the 3.2.0
   update load (#183). Loose RomFS mods load from a `mods` folder beside `dkb.exe` (7779dda).
 
-Since 0.4.0, on `bananza`: FSR 3.1 and FSR 4 temporal upscalers (`upscaler = fsr3` or `fsr4`, #270), DLSS and
+Since 0.4.0 (in 0.4.1): FSR 3.1 and FSR 4 temporal upscalers (`upscaler = fsr3` or `fsr4`, #270), DLSS and
 both FSR upscalers as native anti-aliasing on 3.2.0 when `scene_res = full`, frame generation with an Auto mode,
 3x to 8x and AMD's FSR 3.1 frame interpolation (`frame_gen_by = fsr3`), optional CRT filters (`crt_filter`) and
 window scaling filters (`window_filter`), sharper text above 1080p behind `DKB_FONT_SCALE=1` (#214), Polish
 (`lang = pl`, #335), evenly paced audio (#133), HD rumble on Switch Pro Controllers and Joy-Con (#285, untested),
 the AppImage setup fix (#293) and the setup check on CPUs without AVX2 (#318). The CRT and window filters and the
-FSR 3.1 frame interpolation come from community pull requests and have had little testing in play.
+FSR 3.1 frame interpolation come from community pull requests and have had little testing in play. On `bananza` since 0.4.1: HD rumble is off by default (`rumble_hd = auto` turns it on; third-party pads broke with it, #363, #383) and falls back to two motors for the session
+after a pad drops (#363), and fewer lock waits and scans in the replay (#354, #361, #365). The Landfill Layer device loss
+on NVIDIA 50-series (#304) is avoided by skipping one vertex stage (45e1a6f48cb7872e), `console = 0` works with Windows
+Terminal (#238), and 23 more community pull requests landed (samplers, Linux memory and lazy write-back, GPU write bookkeeping, fewer VirtualQuery calls, HDR screenshots, DLSS warm-up). The smash blur ends above 60 fps on 1.0.0 too (#389, #390), and DLC from a container whose base package has title id 0 installs (#388).
 
-RecompLauncher on Linux and macOS: [docs/recomp-launcher.md](docs/recomp-launcher.md). Progress, day by day: [docs/devlog.md](docs/devlog.md). Last updated: 16 November 2026.
+RecompLauncher on Linux and macOS: [docs/recomp-launcher.md](docs/recomp-launcher.md). Progress, day by day: [docs/devlog.md](docs/devlog.md). Last updated: 18 November 2026.
 
 | Phase | | State |
 | --- | --- | --- |

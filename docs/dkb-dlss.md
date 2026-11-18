@@ -75,6 +75,16 @@ window's or `output_res`. On a 2560x1440 virtual display (`output_res`) the game
 thirds of it on each side (issue #152, update 3.2.0, `dlss: Quality 1138x640 -> 1706x960`); at the default 2880x1620
 that is 1920x1080; at 3840x2160 the upscaler goes 2560x1440 -> 3840x2160 and DLSS ran `Quality 2560x1440 -> 3840x2160` on 1.0.0. The frame is stretched from there to the window as with the game's upscaler, so DLSS looks soft
 when the window is much larger than that image. `render_scale` is a TotK setting and does nothing here (its menu row is hidden on Bananza); the HUD's "3D scene" line and `dkb.log` (`upscaler: WxH -> WxH`) report the game's own upscaler input and output sizes instead. The game scales its 3D resolution dynamically and runs the upscaler only while that is below the output size; once it reaches the full size (easy at 1080p on a fast GPU) the line reads "no upscaler" and DLSS has nothing to upscale.
+The first DLSS feature of a process loads the model and starts CUDA, about 2 s, so it is made at the title screen
+(the warm-up, `dlss: NGX initialised and ...`). With `DKB_DLSS_WARM_FULL` on (the default) the warm-up makes the
+feature for the size the game's upscaler writes (the virtual display with `scene_res` set; two thirds of it with
+`scene_res = auto` on 3.2.0, as above) and the motion pass's pipeline, and keeps both for the first upscale, which
+otherwise made them in the first frame of a level: 28 ms and 11 to 12 ms on entering the Hilltop Layer (3.2.0,
+`output_res` 3840x2160, RTX 5090). `dkb.log` then has `dlss: Quality WxH -> WxH, preset K` at the title screen and no
+such line at the level; one at the level means the game wrote another size and the feature was made again there. The
+feature stays while DLSS is the chosen upscaler, whatever the game draws in between, so entering a level again makes
+none.
+
 `dkb.log` gets a `dlss:` summary at the first frame and every 1800 frames: how many frames had depth and motion
 vectors, how many ran spatially, and how many started a new history.
 

@@ -184,6 +184,13 @@ area = "nvn"
 cmd = ["{python}", "tests/nvn_wait_sync_test.py", "--cc", "{cc}"]
 
 [[test]]
+name = "plat-cond"
+tier = 1
+area = "os"
+cmd = ["{python}", "tests/plat_cond_test.py", "--cc", "{cc}"]
+platform = "linux"
+
+[[test]]
 name = "nvn2-compute-c0"
 tier = 1
 area = "nvn"
@@ -499,6 +506,18 @@ area = "gfx"
 cmd = ["{python}", "tests/temporal_idle_test.py", "--cc", "{cc}"]
 
 [[test]]
+name = "linux-pressure"
+tier = 1
+area = "gfx"
+cmd = ["{python}", "tests/linux_pressure_test.py", "--cc", "{cc}"]
+
+[[test]]
+name = "sampler-book"
+tier = 1
+area = "gfx"
+cmd = ["{python}", "tests/sampler_book_test.py", "--cc", "{cc}"]
+
+[[test]]
 name = "geometry-feature-flags"
 tier = 1
 area = "geometry"
@@ -803,6 +822,14 @@ cmd = ["{game_exe}", "--probe-gfx-abi"]
 exclusive = true
 
 [[test]]
+name = "exe-probe-vkreset"
+tier = 3
+area = "gfx"
+cmd = ["{game_exe}", "--probe-vkreset"]
+needs = ["gpu"]
+exclusive = true
+
+[[test]]
 name = "exe-probe-astc"
 tier = 3
 area = "gfx"
@@ -874,3 +901,32 @@ name = "window-filter"
 tier = 1
 area = "gfx"
 cmd = ["{python}", "tests/window_filter_test.py", "--cc", "{cc}"]
+
+[[test]]
+name = "perf-check"
+tier = 0
+area = "tools"
+cmd = ["{python}", "tests/perf_check_test.py"]
+
+[[test]]
+name = "scenario-runner"
+tier = 0
+area = "tools"
+cmd = ["{python}", "tests/scenario_test.py"]
+
+[[test]]
+name = "save-warp"
+tier = 0
+area = "tools"
+cmd = ["{python}", "tests/save_warp_test.py"]
+
+# ------------------------------------------------------------------ tier 4: scripted game runs (tools/scenario.py)
+# Each needs your build and the scenario's private save under build/saves/; without the save it is skipped (exit 77).
+
+[[test]]
+name = "scenario-tutorial-cave"
+tier = 4
+area = "scenario"
+cmd = ["{python}", "tools/scenario.py", "tutorial-cave"]
+needs = ["game_exe", "gpu"]
+timeout = 900

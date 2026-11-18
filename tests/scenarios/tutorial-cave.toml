@@ -1,0 +1,22 @@
+# The mining tunnel of the tutorial cave, standing still after the save loads. The private save is build/saves/tutorial-cave/
+# (see README.md here). The destructible rock and floor are in view, so the near-black check catches #45.
+description = "tutorial cave from a save, standing still; destructible terrain in view"
+save = "tutorial-cave"
+input = "tools/input/dkb-title-to-save.txt"
+seconds = 75
+
+[env]
+DKB_NATIVE_GS = "1"   # the destructible terrain needs the native geometry stage (#45, #67); the variants override it
+
+[checks]
+min_fps = 50        # a 60-frame window under this is slow (tools/perf_check.py)
+hitch_ms = 100
+skip_world = 5      # the first game seconds load the scene
+perf = "SLOW"       # fail on SLOW; HITCHY (short dips) passes. Use "HITCHY" to fail on those too
+max_black = 0.10    # near-black share of the last frame below the HUD; about 0.71 with black terrain, 0.02 without
+hud_band = 0.15
+min_hud_bright = 0.005   # under this the last frame is not gameplay (loading screen 0.00%, cave 2.4-3.6%)
+
+[variants.native_gs]   # python tools/scenario.py tutorial-cave --ab native_gs
+off = { DKB_NATIVE_GS = "0" }
+on = { DKB_NATIVE_GS = "1" }

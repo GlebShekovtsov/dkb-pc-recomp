@@ -8,8 +8,16 @@ needs, so sort_new_writes must give the same array either way, checked at spans 
 buckets, where the pass count changes; sort_col, which has no insertion pass to repair a short sort, must sort its
 ranges at the same spans. add_range must keep exactly the distinct ranges it is given. The coalescing in drop() (a write equal to the newest unsorted entry raises its
 fence instead of adding one) must leave wr_prune with the same list as the separate entries do.
-add_range, by_lo, sort_col, radix_passes, sort_new_writes, wr_prune and wr_hits are cut out of the runtime
-source. No GPU or game runs.
+TOTK_USNAP_DROP_LOCAL (drop_local_cases): writes noted by six threads into lists of their own (wr_local) and moved into
+U.wr at the next submission's start (wr_take, the lists in a shuffled order) must leave wr_prune with the same list,
+and the summary with the same counts, as the same writes made in their global order into U.wr.
+vk_usnap_drop_many (drop_many_cases, TOTK_RESET_BATCH): an indirect reset's ranges added to U.wr under one take of
+drop_lock while the threads note theirs in their own lists must give the same list and counts as the global order, and
+mark every range. The fixture's lock fails a second take while held, as a thread's first wr_local under drop_lock
+would deadlock.
+add_range, by_lo, sort_col, radix_passes, sort_new_writes, wr_prune, wr_hits, wr_local, wr_take, drop_locked, drop and
+vk_usnap_drop_many are cut out of the runtime source (the marking of copies, mark and vk_usnap_covers, is stubbed: no
+copy is taken here; mark counts its calls). No GPU or game runs.
 """
 import argparse
 from pathlib import Path
@@ -23,12 +31,13 @@ PRELUDE = r'''#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include "msort.h"
-static void rt_fatal(const char *m) { puts(m); abort(); }
+static void rt_fatal(const char *m) { puts(m); fflush(stdout); abort(); }
 #define RADIX_BITS 11
 typedef struct { uint64_t lo, hi, fence; } Wrote;
 typedef struct { uint64_t lo, hi; } Rng;
 #define ALIGN 256u
-static struct { Wrote *wr; int nwr, cwr; int fast; Rng *col; int ncol, ccol; uint64_t repeats; } U;
+static struct { Wrote *wr; int nwr, cwr; int fast; Rng *col; int ncol, ccol; uint64_t repeats; int mode, on;
+                uint64_t wr_added, wr_coalesced, fence; } U;
 static void *grow(void *p, int *cap, size_t elem) {
     int n = *cap ? *cap * 2 : 1024;
     void *q = realloc(p, (size_t)n * elem);
@@ -43,6 +52,14 @@ static uint64_t vk_sync_fence_done(void) { return done_fence; }
 #define WROTE_LESS(x, y) ((x)->lo < (y)->lo)
 MSORT_DEFINE(sort_wrote, Wrote, WROTE_LESS)
 static int nwr_sorted;
+typedef int PlatMutex;
+static PlatMutex drop_lock;
+static void plat_mutex_lock(PlatMutex *m) { if ((*m)++) rt_fatal("FAIL: a lock taken while held (a deadlock)"); }
+static void plat_mutex_unlock(PlatMutex *m) { (*m)--; }
+static int drop_local;
+static int vk_usnap_covers(uint64_t addr, uint64_t n) { (void)addr, (void)n; return 0; }
+static uint64_t marks;
+static void mark(uint64_t addr, uint64_t n) { (void)addr, (void)n, marks++; }
 '''
 
 CASES = r'''
@@ -236,6 +253,121 @@ static int seen_cases(void) {
     return fails;
 }
 
+// TOTK_USNAP_DROP_LOCAL: per submission, random writes (often repeating a thread's previous range, sometimes with an
+// older fence) noted by six threads. The reference makes them in their global order with drop_local 0 (into U.wr, under
+// the lock); the other with drop_local 1, each into its thread's list, then wr_take with the lists linked in a shuffled
+// order. After wr_prune both lists must be equal, and so must the counts the summary reports.
+#define THREADS 6
+static Wrote ref_wr[400000], loc_wr[400000];
+static int drop_local_cases(void) {
+    int fails = 0, nref = 0, sref = 0, nloc = 0, sloc = 0;
+    Wrote *wr = U.wr;
+    int cwr = U.cwr;
+    WrLocal *thr[THREADS] = {0};
+    uint64_t prev_lo[THREADS] = {0}, prev_n[THREADS] = {0};
+    U.mode = 2, done_fence = 0;
+    for (WrLocal *l = wr_locals, *next; l; l = next) next = l->next, free(l->a), free(l);   // the last round's threads
+    wr_locals = NULL;
+    for (uint64_t fence = 1; fence <= 150; fence++) {
+        static struct { int t; uint64_t lo, n, f; } w[3000];
+        int nw = (int)(rnd() % 3000);
+        for (int i = 0; i < nw; i++) {
+            int t = (int)(rnd() % THREADS);
+            if (!prev_n[t] || rnd() % 3 == 0) prev_lo[t] = 0x500000000ull + rnd() % (1 << 16) * 16 + rnd() % 2 * 4, prev_n[t] = 4 + rnd() % 512;
+            w[i].t = t, w[i].lo = prev_lo[t], w[i].n = prev_n[t], w[i].f = fence - (rnd() % 5 == 0 && fence > 1);
+        }
+        uint64_t added0 = U.wr_added, coal0 = U.wr_coalesced;
+        // the reference: U.wr in the global order
+        U.wr = ref_wr, U.cwr = 400000, U.nwr = nref, nwr_sorted = sref, drop_local = 0;
+        for (int i = 0; i < nw; i++) drop(w[i].lo, w[i].n, w[i].f);
+        uint64_t added_ref = U.wr_added - added0;
+        if (rnd() % 2 && fence > 3) done_fence = fence - 1 - rnd() % 3;
+        wr_prune(), nref = sref = U.nwr;
+        // the threads' lists
+        U.wr = loc_wr, U.cwr = 400000, U.nwr = nloc, nwr_sorted = sloc, drop_local = 1;
+        U.wr_added = added0, U.wr_coalesced = coal0;
+        for (int i = 0; i < nw; i++) wr_mine = thr[w[i].t], drop(w[i].lo, w[i].n, w[i].f), thr[w[i].t] = wr_mine;
+        WrLocal *order[THREADS];
+        int nl = 0;
+        for (WrLocal *l = wr_locals; l; l = l->next) order[nl++] = l;
+        for (int i = nl - 1; i > 0; i--) {
+            int j = (int)(rnd() % (uint64_t)(i + 1));
+            WrLocal *x = order[i];
+            order[i] = order[j], order[j] = x;
+        }
+        wr_locals = NULL;
+        for (int i = 0; i < nl; i++) order[i]->next = wr_locals, wr_locals = order[i];
+        wr_take();
+        checks++;
+        if (U.wr_added - added0 != added_ref) fails++, printf("FAIL: fence %llu: %llu writes counted, %llu in the reference\n",
+                                                              (unsigned long long)fence, (unsigned long long)(U.wr_added - added0),
+                                                              (unsigned long long)added_ref);
+        wr_prune(), nloc = sloc = U.nwr;
+        checks++;
+        if (nref != nloc || memcmp(ref_wr, loc_wr, (size_t)nref * sizeof *ref_wr)) {
+            fails++, printf("FAIL: fence %llu: the threads' lists give %d ranges, the global order %d\n",
+                            (unsigned long long)fence, nloc, nref);
+            break;
+        }
+    }
+    U.wr = wr, U.cwr = cwr, U.nwr = 0, nwr_sorted = 0, drop_local = 0, wr_mine = NULL;
+    return fails;
+}
+
+// vk_usnap_drop_many with TOTK_USNAP_DROP_LOCAL on: per submission, random writes of 20-byte records and runs of them,
+// some noted by six threads into their lists, the rest by the indirect reset (thread THREADS) in one vk_usnap_drop_many
+// call that adds them to U.wr under drop_lock. The reference makes all of them in their global order into U.wr. After
+// wr_take and wr_prune both lists must be equal, so must the write counts, and every range of the reset is marked.
+static int drop_many_cases(void) {
+    int fails = 0, nref = 0, sref = 0, nloc = 0, sloc = 0;
+    Wrote *wr = U.wr;
+    int cwr = U.cwr;
+    WrLocal *thr[THREADS] = {0};
+    U.mode = 2, done_fence = 0;
+    for (WrLocal *l = wr_locals, *next; l; l = next) next = l->next, free(l->a), free(l);   // the last round's threads
+    wr_locals = NULL;
+    for (uint64_t fence = 1; fence <= 150; fence++) {
+        static struct { int t; uint64_t lo, n; } w[3000];
+        static uint64_t runs[3000][2];
+        int nw = (int)(rnd() % 3000), nr = 0;
+        for (int i = 0; i < nw; i++)
+            w[i].t = (int)(rnd() % (THREADS + 1)), w[i].lo = 0x600000000ull + rnd() % (1 << 14) * 20,
+            w[i].n = 20 * (1 + rnd() % 4);
+        U.fence = fence;
+        uint64_t added0 = U.wr_added, coal0 = U.wr_coalesced;
+        U.wr = ref_wr, U.cwr = 400000, U.nwr = nref, nwr_sorted = sref, drop_local = 0;
+        for (int i = 0; i < nw; i++) drop(w[i].lo, w[i].n, fence);
+        uint64_t added_ref = U.wr_added - added0;
+        if (rnd() % 2 && fence > 3) done_fence = fence - 1 - rnd() % 3;
+        wr_prune(), nref = sref = U.nwr;
+        U.wr = loc_wr, U.cwr = 400000, U.nwr = nloc, nwr_sorted = sloc, drop_local = 1;
+        U.wr_added = added0, U.wr_coalesced = coal0;
+        for (int i = 0; i < nw; i++)
+            if (w[i].t == THREADS) runs[nr][0] = w[i].lo, runs[nr][1] = w[i].lo + w[i].n, nr++;
+            else wr_mine = thr[w[i].t], drop(w[i].lo, w[i].n, fence), thr[w[i].t] = wr_mine;
+        uint64_t marks0 = marks;
+        wr_mine = NULL;   // the replay thread, which may have no list of its own yet
+        vk_usnap_drop_many((const uint64_t (*)[2])runs, (uint32_t)nr);
+        checks++;
+        if (marks - marks0 != (uint64_t)nr) fails++, printf("FAIL: fence %llu: %llu of %d reset ranges marked\n",
+                                                            (unsigned long long)fence, (unsigned long long)(marks - marks0), nr);
+        wr_take();
+        checks++;
+        if (U.wr_added - added0 != added_ref) fails++, printf("FAIL: fence %llu: %llu writes counted, %llu in the reference\n",
+                                                              (unsigned long long)fence, (unsigned long long)(U.wr_added - added0),
+                                                              (unsigned long long)added_ref);
+        wr_prune(), nloc = sloc = U.nwr;
+        checks++;
+        if (nref != nloc || memcmp(ref_wr, loc_wr, (size_t)nref * sizeof *ref_wr)) {
+            fails++, printf("FAIL: fence %llu: the reset and the threads' lists give %d ranges, the global order %d\n",
+                            (unsigned long long)fence, nloc, nref);
+            break;
+        }
+    }
+    U.wr = wr, U.cwr = cwr, U.nwr = 0, nwr_sorted = 0, drop_local = 0, wr_mine = NULL;
+    return fails;
+}
+
 int main(void) {
     int fails = 0;
     U.cwr = 2000000, U.wr = malloc(sizeof *U.wr * (size_t)U.cwr);
@@ -250,6 +382,8 @@ int main(void) {
     for (int fast = 0; fast < 2; fast++) {
         U.fast = fast;
         fails += coalesce_cases();
+        fails += drop_local_cases();
+        fails += drop_many_cases();
     }
     printf("usnap prune: %d checks, %d failures\n", checks, fails);
     return fails != 0;
@@ -276,7 +410,14 @@ def main():
     source = (ROOT / 'runtime' / 'vk_usnap.c').read_text(encoding='utf-8')
     parts = [PRELUDE] + [function(source, start) for start in
                          ('static void add_range(', 'static int by_lo(', 'static int radix_passes(', 'static void sort_col(',
-                          'static void sort_new_writes(', 'static void wr_prune(', 'static int wr_hits(')] + [CASES]
+                          'static void sort_new_writes(', 'static void wr_prune(', 'static int wr_hits(')]
+    start = source.index('typedef struct WrLocal')
+    end = source.index('static _Thread_local WrLocal *wr_mine;', start) + len('static _Thread_local WrLocal *wr_mine;')
+    parts += [source[start:end]] + [function(source, s) for s in ('static void wr_local(', 'static void wr_take(void) {')]
+    # drop_locked holds the body drop takes the lock around (TOTK_RESET_BATCH); the source declares it before drop
+    # and defines it after, so its definition is cut out by its full head and put first.
+    parts += [function(source, s) for s in ('static void drop_locked(uint64_t addr, uint64_t n, uint64_t fence) {',
+                                            'static void drop(', 'void vk_usnap_drop_many(')] + [CASES]
     args.out.mkdir(parents=True, exist_ok=True)
     src, exe = args.out / 'prune.c', args.out / 'prune.exe'
     src.write_text('\n'.join(parts), encoding='utf-8')

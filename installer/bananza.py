@@ -659,7 +659,11 @@ class Translator(Step):
                    # Reusable MSBuild nodes retain NuGet task DLLs after publish and block Windows cleanup.
                    # These settings affect only this build, not the owner's other .NET work.
                    'MSBUILDDISABLENODEREUSE': '1', 'DOTNET_CLI_USE_MSBUILD_SERVER': '0',
-                   'UseSharedCompilation': 'false'}
+                   'UseSharedCompilation': 'false',
+                   # A fresh DOTNET_CLI_HOME is a first run: without these, dotnet adds that home's tools folder to
+                   # the user's PATH for good, one dead entry per install, until cmd can no longer find System32.
+                   'DOTNET_ADD_GLOBAL_TOOLS_TO_PATH': 'false', 'DOTNET_SKIP_FIRST_TIME_EXPERIENCE': '1',
+                   'DOTNET_NOLOGO': '1'}
             command = [ctx.layout.python, ctx.layout.tools / 'build_xlate.py', '--out', out]
             if os.name != 'nt':
                 command += ['--llvm', ctx.layout.llvm]

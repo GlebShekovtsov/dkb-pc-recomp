@@ -70,6 +70,7 @@ NOP(vkEndCommandBuffer) NOP(vkQueueSubmit2) NOP(plat_event_init) NOP(plat_event_
 NOP(plat_yield) NOP(vk_checkpoint) NOP(vk_checkpoint_compute) NOP(vk_crumb) NOP(vk_queue_lock) NOP(vk_queue_unlock)
 NOP(vk_device_fault_report)
 int plat_event_wait_ns(void) { return 0; }
+int vk_sync_queue_submit(void) { return 0; }   // vk_sync.c: the part submit, VK_SUCCESS
 uint64_t plat_now_ns(void) { return 0; }
 void *plat_thread_new(void) { return NULL; }
 int plat_thread_priority_get(void) { return 0; }

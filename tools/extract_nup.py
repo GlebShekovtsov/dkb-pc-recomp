@@ -397,7 +397,9 @@ def aoc_packs(nup):
     application id plus AOC_BASE, the number runtime/aoc_romfs.c finds as aoc-<index>. The application id is the base
     (or update) package's title id with the low 12 bits cleared. Packages outside 0..AOC_MAX-1, and any container
     without a program package, give nothing. When two packages share an index the higher version wins."""
-    program = next((p for p in nup.packages if p.kind in (0, 1)), None)
+    # a repacked container can carry title id 0 on its base package: skip those, the application id comes from the
+    # first base/update package that has one
+    program = next((p for p in nup.packages if p.kind in (0, 1) and p.title_id), None)
     if program is None:
         return []
     first = (program.title_id & ~0xFFF) + AOC_BASE
@@ -416,7 +418,13 @@ def write_aoc(nup, zstd, out_dir, verify, quiet):
     never fails the extraction. Returns the number written."""
     import romfs_index
     written = 0
-    for index, pkg in aoc_packs(nup):
+    packs = aoc_packs(nup)
+    chosen = {id(p) for _, p in packs}
+    for pkg in nup.packages:
+        if pkg.kind == 2 and pkg.romfs_dir != NO_DIR and id(pkg) not in chosen:
+            print(f'warning: add-on content {pkg.title_id:016x} has a RomFS but no index (outside 0..{AOC_MAX - 1} '
+                  f'from the application id, or no base package with a title id); not installed', file=sys.stderr)
+    for index, pkg in packs:
         folder = out_dir / f'aoc-{index}'
         try:
             count, _ = pack_romfs(nup, zstd, merged_entries(nup, [pkg], 'romfs'), folder, verify, True)

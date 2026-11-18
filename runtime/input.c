@@ -28,6 +28,7 @@ enum { STICK_MAX = 32767, STICK_DIR = 16384, TRIGGER_ON = 16384, RESCAN_MS = 100
 
 static PlatMutex lock = PLAT_MUTEX_INIT;
 static int state;                    // 0 not started, 1 running, -1 disabled or SDL failed
+static int hd_sent, hd_failed;   // under lock: HD packets went out; a disconnect followed them (#363)
 static SDL_Gamepad *pad;
 static uint64_t next_scan;
 static unsigned pad_device_seen;
@@ -542,6 +543,12 @@ static void scan_pads(void) {
         plat_xchg32(&pad_layout_shown, -1);
         for (int i = 0; i < 4; i++) plat_xchg32(&pad_labels[i], PAD_LABEL_NONE);
         rt_log(current ? "input: gamepad released for selection change" : "input: gamepad disconnected");
+        // Some Switch-mode clone pads (a Machenike G5 Pro over Bluetooth, #363) drop the link at their first HD
+        // packets: after a disconnect that follows HD packets, the rest of the session uses the two-motor path.
+        if (!current && hd_sent && !hd_failed) {
+            hd_failed = 1;
+            rt_log("input: HD rumble off for this session after a disconnect (rumble_hd = off keeps it off)");
+        }
     }
     pad = next;
     if (!pad) return;
@@ -959,7 +966,7 @@ int input_rumble_triggers_enabled(void) {
 
 // Under lock: the open pad takes HD packets (a Switch pad, TOTK_RUMBLE_HD not off).
 static int pad_hd(void) {
-    return state == 1 && pad && pad_switch && strcmp(cfg_value("TOTK_RUMBLE_HD"), "off") != 0;
+    return state == 1 && pad && pad_switch && !hd_failed && strcmp(cfg_value("TOTK_RUMBLE_HD"), "off") != 0;
 }
 
 int input_rumble_hd(const float v[2][4], uint32_t ms) {
@@ -971,6 +978,7 @@ int input_rumble_hd(const float v[2][4], uint32_t ms) {
         const float zero[2][4] = { { 0, 160, 0, 320 }, { 0, 160, 0, 320 } };
         switch_rumble_packet(ms ? v : zero, pkt);
         ok = SDL_SendGamepadEffect(pad, pkt, sizeof pkt);
+        if (ok && ms) hd_sent = 1;
     }
     plat_mutex_unlock(&lock);
     return ok;

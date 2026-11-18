@@ -177,6 +177,19 @@ slice does not know what earlier slices wrote, so it starts with every attachmen
 that samples one records the by-region barrier in the secondary command buffer. A target learned inside a slice is a
 hazard (its pass restart is dropped); a target set is left alone after eight hazards instead of one.
 
+A draw that samples a colour image through a compare sampler the driver cannot compare on (R32_SFLOAT, R16_UNORM on
+AMD) samples a depth twin, a copy the replay thread makes outside the pass (`vk_exec_draw.c` `twin_prepare`). A slice
+cannot end its pass to copy one, so such a pass used to leave its target set unsliced for good: the full-screen map,
+whose big passes sample such an image, dropped below 30 fps on an RX 9070 XT. Now the slice's draw keeps the
+colour image once and the target set learns the texture (`vk_exec_par_twin`, up to four); `par_start` copies the twins
+of the learned textures before the set's next sliced pass begins (`vk_exec_draw_twins_copy`), and the pass's slices
+read their views from a snapshot of their own (`TwinSnap`, one per update snapshot), since the replay thread copies
+twins for later passes while they record. The replaced twin's image goes after the submission, which holds the pass.
+The twins the replay thread copies for an unsliced pass of the set (`vk_exec_par_twin_seen`) are learned the same way,
+so the set's first sliced pass already has them, and an id whose texture no longer needs a twin is dropped at
+`par_start`. A texture the pass's `par_start` copied that a slice still misses is a hazard (one learned after the pass
+began is not), so a target set whose twins cannot be made is left alone after eight.
+
 ### The key of the draw history
 
 With all of that, the big passes were still unsliced, and the log line for them (6838ba9) gave the reason: "targets not

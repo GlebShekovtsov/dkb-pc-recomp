@@ -24,6 +24,7 @@
 #include "nvn_api.h"
 #include "nvn_hmap.h"
 #include "nvn_tex.h"
+#include "sampler_book.h"
 #include "tex.h"
 #include "vk.h"
 #include "vk_exec.h"
@@ -76,8 +77,9 @@ typedef struct {
     view_t v;
     tex_t t;
 } TexSlot;
-typedef struct { samp_par p; VkSampler s, sp; uint8_t used; } SampSlot;   // s: vk_sampler_for(&p) once looked up; sp:
-                                                                           // its point-sampled form (vk_sampler_point_by_id_locked)
+// s: vk_sampler_for(&p) once looked up; sp: its point-sampled form (vk_sampler_point_by_id_locked); book_gen: the
+// sampler book generation they were looked up at (a retirement since drops them)
+typedef struct { samp_par p; VkSampler s, sp; uint32_t book_gen; uint8_t used; } SampSlot;
 enum { DESC_TEXTURE = 1, DESC_SAMPLER };
 typedef struct {
     uint32_t kind, serial;
@@ -98,7 +100,10 @@ static nvn_hmap descriptors = {.klen = sizeof(VkDescKey)};
 enum { DESC_BUCKET_SHIFT = 20 };
 typedef struct { uint32_t n, cap; DescSlot **v; } DescBucket;
 static nvn_hmap desc_buckets = {.klen = sizeof(uint64_t)};
+// samp_par -> its ParRef (freed at shutdown): the sampler the game's state resolved to at book generation gen.
+typedef struct { VkSampler s; uint32_t gen; } ParRef;
 static nvn_hmap samplers = {.klen = sizeof(samp_par)};
+static SamplerBook book;   // the samplers made, one for each distinct create info (sampler_book.h); texture lock held
 static int nreleased;
 static Tex *rel_head, *rel_tail;   // released entries in release order (sweep_released drops from the head)
 static uint64_t n_uploads, n_reuploads;
@@ -1123,7 +1128,10 @@ static Tex *entry_of(const tex_t *t) {
             tex_alias = cfg_bool("TOTK_TEX_ALIAS");
             rt_log("vk: texture aliases: %s", tex_alias ? "a new image takes the live image's content" : "a new image starts empty");
         }
-        if (!(e = create_tex(t, &k, tex_alias))) return NULL;
+        uint64_t ph = perf_ph_begin();   // TOTK_TRACE=perf: a part of the replay (perf.c ph_frame)
+        e = create_tex(t, &k, tex_alias);
+        perf_ph_end(PERF_PH_IMAGE, ph);
+        if (!e) return NULL;
         perf_count(PERF_CNT_TEX_NEW);
         // released entries of another descriptor at this address are replaced by the new one; a live one holding
         // GPU-written content is the alias source, preferring the one that differs only in swizzle (same_but_swizzle)
@@ -2275,6 +2283,62 @@ static void sampler_features(VkCtx *c) {
     sf.init = 1;
 }
 
+// The book's calls into Vulkan: sampler_ctx.si is the create info of the sampler being asked for.
+static struct { const VkSamplerCreateInfo *si; VkCtx *c; } sampler_ctx;
+
+static uint64_t sampler_create(void *ctx, const SbKey *key) {
+    (void)ctx, (void)key;
+    static volatile int32_t n_refused;
+    VkSampler s = VK_NULL_HANDLE;
+    VkResult r = vkCreateSampler(sampler_ctx.c->device, sampler_ctx.si, NULL, &s);
+    if (r != VK_SUCCESS) {
+        log_limited(&n_refused, "vkCreateSampler refused (%d) with %u samplers made and %u retired, waiting for the "
+                    "GPU", (int)r, book.n, book.ndead);
+        return 0;
+    }
+    return (uint64_t)(uintptr_t)s;
+}
+
+static void sampler_destroy(void *ctx, uint64_t h) {
+    (void)ctx;
+    VkCtx *c = vk_ctx();
+    if (c && h) vkDestroySampler(c->device, (VkSampler)(uintptr_t)h, NULL);
+}
+
+// The sampler for the create info behind key (sampler_ctx.si), from the book (sampler_book.h sb_admit). A retired
+// sampler is destroyed once the GPU timeline reaches the value of the submission being recorded: the newest issued one
+// plus one, and one more for a part a helper thread records ahead. A retirement bumps samp_gen, so every slot,
+// descriptor and binding signature that kept a handle looks it up again (vk_exec_draw.c keys them on vk_sampler_gen).
+static int sampler_stood_in;   // the last sampler_admit gave another sampler in place of the one asked for (lock held)
+
+static VkSampler sampler_admit(VkCtx *c, const SbKey *key) {
+    static volatile int32_t n_full;
+    sampler_ctx.c = c;
+    if (!book.room) {
+        uint32_t limit = c->props.limits.maxSamplerAllocationCount;
+        sb_init(&book, limit ? limit : 4000);
+        rt_log("vk: samplers: at most %u at a time (the driver's maxSamplerAllocationCount %u), one for each distinct "
+               "create info", book.room, limit);
+    }
+    uint32_t gen = book.gen;
+    uint64_t made = book.n_made;
+    uint64_t h = sb_admit(&book, key, vk_sync_fence_done(), vk_sync_issued() + 2, sampler_create, sampler_destroy, NULL,
+                          &sampler_stood_in);
+    if (book.n_made != made && book.n_made >= 16 && !(book.n_made & (book.n_made - 1)))   // 16, 32, 64, ...
+        rt_log("vk: samplers: %llu made for %u game sampler states (%llu answers from the book, %llu retired)",
+               (unsigned long long)book.n_made, samplers.n, (unsigned long long)book.n_reused,
+               (unsigned long long)book.n_retired);
+    // A retirement, or the first sampler of its own after stand-ins (which descriptors may have kept), bumps samp_gen.
+    static int stood_in_before;
+    if (book.gen != gen || (stood_in_before && !sampler_stood_in)) samp_gen++;
+    stood_in_before = sampler_stood_in;
+    if (sampler_stood_in)
+        log_limited(&n_full, "the sampler room (%u) is full of samplers the GPU may still use: a draw takes the newest "
+                    "one", book.room);
+    if (!h) rt_fatal("vk: vkCreateSampler failed and no sampler exists to stand in");
+    return (VkSampler)(uintptr_t)h;
+}
+
 static VkSampler make_sampler(VkCtx *c, const samp_par *d) {
     sampler_features(c);
     VkSamplerCreateInfo si = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
@@ -2333,10 +2397,21 @@ static VkSampler make_sampler(VkCtx *c, const samp_par *d) {
         rm.reductionMode = d->reduction == NVN_SAMPLER_REDUCTION_MIN ? VK_SAMPLER_REDUCTION_MODE_MIN : VK_SAMPLER_REDUCTION_MODE_MAX;
         *tail = &rm;
     }
-    VkSampler s;
-    VkResult r = vkCreateSampler(c->device, &si, NULL, &s);
-    if (r != VK_SUCCESS) rt_fatal("vk: vkCreateSampler failed (%d)", (int)r);
-    return s;
+    // The key is the whole create info as the driver reads it: every field the state above did not set is zero, so game
+    // states that differ only in what no sample reaches (the anisotropy of a sampler without it, the border colour of
+    // one that never clamps to its border) share a sampler.
+    SbKey key;
+    memset(&key, 0, sizeof key);
+    uint32_t kf[19] = {si.magFilter, si.minFilter, si.mipmapMode, si.addressModeU, si.addressModeV, si.addressModeW,
+                       0, 0, 0, si.anisotropyEnable, 0, si.compareEnable, si.compareOp, si.borderColor, 0, 0, 0, 0,
+                       rm.reductionMode};
+    memcpy(&kf[6], &si.minLod, 4), memcpy(&kf[7], &si.maxLod, 4), memcpy(&kf[8], &si.mipLodBias, 4);
+    memcpy(&kf[10], &si.maxAnisotropy, 4);
+    if (si.borderColor == VK_BORDER_COLOR_FLOAT_CUSTOM_EXT) memcpy(&kf[14], cb.customBorderColor.float32, 16);
+    _Static_assert(sizeof kf <= SB_KEY_BYTES, "the sampler key holds the create info's fields");
+    memcpy(key.b, kf, sizeof kf);
+    sampler_ctx.si = &si;
+    return sampler_admit(c, &key);
 }
 
 void vk_sampler_register(const dpool_ref *pool, int id, const samp_par *s) {
@@ -2360,12 +2435,20 @@ static VkSampler sampler_for(VkCtx *c, const samp_par *s) {
     samp_par k;
     memset(&k, 0, sizeof k);
     k = *s;
-    VkSampler v = (VkSampler)nvn_hm_get(&samplers, &k);
-    if (!v) {
-        v = make_sampler(c, &k);
-        nvn_hm_put(&samplers, &k, (void *)v);
+    ParRef *r = nvn_hm_get(&samplers, &k);
+    if (!r) {
+        r = calloc(1, sizeof *r);
+        if (!r) rt_fatal("vk: out of memory for a sampler");
+        nvn_hm_put(&samplers, &k, r);
     }
-    return v;
+    sampler_stood_in = 0;
+    // new, or a retirement since: the book answers again (a hit costs no Vulkan call)
+    if (!r->s || r->gen != book.gen) {
+        VkSampler v = make_sampler(c, &k);
+        if (sampler_stood_in) return v;   // another state's sampler: not kept, asked for again next time
+        r->s = v, r->gen = book.gen;
+    }
+    return r->s;
 }
 
 VkSampler vk_sampler_for(const samp_par *s) {
@@ -2373,11 +2456,13 @@ VkSampler vk_sampler_for(const samp_par *s) {
     if (!c || !s) return VK_NULL_HANDLE;
     lock();
     VkSampler v = sampler_for(c, s);
+    if (!sampler_stood_in) sb_pin(&book, (uint64_t)(uintptr_t)v);   // the caller keeps the handle (the draw stand-ins)
     unlock();
     return v;
 }
 
-// Samplers live until shutdown, so a slot keeps the one its parameters map to until it is registered again.
+// A slot keeps the sampler its parameters map to until it is registered again or the book retires a sampler
+// (book_gen).
 VkSampler vk_sampler_by_id_locked(const dpool_ref *pool, int id) {
     VkCtx *c = vk_ctx();
     if (!c) return VK_NULL_HANDLE;
@@ -2385,8 +2470,9 @@ VkSampler vk_sampler_by_id_locked(const dpool_ref *pool, int id) {
     DescSlot *d = descriptor_slot(pool, id, 1u << 12, 0);
     if (d && d->kind == DESC_SAMPLER) {
         SampSlot *s = &d->u.sampler;
-        if (!s->s) s->s = sampler_for(c, &s->p);
-        v = s->s;
+        if (s->book_gen != book.gen) s->s = s->sp = VK_NULL_HANDLE, s->book_gen = book.gen;
+        if (s->s) v = s->s;
+        else if ((v = sampler_for(c, &s->p)) && !sampler_stood_in) s->s = v;   // a stand-in is not kept in the slot
     }
     return v;
 }
@@ -2396,13 +2482,16 @@ VkSampler vk_sampler_point_by_id_locked(const dpool_ref *pool, int id) {
     DescSlot *d = descriptor_slot(pool, id, 1u << 12, 0);
     if (!c || !d || d->kind != DESC_SAMPLER) return VK_NULL_HANDLE;
     SampSlot *s = &d->u.sampler;
+    if (s->book_gen != book.gen) s->s = s->sp = VK_NULL_HANDLE, s->book_gen = book.gen;
     if (!s->sp) {
         samp_par k = s->p;
         k.magf = NVN_MAG_FILTER_NEAREST;
         k.minf = k.minf == NVN_MIN_FILTER_LINEAR ? NVN_MIN_FILTER_NEAREST :
                  k.minf > NVN_MIN_FILTER_LINEAR ? NVN_MIN_FILTER_NEAREST_MIPMAP_NEAREST : k.minf;
         k.aniso = 1;
-        s->sp = sampler_for(c, &k);
+        VkSampler v = sampler_for(c, &k);
+        if (sampler_stood_in) return v;   // a stand-in is not kept in the slot
+        s->sp = v;
     }
     return s->sp;
 }
@@ -2508,8 +2597,8 @@ void vk_texture_shutdown(void) {
         if (by_key.vals[i]) list[n++] = by_key.vals[i];
     for (int i = 0; i < n; i++) destroy_tex(list[i]);
     free(list);
-    for (uint32_t i = 0; i < samplers.cap; i++)
-        if (samplers.vals[i] && c) vkDestroySampler(c->device, (VkSampler)samplers.vals[i], NULL);
+    for (uint32_t i = 0; i < samplers.cap; i++) free(samplers.vals[i]);
+    sb_free(&book, c ? sampler_destroy : NULL, NULL);
     free(by_key.keys), free(by_key.vals), free(by_addr.keys), free(by_addr.vals), free(samplers.keys), free(samplers.vals);
     by_key = (nvn_hmap){.klen = sizeof(TexKey)};
     by_addr = (nvn_hmap){.klen = 8};

@@ -10,6 +10,7 @@
 
 static unsigned wide_output[2] = {2880, 1620};
 static int wide_enabled;
+static int image_full;   // dkb_wide_scene switched render3d on: 3.2.0's 3D image is the display size
 
 // The game's render-target pool is a fixed 200 MiB sized for 2880x1620 (main+0x458adc in
 // f_7000458a88). Grow it with the output pixel count, rounded up to 2 MiB, never below the
@@ -19,6 +20,15 @@ static uint32_t dkb_wide_pool_bytes(unsigned w, unsigned h) {
     uint64_t bytes = (base * w * h + 2880ull * 1620 - 1) / (2880ull * 1620);
     bytes = (bytes + align - 1) / align * align;
     return (uint32_t)(bytes > base ? bytes : base);
+}
+
+// The size of the image the game's upscaler writes: the virtual display, or two thirds of it where update 3.2.0's render
+// parameters scale the 3D image (the render3d set exists and dkb_wide_scene left it off: scene_res auto). Issue #152
+// and the Hilltop Layer give 2560x1440 -> 1706x960 and 3840x2160 -> 2560x1440 with scene_res auto, 3840x2160 with
+// scene_res set (vk_dlss.c vk_dlss_warm makes its feature for it).
+void dkb_wide_upscale_output(unsigned out[2]) {
+    memcpy(out, wide_output, sizeof wide_output);
+    if (rt_patch_set("render3d") >= 0 && !image_full) out[0] = out[0] * 2 / 3, out[1] = out[1] * 2 / 3;
 }
 
 int dkb_wide_output(unsigned out[2]) {
@@ -130,6 +140,7 @@ static void dkb_wide_scene(uint8_t *page, float ratio) {
         memcpy(page + 0x120, &one, 4);
         memcpy(page + 0x124, &one, 4);
         rt_patch_switch(scale_set, 1);
+        image_full = 1;
     }
     rt_log("Bananza resolution: 3D scene ratio %.3f (scene drawn at 1/%.3f of the virtual display%s, render-target pool %u MiB)",
            ratio, ratio, scale_set >= 0 ? ", the 3.2.0 image scale at 1.0" : "", pool >> 20);
@@ -175,7 +186,7 @@ void dkb_native_aa_live(void) {
 
 void dkb_wide_init(void) {
     wide_enabled = 0;
-    scene_ratio_now = 0;
+    scene_ratio_now = 0, image_full = 0;
     native_set = -2, native_on = 0;   // the set is off at start (the generated default) and chosen below
     wide_output[0] = 2880;
     wide_output[1] = 1620;
@@ -197,7 +208,10 @@ void dkb_wide_init(void) {
     unsigned width = 0, height = 0;
     if (!dkb_output_size(&width, &height)) {
         rt_patch_switch(set, 0);
-        rt_log("Bananza resolution: use an even 16:9 resolution, or enable ultrawide for a wider resolution; using stock 2880x1620");
+        // Sizes narrower than 16:9 (1360x768, 16:10) never pass, ultrawide or not: say so instead of hinting at 16:9 (#403).
+        rt_log("Bananza resolution: output_res %s is not supported: use even sizes from 1280x720 to 7680x4320, exactly 16:9, "
+               "or wider than 16:9 with ultrawide = 1 (narrower than 16:9 is not supported; aspect = fit letterboxes a "
+               "16:9 picture); using stock 2880x1620", cfg_value("TOTK_OUTPUT_RES"));
         if (scene) rt_log("Bananza resolution: scene_res needs a valid output resolution and is not applied");
         return;
     }

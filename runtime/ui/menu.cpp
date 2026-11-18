@@ -763,31 +763,40 @@ static void rows_render_options(const MenuTarget &target) {
     if (no_upscale && rt_game_version) opt_disable_next(UI_MENU_NO_UPSCALING);
     opt_choice_list("TOTK_UPSCALER", UI_MENU_UPSCALER, up_vals, up_names, 4, UI_MENU_UPSCALER_DESC, up_cur);
     // The Window scaling filter (TOTK_WINDOW_FILTER, live): how the finished picture is scaled to the window, with
-    // every upscaler. While the window is the picture's size the row says so and keeps the saved value. It shows the
-    // filter in effect (window_filter.h wf_resolve: upscaler = bilinear with no filter chosen is Linear); choosing one
-    // while the upscaler is the legacy bilinear also writes upscaler = fsr, so that alias stops mattering.
+    // every upscaler. While the window is the picture's size the row stays open with a note that the filter only
+    // matters for Sharpness there (window_filter.h wf_plan: Linear, Catmull-Rom and Lanczos sharpen at any size, FSR 1
+    // only where it enlarges). It shows the filter in effect (window_filter.h wf_resolve: upscaler = bilinear with no
+    // filter chosen is Linear); choosing one while the upscaler is the legacy bilinear also writes upscaler = fsr, so
+    // that alias stops mattering.
     static const char *const filter_vals[] = {"linear", "catmull_rom", "lanczos", "fsr1"};
     const char *filter_names[] = {menu_text(UI_MENU_FILTER_LINEAR), menu_text(UI_MENU_FILTER_CATMULL_ROM),
                                   menu_text(UI_MENU_FILTER_LANCZOS), menu_text(UI_MENU_FILTER_FSR1)};
-    if (target.image_w > 0 && target.image_h > 0 && !wf_needed(target.image_w, target.image_h, fitted[2], fitted[3]))
-        opt_disable_next(UI_MENU_FILTER_NOT_NEEDED);
-    int filter_cur = wf_resolve(cfg_value("TOTK_WINDOW_FILTER"), cfg_is_set("TOTK_WINDOW_FILTER"), cfg_value("TOTK_UPSCALER"));
-    if (filter_cur == WF_BLIT) filter_cur = WF_LINEAR;   // the legacy plain blit is the linear filter without the pass
-    if (opt_choice_list("TOTK_WINDOW_FILTER", UI_MENU_FILTER, filter_vals, filter_names, 4, UI_MENU_FILTER_DESC, filter_cur) &&
+    const bool sized = target.image_w > 0 && target.image_h > 0;
+    const bool same_size = sized && !wf_needed(target.image_w, target.image_h, fitted[2], fitted[3]);
+    int filter = wf_resolve(cfg_value("TOTK_WINDOW_FILTER"), cfg_is_set("TOTK_WINDOW_FILTER"), cfg_value("TOTK_UPSCALER"));
+    int filter_cur = filter == WF_BLIT ? WF_LINEAR : filter;   // the legacy plain blit is the linear filter without the pass
+    if (opt_choice_list("TOTK_WINDOW_FILTER", UI_MENU_FILTER, filter_vals, filter_names, 4, UI_MENU_FILTER_DESC, filter_cur,
+                        same_size ? menu_text(UI_MENU_FILTER_SHARPNESS_ONLY) : nullptr) &&
         !strcmp(cfg_value("TOTK_UPSCALER"), "bilinear"))
         cfg_set("TOTK_UPSCALER", "fsr");
     // Sharpness (TOTK_SHARPNESS, live): FSR 1's RCAS where it scales up, or, with another filter chosen, the window
-    // pass's sharpen at any window size (vk_fsr.c, window_filter.h wf_plan)
-    opt_slider("TOTK_SHARPNESS", UI_MENU_SHARPNESS, 0, 100, UI_MENU_SHARPNESS_DESC, 5, "%.0f %%");
+    // pass's sharpen at any window size (vk_fsr.c, window_filter.h wf_plan). The note says when the filter in effect
+    // takes no sharpen at this size (wf_sharpens, the plan vk_fsr.c vk_fsr_record makes for a non-zero slider); the
+    // game's own HDR picture is in effect while the swapchain is HDR10, vk_present.c's native_hdr and the CRT row's test.
+    const bool native_hdr = hdr_native_on() && gfx_window_hdr10();
+    // again: the row above may have changed the filter this frame
+    filter = wf_resolve(cfg_value("TOTK_WINDOW_FILTER"), cfg_is_set("TOTK_WINDOW_FILTER"), cfg_value("TOTK_UPSCALER"));
+    const bool no_sharpen = sized && !wf_sharpens(filter, native_hdr, target.image_w, target.image_h, fitted[2], fitted[3]);
+    opt_slider("TOTK_SHARPNESS", UI_MENU_SHARPNESS, 0, 100, UI_MENU_SHARPNESS_DESC, 5, "%.0f %%",
+               no_sharpen ? menu_text(UI_MENU_SHARPNESS_NO_EFFECT) : nullptr);
     static const UiTextId smaa[] = {UI_MENU_OFF, UI_MENU_SMAA_LOW, UI_MENU_SMAA_MEDIUM, UI_MENU_SMAA_HIGH};
     opt_choice("TOTK_SMAA", UI_MENU_SMAA, smaa, 4, UI_MENU_SMAA_DESC);
     // CRT filter and CRT lines after SMAA, the order of the present chain (vk_crt.c); the game's own HDR picture
     // bypasses them (SDR shaders), which the note says
     static const UiTextId crt[] = {UI_MENU_OFF, UI_MENU_CRT_LOTTES_GRILLE, UI_MENU_CRT_LOTTES_TV, UI_MENU_CRT_HYLLIAN,
                                    UI_MENU_CRT_ZFAST};
-    const bool crt_bypassed = hdr_native_on() && gfx_window_hdr10();
     opt_choice("TOTK_CRT_FILTER", UI_MENU_CRT, crt, 5, UI_MENU_CRT_DESC,
-               crt_bypassed && strcmp(cfg_value("TOTK_CRT_FILTER"), "off") ? menu_text(UI_MENU_CRT_NATIVE_HDR) : nullptr);
+               native_hdr && strcmp(cfg_value("TOTK_CRT_FILTER"), "off") ? menu_text(UI_MENU_CRT_NATIVE_HDR) : nullptr);
     if (strcmp(cfg_value("TOTK_CRT_FILTER"), "off")) {
         static const UiTextId lines[] = {UI_MENU_CRT_LINES_240, UI_MENU_CRT_LINES_480, UI_MENU_CRT_LINES_720};
         opt_choice("TOTK_CRT_LINES", UI_MENU_CRT_LINES, lines, 3, UI_MENU_CRT_LINES_DESC);

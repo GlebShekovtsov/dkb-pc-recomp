@@ -10,6 +10,7 @@
 //   nvnBootstrapLoader     main+0xebcdec (1.2.1: +0xe7eb2c, 1.4.3: +0xbe0360) in the graphics bring-up; logs the
 //                          run statistics, exits 0
 // With --seconds S the run continues past that call; rt_frame_presented ends it once the world clock passed S.
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -214,11 +215,35 @@ void rt_write_png(const char *path, const uint8_t *rgba, uint32_t w, uint32_t h)
     free(raw);
 }
 
-static void save_shot(const tex_t *t, const char *path) {
+// SMPTE ST 2084 (PQ): a code value in [0, 1] to cd/m2.
+static float pq_nits(float e) {
+    const float m1 = 0.1593017578125f, m2 = 78.84375f, c1 = 0.8359375f, c2 = 18.8515625f, c3 = 18.6875f;
+    float p = powf(e, 1.0f / m2), num = p - c1;
+    return num > 0 ? 10000.0f * powf(num / (c2 - c3 * p), 1.0f / m1) : 0.0f;
+}
+
+// Linear light (1 = the SDR paper white) to an sRGB byte, highlights rolled off (extended Reinhard, white at 4).
+static uint8_t srgb_byte(float x) {
+    if (!(x > 0)) return 0;
+    x = x * (1.0f + x / 16.0f) / (1.0f + x);
+    if (x >= 1) return 255;
+    x = x <= 0.0031308f ? 12.92f * x : 1.055f * powf(x, 1.0f / 2.4f) - 0.055f;
+    return (uint8_t)(x * 255.0f + 0.5f);
+}
+
+// The presented texture t as 8-bit RGBA, box-filtered to ow x oh (the full size when they are its own), into out.
+// Returns 0, reading nothing, for a format it does not convert. 8-bit RGBA and BGRA are taken as they are. RGB10A2
+// (NVN_FORMAT_RGB10A2, an A2B10G10R10 image: red in the low 10 bits) is what Bananza 3.2.0 presents with its own HDR
+// output (TOTK_HDR_NATIVE on an HDR10 swapchain, ov_gfx.c hdr_native_on; a Hilltop bench log has "fg: frame generation
+// 2x on ... history RGB10A2 (the game's own HDR picture, PQ)"): Rec. 2020 PQ code values, so they are decoded to light,
+// averaged as light, taken to Rec. 709 and tone mapped to sRGB with the paper white at 203 nits, the game's own (its
+// "hdr: metadata" line). An RGB10A2 picture without the game's HDR output has its codes taken as display values. A
+// test tool's picture, to compare runs with each other, not a colorimetric one. alpha: keep an 8-bit image's alpha
+// (--shot did), else every pixel is opaque.
+static int shot_pixels(const tex_t *t, uint32_t ow, uint32_t oh, uint8_t *out, int alpha) {
     int fmt = t->d.format;
-    int bgra = fmt == NVN_FORMAT_BGRA8 || fmt == NVN_FORMAT_BGRA8_SRGB;
-    if (!bgra && fmt != NVN_FORMAT_RGBA8 && fmt != NVN_FORMAT_RGBA8_SRGB)
-        rt_fatal("boot: --shot supports 8-bit RGBA and BGRA targets, the presented texture has NVN format %#x", fmt);
+    int bgra = fmt == NVN_FORMAT_BGRA8 || fmt == NVN_FORMAT_BGRA8_SRGB, rgb10 = fmt == NVN_FORMAT_RGB10A2;
+    if (!bgra && !rgb10 && fmt != NVN_FORMAT_RGBA8 && fmt != NVN_FORMAT_RGBA8_SRGB) return 0;
     uint32_t w = t->d.width, h = t->d.height;
     uint8_t *px = malloc(4ull * w * h);
     if (!px) rt_fatal("boot: out of memory for the shot");
@@ -227,12 +252,59 @@ static void save_shot(const tex_t *t, const char *path) {
     NVNcopyRegion r = {.width = (int)w, .height = (int)h, .depth = 1};
     if (gfx_replay_async()) gfx_backend()->finish();   // the presented frame may still be queued for the replay
     gfx_backend()->read_texels(t, &view, &r, px, 4ull * w, 4ull * w * h);
-    if (bgra)
-        for (uint64_t i = 0; i < 4ull * w * h; i += 4) {
-            uint8_t x = px[i];
-            px[i] = px[i + 2];
-            px[i + 2] = x;
+    int pq = rgb10 && hdr_native_on() && gfx_window_hdr10();
+    static float lut[1024];   // a 10-bit code to what is averaged: light in paper whites (pq), else code / 1023
+    static int lut_pq = -1;
+    if (rgb10 && lut_pq != pq) {
+        for (int i = 0; i < 1024; i++) lut[i] = pq ? pq_nits((float)i / 1023.0f) / 203.0f : (float)i / 1023.0f;
+        lut_pq = pq;
+    }
+    for (uint32_t y = 0; y < oh; y++)
+        for (uint32_t x = 0; x < ow; x++) {
+            uint32_t x0 = x * w / ow, x1 = (x + 1) * w / ow, y0 = y * h / oh, y1 = (y + 1) * h / oh;
+            if (x1 <= x0) x1 = x0 + 1;
+            if (y1 <= y0) y1 = y0 + 1;
+            uint8_t *o = out + 4ull * (y * ow + x);
+            uint32_t k = 0;
+            if (rgb10) {
+                float s[3] = {0, 0, 0};
+                for (uint32_t sy = y0; sy < y1; sy++)
+                    for (uint32_t sx = x0; sx < x1; sx++, k++) {
+                        uint32_t v;
+                        memcpy(&v, px + 4ull * (sy * (uint64_t)w + sx), 4);
+                        s[0] += lut[v & 0x3ff], s[1] += lut[v >> 10 & 0x3ff], s[2] += lut[v >> 20 & 0x3ff];
+                    }
+                for (int c = 0; c < 3; c++) s[c] /= (float)k;
+                if (pq) {   // Rec. 2020 to Rec. 709 primaries (ITU-R BT.2087), linear
+                    float rr = 1.6605f * s[0] - 0.5876f * s[1] - 0.0728f * s[2];
+                    float gg = -0.1246f * s[0] + 1.1329f * s[1] - 0.0083f * s[2];
+                    float bb = -0.0182f * s[0] - 0.1006f * s[1] + 1.1187f * s[2];
+                    o[0] = srgb_byte(rr), o[1] = srgb_byte(gg), o[2] = srgb_byte(bb);
+                } else {
+                    for (int c = 0; c < 3; c++) o[c] = (uint8_t)(s[c] * 255.0f + 0.5f);
+                }
+            } else {
+                uint32_t sum[4] = {0};
+                for (uint32_t sy = y0; sy < y1; sy++)
+                    for (uint32_t sx = x0; sx < x1; sx++, k++)
+                        for (int c = 0; c < 4; c++) sum[c] += px[4ull * (sy * (uint64_t)w + sx) + (uint32_t)c];
+                for (int c = 0; c < 3; c++) o[c] = (uint8_t)(sum[bgra ? 2 - c : c] / k);
+                o[3] = alpha ? (uint8_t)(sum[3] / k) : 255;
+                continue;
+            }
+            o[3] = 255;
         }
+    free(px);
+    return 1;
+}
+
+static void save_shot(const tex_t *t, const char *path) {
+    uint32_t w = t->d.width, h = t->d.height;
+    uint8_t *px = malloc(4ull * w * h);
+    if (!px) rt_fatal("boot: out of memory for the shot");
+    if (!shot_pixels(t, w, h, px, 1))
+        rt_fatal("boot: --shot supports 8-bit RGBA and BGRA and RGB10A2 targets, the presented texture has NVN format %#x",
+                 t->d.format);
     rt_write_png(path, px, w, h);
     free(px);
     rt_logf("boot: shot %s (%ux%u)\n", path, w, h);
@@ -241,7 +313,7 @@ static void save_shot(const tex_t *t, const char *path) {
 // TOTK_SHOTS=lo-hi:step [TOTK_SHOTS_DIR=dir]: every step-th present in [lo, hi] saved as <dir>/f<n>.png (n the
 // present), box-filtered to 480x270; TOTK_SHOTS=w<lo>-<hi>:<step> takes them by world-clock seconds instead, the first
 // present at or after each step (full size with TOTK_SHOTS_FULL=1), for finding short glitches. Pipeline builds stay asynchronous, so the
-// pictures show what a player sees.
+// pictures show what a player sees. The presented formats shot_pixels converts are saved; another gets one line.
 static void series_shot(const tex_t *t, uint64_t n) {
     static int parsed;
     static unsigned long long lo, hi, step, next;
@@ -266,35 +338,21 @@ static void series_shot(const tex_t *t, uint64_t n) {
     } else if (n < lo || n > hi || (n - lo) % step) {
         return;
     }
-    int fmt = t->d.format;
-    int bgra = fmt == NVN_FORMAT_BGRA8 || fmt == NVN_FORMAT_BGRA8_SRGB;
-    if (!bgra && fmt != NVN_FORMAT_RGBA8 && fmt != NVN_FORMAT_RGBA8_SRGB) return;
-    uint32_t w = t->d.width, h = t->d.height, ow = full ? w : 480, oh = full ? h : 270;
-    uint8_t *px = malloc(4ull * w * h), *out = malloc(4ull * ow * oh);
-    if (!px || !out) rt_fatal("boot: out of memory for a TOTK_SHOTS frame");
-    view_t view;
-    memset(&view, 0, sizeof view);
-    NVNcopyRegion r = {.width = (int)w, .height = (int)h, .depth = 1};
-    if (gfx_replay_async()) gfx_backend()->finish();   // the presented frame may still be queued for the replay
-    gfx_backend()->read_texels(t, &view, &r, px, 4ull * w, 4ull * w * h);
-    for (uint32_t y = 0; y < oh; y++)
-        for (uint32_t x = 0; x < ow; x++) {
-            uint32_t x0 = x * w / ow, x1 = (x + 1) * w / ow, y0 = y * h / oh, y1 = (y + 1) * h / oh;
-            if (x1 <= x0) x1 = x0 + 1;
-            if (y1 <= y0) y1 = y0 + 1;
-            uint32_t sum[4] = {0}, k = 0;
-            for (uint32_t sy = y0; sy < y1; sy++)
-                for (uint32_t sx = x0; sx < x1; sx++, k++)
-                    for (int c = 0; c < 4; c++) sum[c] += px[4ull * (sy * (uint64_t)w + sx) + (uint32_t)c];
-            uint8_t *o = out + 4ull * (y * ow + x);
-            for (int c = 0; c < 4; c++) o[c] = (uint8_t)(sum[bgra && c != 3 ? 2 - c : c] / k);
-            o[3] = 255;
-        }
+    uint32_t ow = full ? t->d.width : 480, oh = full ? t->d.height : 270;
+    uint8_t *out = malloc(4ull * ow * oh);
+    if (!out) rt_fatal("boot: out of memory for a TOTK_SHOTS frame");
+    if (!shot_pixels(t, ow, oh, out, 0)) {   // a format shot_pixels does not convert: said once, no file
+        static int told;
+        if (!told++)
+            rt_log("boot: TOTK_SHOTS: the presented texture has NVN format %#x, which the shots do not convert; none "
+                   "is saved", t->d.format);
+        free(out);
+        return;
+    }
     char path[PLAT_PATH_MAX];
     snprintf(path, sizeof path, "%s/f%05llu.png", dir, (unsigned long long)n);
     rt_write_png(path, out, ow, oh);
     free(out);
-    free(px);
 }
 
 // A --seconds run ends at the first present after the world clock (game time since the save's first frame,

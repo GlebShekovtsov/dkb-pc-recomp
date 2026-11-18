@@ -278,6 +278,7 @@ def run_one(t, tools, gpu, verbose):
     env = dict(os.environ)
     env['PYTHONUTF8'] = '1'
     env['PYTHONDONTWRITEBYTECODE'] = '1'
+    env.setdefault('TOTK_VOLUME', '0')   # games the tests start are silent unless the caller sets a volume
     # The tests that pick their own compiler read CC/CXX; MSYS2's bin goes first so its DLLs and tools are found.
     if 'cc' in tools:
         env['CC'] = str(tools['cc'])

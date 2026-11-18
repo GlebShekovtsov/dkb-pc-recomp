@@ -209,8 +209,12 @@ Grep-level look on 2026-10-22, statuses updated 2026-10-26; "saw" is what the gr
 18. **Sampler LOD.** `vk_texture.c` `make_sampler`. **OK.**
 19. **Viewport / scissor arrays.** Single viewport (`vk_exec_draw.c` `record_fixed`), extra scissors logged. Census: 0 differing. **OK.**
 
-20. **Depth-compare sampling in compute** (VUID-vkCmdDispatch-None-06479): one compute shader samples a 4x4 R32F
-    CPU-written placeholder through an R32_SFLOAT view with compare on, ~1/frame. Needs a D32 copy. **Minor.**
+20. **Depth-compare sampling of colour images** (VUID-vkCmdDispatch-None-06479, VUID-vkCmdDrawIndexed-None-06479):
+    one compute shader samples a 4x4 R32F CPU-written placeholder through an R32_SFLOAT view with compare on, ~1/frame,
+    and draws of the full-screen map's passes sample one too. AMD cannot compare R32_SFLOAT or R16_UNORM, so they
+    sample a D32 or D16 copy (`vk_exec_draw.c` depth twins): a dispatch copies right before it, an unsliced pass ends
+    and opens again around the copy (`twin_prepare`), and a sliced pass gets the copies its target set needed before,
+    made before the pass begins (`vk_exec.c` `par_start`, `vk_exec_draw_twins_copy`). **Handled.**
 21. **Report timestamps: unit and instant.** `write_counter` (`vk_exec_xfer.c`) writes host `ns * 12 / 625` (19.2 MHz
     ticks) at fence completion for every report; `nvnDeviceGetTimestampInNanoseconds` converts back with the same factor
     (`nvn_ext.c`). DK3D: GPU ticks convert at 625/384 ns (614.4 MHz), TIMESTAMP is written when the ROP has retired

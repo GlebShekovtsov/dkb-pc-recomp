@@ -50,6 +50,7 @@
 #include "gfx.h"
 #include "gfx_spirv.h"
 #include "host.h"
+#include "nvn_api.h"
 #include "nvn_hmap.h"
 #include "platform/platform.h"
 #include "spirv_rewrite.h"
@@ -74,7 +75,7 @@ static struct {
     int indep;                         // stage-independent layouts (vk_caps.gpl): vertex set 0, fragment set 1
     int push_stage;                    // GFX_STAGE_* whose set is pushed with independent layouts
     int gpl;                           // draws whose pipeline is building get a fast-linked one (vk_caps.gpl)
-    struct { uint64_t links, wlinks, dlinks, requeued, link_fail, defer, lib_n[4], lib_fail, swaps, slow, pre_used[4]; double link_ms, link_max, lib_ms[4], lib_max[4], dlink_ms, dlink_max; } g;
+    struct { uint64_t links, wlinks, dlinks, requeued, link_fail, defer, lib_n[4], lib_fail, swaps, slow, pre_used[4], stolen_jobs; double link_ms, link_max, lib_ms[4], lib_max[4], dlink_ms, dlink_max; } g;
     int vs_outs_all;                   // TOTK_VS_OUTS: 0 union of paired fragment inputs, 1 (all) all 32 output locations
     int dyn_vi, dyn_clamp, dyn_poly, dyn_blend_en, dyn_blend_eq, dyn_wmask, dyn_a2c;
     int f_logic_op, f_depth_clamp, f_fill_non_solid, f_dual_src;
@@ -2416,6 +2417,37 @@ static void prebuild_report(void) {
            "ready", K.built, K.failed, K.promoted, now_ms() - K.t0);
 }
 
+// Builds job j, which no queue holds any more, publishes its pipeline and frees it: a pool worker's job, or one a
+// waiting draw took from the draw queue (job_steal). Caller holds P.lock; it is released while the driver builds.
+static void job_build(Job *j) {
+    plat_mutex_unlock(&P.lock);
+    VkPipeline pipe = create_graphics(&j->s, &j->k, j->l, j->fs_off);
+    const int stolen = j->worker == MAX_WORKERS;   // job_steal: the waiting draw's own thread built it
+    plat_mutex_lock(&P.lock);
+    if (pipe || !j->p->fast) j->p->info.pipeline = pipe;   // a failed optimised build keeps the fast-linked one
+    if (pipe && j->p->fast) P.g.swaps++;
+    j->p->building = 0;
+    j->p->job = NULL;
+    if (pipe) {
+        P.stats.graphics++;
+        if (!stolen) P.stats.async_built++;   // a stolen job was built by the waiting draw: graphics() counts the wait
+        if (!j->prebuild) keys_note(&j->s);
+    } else {
+        P.stats.failures++;
+        rt_log("vk_pipeline: graphics pipeline not built: pipeline creation failed");
+    }
+    if (j->prebuild) {
+        if (pipe) K.built++;
+        else K.failed++;
+        K.promoted += j->demanded;
+        if (!--K.left && !K.loading) prebuild_report();
+    }
+    if (!--A.inflight) plat_cond_broadcast(&A.idle);
+    plat_cond_broadcast(&done_cv);
+    if (pipe && !stolen && (!j->prebuild || j->demanded)) perf_count(PERF_CNT_PIPE_ASYNC);   // a draw waited for it
+    free(j);
+}
+
 static void pipe_worker(void *arg) {
     int me = (int)(intptr_t)arg;
     plat_mutex_lock(&P.lock);
@@ -2474,31 +2506,8 @@ static void pipe_worker(void *arg) {
                 vkDestroyPipeline(P.device, f, NULL);
             }
         }
-        plat_mutex_unlock(&P.lock);
-        VkPipeline pipe = create_graphics(&j->s, &j->k, j->l, j->fs_off);
-        plat_mutex_lock(&P.lock);
-        if (pipe || !j->p->fast) j->p->info.pipeline = pipe;   // a failed optimised build keeps the fast-linked one
-        if (pipe && j->p->fast) P.g.swaps++;
-        j->p->building = 0;
-        j->p->job = NULL;
-        if (pipe) {
-            P.stats.graphics++, P.stats.async_built++;
-            if (!j->prebuild) keys_note(&j->s);
-        } else {
-            P.stats.failures++;
-            rt_log("vk_pipeline: graphics pipeline not built: pipeline creation failed");
-        }
-        if (j->prebuild) {
-            if (pipe) K.built++;
-            else K.failed++;
-            K.promoted += j->demanded;
-            if (!--K.left && !K.loading) prebuild_report();
-        }
+        job_build(j);
         A.low_running -= lowrun;
-        if (!--A.inflight) plat_cond_broadcast(&A.idle);
-        plat_cond_broadcast(&done_cv);
-        if (pipe && (!j->prebuild || j->demanded)) perf_count(PERF_CNT_PIPE_ASYNC);   // a draw waited for it
-        free(j);
     }
     return;
 }
@@ -2650,6 +2659,32 @@ static void job_lower(Job *j) {
     A.low = j;
 }
 
+// A draw waits for pipeline p and no worker has taken its job yet: this thread builds it now rather than wait for the
+// job's turn behind the misses of skipped draws (without graphics pipeline libraries a waiting draw's job queued
+// behind about a hundred others in a cold first run, and the draw waited up to 2.4 s). Caller holds P.lock.
+static void job_steal(Pipe *p) {
+    Job *j = p->job;
+    if (!j || j->worker >= 0) return;
+    if (j->low) {
+        if (j->prev) j->prev->next = j->next;
+        else A.low = j->next;
+        if (j->next) j->next->prev = j->prev;
+        else A.low_tail = j->prev;
+    } else if (A.head == j) {
+        if (!(A.head = j->next)) A.tail = NULL;
+    } else {
+        Job *q = A.head;
+        while (q && q->next != j) q = q->next;
+        if (!q) return;
+        if (!(q->next = j->next)) A.tail = q;
+    }
+    j->next = j->prev = NULL;
+    j->worker = MAX_WORKERS;   // running, on no pool thread: promote() leaves it alone
+    j->low = 0, j->demanded = 1;
+    P.g.stolen_jobs++;
+    job_build(j);
+}
+
 // A draw waits for pipeline s: its missing pre-rasterization and fragment shader libraries go to the head of the
 // worker queues (U), so they build in parallel on idle workers, and this thread sleeps until both are published or
 // end (now_ms) passes. A job no worker took within 1 ms (all busy) is built here. Caller holds P.lock.
@@ -2760,6 +2795,9 @@ static VkPipeline graphics(const VkPipeState *s, const VkPipeInfo **info, int as
     }
     if (p && p->building && !p->info.pipeline) {
         promote(p);
+        // Only a one-shot draw (ONESHOT_WAIT_MS, seconds) steals: a full-screen draw's budget is a few ms, and a stolen
+        // build cannot be cut short, so stealing there would turn the budget's skip into a whole cold build.
+        if (wait_ms >= 1000 && !P.gpl) job_steal(p);   // create_graphics counts its build as the render thread's pipeline time
         uint64_t p0 = wait_ms ? perf_begin() : 0;   // the wait counts as the render thread's pipeline time
         double now;
         while (p->building && !p->info.pipeline && wait_ms && (now = now_ms()) < end)
@@ -3028,9 +3066,14 @@ VkPipeline vk_pipeline_compute(const GfxShader *cs, const VkPipeInfo **info) {
         Layout *l = compute_layout(cs, &B, &why);
         VkPipeline pipe = VK_NULL_HANDLE;
         if (!why) {
-            uint64_t p0 = perf_begin();
+            uint64_t p0 = perf_begin(), t0 = qpc();
             pipe = compute_create(cs, l);
             perf_end(PERF_PIPE, p0);
+            double ms = ms_since(t0);
+            static int slow_logs;
+            if (ms >= 20.0 && __atomic_fetch_add(&slow_logs, 1, __ATOMIC_RELAXED) < 64)
+                rt_log("vk_pipeline: frame %llu: a compute pipeline took %.1f ms to build while the replay waited",
+                       (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) + 1, ms);
             if (!pipe) why = "pipeline creation failed";
         }
         if (why) {
@@ -3221,7 +3264,10 @@ static void lb_worker(void *arg) {
         LB.done++;
         plat_mutex_unlock(&LB.stat);
     }
-    if (!plat_dec32(&LB.running)) lb_report(LB.stop ? "stopped" : "done");
+    if (!plat_dec32(&LB.running)) {
+        lb_report(LB.stop ? "stopped" : "done");
+        vk_mem_trim_after("stage library prebuild");
+    }
     return;
 }
 
@@ -3381,6 +3427,7 @@ static void lb_warm_prepared(const char *dir) {
     else
         printf("prepare-shaders: %zu variants built into the driver cache on %d threads in %.0f ms\n", n, k, now_ms() - LB.t0);
     free(LB.e), LB.e = NULL, LB.n = 0, LB.next = 0, LB.done = 0;
+    vk_mem_trim_after("stage library preparation");
 }
 
 // totk.exe --prepare-shaders (tools/prepare_shaders.py): the device sets the translator's host answers (they are in every
@@ -3497,6 +3544,9 @@ static PlatMutex save_lock = PLAT_MUTEX_INIT;   // one cache save at a time; shu
 
 void vk_pipeline_save(void) {
     if (P.ready) keys_flush();
+    if (P.ready && P.g.stolen_jobs)
+        rt_log("vk_pipeline: %llu waiting draws built their pipeline themselves, ahead of the queued jobs",
+               (unsigned long long)P.g.stolen_jobs);
     if (P.ready && P.gpl) {
         rt_log("vk_pipeline: gpl: %llu fast links (%llu by workers; avg %.2f ms, max %.2f ms, %llu failed), %llu draws "
                "lookups found shader libraries missing (left to a worker), %llu optimised pipelines swapped in (%llu queued "

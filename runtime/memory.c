@@ -92,16 +92,36 @@ static int reserve_at(uint64_t at, uint64_t size, int watch) { return plat_mem_r
 // read) fails on a read-only page instead of faulting, so file reads thaw their buffer first (mem_thaw), and so does
 // every commit, decommit and protection change here. A region stays thawed for FRZ_HOLD_MS after a mem_thaw: a file
 // read still in flight writes its buffer later. frz_lock is a leaf lock: nothing writes guest memory under it.
+// frz[r] is FRZ_WHOLE for a region that was committed throughout at its freeze, FRZ_HOLES for one with reserved holes.
 #define FRZ_SHIFT 21
 #define FRZ_SIZE (1ull << FRZ_SHIFT)
 #define FRZ_HOLD_MS 5000u
+enum { FRZ_HOLES = 1, FRZ_WHOLE = 2 };
 static volatile uint8_t frz[RT_ADDRESS_LIMIT >> FRZ_SHIFT];
 static uint32_t thaw_ms[RT_ADDRESS_LIMIT >> FRZ_SHIFT];   // frz_lock: GetTickCount of the last thaw request, 0 never
 static volatile int32_t nfrz;
 static PlatMutex frz_lock = PLAT_MUTEX_INIT;
 static volatile int64_t frz_count[4];   // freezes; thaws by a write fault, by mem_thaw, by a mapping change
+// TOTK_FRZ_WHOLE=0 (an A/B of the thaw, TOTK_TRACE=perf shows the difference): every region is thawed the way one with
+// holes is, a query per read-only run, from the bottom up. Read at the first freeze (frz_lock), before which nothing
+// is thawed.
+static int frz_whole = -1;
+// Regions that hold sealed pages (vk_memory.c, the lazy write-back) are never frozen: a freeze would make a sealed page
+// readable. Set under frz_lock by mem_freeze_exclude and never cleared. thaw_hook is the back end's: it unseals the
+// pages of a range before a kernel write into it (a file read), which fails on a sealed page as on a read-only one.
+static volatile uint8_t frz_never[RT_ADDRESS_LIMIT >> FRZ_SHIFT];
+static void (*thaw_hook)(uint64_t a, uint64_t n);
 
 static int heap_lazy(void);
+
+// frz_lock, with the time a thread waits for it recorded as an operation in flight (TOTK_TRACE=perf): a thaw of a
+// whole pool holds the lock while it runs, and every write fault into a frozen region and every file read waits for it.
+static void frz_lock_take(void) {
+    if (plat_mutex_trylock(&frz_lock)) return;
+    int op = plat_op_begin(PLAT_OP_FRZ_WAIT, 0, 0);
+    plat_mutex_lock(&frz_lock);
+    plat_op_end(op, 0);
+}
 
 static int watched(uint64_t addr, uint64_t size) {
     const RtGuestLayout *g = &L;
@@ -110,13 +130,23 @@ static int watched(uint64_t addr, uint64_t size) {
 }
 
 // frz_lock held exclusively. why: 1 a write fault, 2 mem_thaw (holds the region thawed), 3 a mapping change here.
-static void thaw_locked(uint64_t r, int why) {
+// writable: the caller already made the region read-write (thaw_range_locked, a run of FRZ_WHOLE regions).
+static void thaw_locked(uint64_t r, int why, int writable) {
     if (why == 2) thaw_ms[r] = (uint32_t)plat_now_ms() | 1;
-    if (!frz[r]) return;
-    // The read-only runs only: freeze_locked left reserved holes (heap pages given back) as they were. Every committed
-    // page of a frozen region was read-write at the freeze, and mapping changes thaw before they run, so these are all
-    // ours.
+    int f = frz[r];
+    if (!f) return;
     uint64_t a = r << FRZ_SHIFT, end = a + FRZ_SIZE, b;
+    // A region committed throughout at its freeze is still committed throughout and read-only: nothing decommits a page
+    // or changes its protection without thawing first (commit, decommit and protect below), the lazy heap's fault handler
+    // and mem_touch commit reserved pages only, and the one race left (win32.c lazy_commit) can only make a page
+    // read-write again. So one protection change thaws it, with no query. A query would report the whole run of
+    // read-only pages after the address, all the frozen regions above it, and on Windows its cost grows with that run:
+    // with a query per region, a layer exit's thaw of the 450 MiB terrain pool (vk_pool_fini, 226 regions) took 50 to
+    // 100 ms under frz_lock, and the replay thread's next write-watch query waited for all of it.
+    if (writable || (f == FRZ_WHOLE && plat_mem_protect(a, FRZ_SIZE, PLAT_PROT_RW))) a = end;
+    // Otherwise the read-only runs only: freeze_locked left reserved holes (heap pages given back) as they were. Every
+    // committed page of a frozen region was read-write at the freeze, and mapping changes thaw before they run, so these
+    // are all ours.
     for (; a < end; a = b)
         if (plat_mem_state(a, end, &b) == PLAT_PROT_READ && !plat_mem_protect(a, b - a, PLAT_PROT_RW))
             rt_fatal("memory: thawing %#llx+%#llx failed", (unsigned long long)a, (unsigned long long)(b - a));
@@ -125,21 +155,72 @@ static void thaw_locked(uint64_t r, int why) {
     plat_inc64(&frz_count[why]);
 }
 
-// frz_lock held exclusively.
+// frz_lock held exclusively. From the top down: a region with holes still queries its runs (thaw_locked), and once
+// the regions above it are writable, the read-only run its query reports ends inside it. Adjacent FRZ_WHOLE regions
+// (up to FRZ_RUN of them) are made writable with one protection change: with one per 2 MiB region (30 to 40 us
+// each), the terrain pool's 220 still made the replay's next write-watch query wait 5 to 9 ms, while with four calls of
+// 1 to 2 ms it mostly got in between them. A run that the call refuses (one that crosses into another reservation) is
+// thawed region by region.
+#define FRZ_RUN 64
 static void thaw_range_locked(uint64_t a, uint64_t n, int why) {
     if (!n || a >= RT_ADDRESS_LIMIT) return;
     uint64_t r0 = a >> FRZ_SHIFT, r1 = (a + n - 1 < RT_ADDRESS_LIMIT ? a + n - 1 : RT_ADDRESS_LIMIT - 1) >> FRZ_SHIFT;
-    for (uint64_t r = r0; r <= r1; r++) thaw_locked(r, why);
+    int op = -1;
+    if (!frz_whole) {
+        for (uint64_t r = r0; r <= r1; r++) {
+            if (op < 0 && frz[r]) op = plat_op_begin(PLAT_OP_THAW, a, n);
+            thaw_locked(r, why, 0);
+        }
+    } else {
+        for (uint64_t r = r1 + 1; r-- > r0;) {
+            if (op < 0 && frz[r]) op = plat_op_begin(PLAT_OP_THAW, a, n);
+            uint64_t lo = r;
+            while (frz[r] == FRZ_WHOLE && lo > r0 && frz[lo - 1] == FRZ_WHOLE && r - lo + 1 < FRZ_RUN) lo--;
+            if (lo < r && plat_mem_protect(lo << FRZ_SHIFT, (r - lo + 1) << FRZ_SHIFT, PLAT_PROT_RW)) {
+                for (uint64_t q = lo; q <= r; q++) thaw_locked(q, why, 1);
+                r = lo;
+                continue;
+            }
+            thaw_locked(r, why, 0);
+        }
+    }
+    plat_op_end(op, 0);
 }
 
+static int never_frozen(uint64_t a, uint64_t n) {
+    if (!n || a >= RT_ADDRESS_LIMIT) return 0;
+    uint64_t r1 = (a + n - 1 < RT_ADDRESS_LIMIT ? a + n - 1 : RT_ADDRESS_LIMIT - 1) >> FRZ_SHIFT;
+    for (uint64_t r = a >> FRZ_SHIFT; r <= r1; r++)
+        if (__atomic_load_n(&frz_never[r], __ATOMIC_ACQUIRE)) return 1;
+    return 0;
+}
+
+void mem_freeze_exclude(uint64_t a, uint64_t n) {
+    if (!n || a >= RT_ADDRESS_LIMIT) return;
+    uint64_t last = a + n - 1 < RT_ADDRESS_LIMIT ? a + n - 1 : RT_ADDRESS_LIMIT - 1;
+    uint64_t r0 = a >> FRZ_SHIFT, r1 = last >> FRZ_SHIFT, r = r0;
+    while (r <= r1 && __atomic_load_n(&frz_never[r], __ATOMIC_ACQUIRE)) r++;
+    if (r > r1) return;   // the usual case: excluded since an earlier frame
+    frz_lock_take();
+    for (r = r0; r <= r1; r++) {
+        thaw_locked(r, 3, 0);
+        __atomic_store_n(&frz_never[r], 1, __ATOMIC_RELEASE);
+    }
+    plat_mutex_unlock(&frz_lock);
+}
+
+void mem_thaw_hook(void (*fn)(uint64_t a, uint64_t n)) { thaw_hook = fn; }
+
 void mem_thaw(uint64_t a, uint64_t n) {
-    plat_mutex_lock(&frz_lock);   // also when nothing is frozen: the hold keeps a read's buffer writable
+    if (thaw_hook && never_frozen(a, n)) thaw_hook(a, n);   // before frz_lock: the hook takes its own lock only
+    frz_lock_take();   // also when nothing is frozen: the hold keeps a read's buffer writable
     thaw_range_locked(a, n, 2);
     plat_mutex_unlock(&frz_lock);
 }
 
 // frz_lock held exclusively. Makes the committed pages of region r read-only when every one of them is read-write;
-// reserved holes (heap pages given back) stay as they are, and thaw_locked finds the read-only runs again.
+// reserved holes (heap pages given back) stay as they are, and thaw_locked finds the read-only runs again. Returns
+// FRZ_WHOLE when the region is one committed run, FRZ_HOLES when it has holes, 0 when it was refused.
 static int freeze_locked(uint64_t r) {
     uint64_t a = r << FRZ_SHIFT, end = a + FRZ_SIZE, run[16][2];
     int n = 0;
@@ -156,23 +237,31 @@ static int freeze_locked(uint64_t r) {
             while (i--) plat_mem_protect(run[i][0], run[i][1] - run[i][0], PLAT_PROT_RW);
             return 0;
         }
-    return n > 0;
+    return !n ? 0 : n == 1 && run[0][0] == a && run[0][1] == end && frz_whole ? FRZ_WHOLE : FRZ_HOLES;
 }
 
 int mem_freeze(uint64_t a) {
     if ((a & (FRZ_SIZE - 1)) || !watched(a, FRZ_SIZE)) return 0;
     uint64_t r = a >> FRZ_SHIFT;
-    int ok = 0;
-    plat_mutex_lock(&frz_lock);
+    int ok = 0, how;
+    int op = plat_op_begin(PLAT_OP_FREEZE, a, FRZ_SIZE);
+    frz_lock_take();
+    if (frz_whole < 0) {
+        const char *e = cfg_get("TOTK_FRZ_WHOLE");
+        frz_whole = !(e && !strcmp(e, "0"));
+        if (!frz_whole) rt_log("mem: frozen regions are thawed with a query per read-only run (TOTK_FRZ_WHOLE=0)");
+    }
     if (frz[r]) ok = 1;
+    else if (frz_never[r]) ok = 0;
     else if (thaw_ms[r] && (int32_t)((uint32_t)plat_now_ms() - thaw_ms[r]) < (int32_t)FRZ_HOLD_MS) ok = 0;   // |1 may be ahead
-    else if (freeze_locked(r)) {
-        __atomic_store_n(&frz[r], 1, __ATOMIC_RELEASE);
+    else if ((how = freeze_locked(r))) {
+        __atomic_store_n(&frz[r], (uint8_t)how, __ATOMIC_RELEASE);
         plat_inc32(&nfrz);
         plat_inc64(&frz_count[0]);
         ok = 1;
     }
     plat_mutex_unlock(&frz_lock);
+    plat_op_end(op, 0);
     return ok;
 }
 
@@ -190,10 +279,12 @@ void mem_freeze_stats(uint64_t *frozen, uint64_t *freezes, uint64_t *fault_thaws
 // The platform's write-fault hook (plat_mem_fault_hook): 1 retries the write.
 static int thaw_fault(uint64_t a) {
     if (a >= RT_ADDRESS_LIMIT || !watched(a, 1)) return 0;
-    plat_mutex_lock(&frz_lock);
+    int op = plat_op_begin(PLAT_OP_FAULT_THAW, a & ~(FRZ_SIZE - 1), FRZ_SIZE);
+    frz_lock_take();
     int was = frz[a >> FRZ_SHIFT];
-    thaw_locked(a >> FRZ_SHIFT, 1);
+    thaw_locked(a >> FRZ_SHIFT, 1, 0);
     plat_mutex_unlock(&frz_lock);
+    plat_op_end(op, 0);
     if (was) return 1;
     uint64_t end;
     return plat_mem_state(a & ~(PAGE - 1), (a & ~(PAGE - 1)) + PAGE, &end) == PLAT_PROT_RW;
@@ -201,7 +292,7 @@ static int thaw_fault(uint64_t a) {
 
 // Mapping changes thaw the regions they touch and run under frz_lock, so no freeze sees them half done.
 static void commit(uint64_t a, uint64_t n, const char *what) {
-    plat_mutex_lock(&frz_lock);
+    frz_lock_take();
     thaw_range_locked(a, n, 3);
     int ok = !n || plat_mem_commit(a, n);
     plat_mutex_unlock(&frz_lock);
@@ -209,7 +300,8 @@ static void commit(uint64_t a, uint64_t n, const char *what) {
 }
 
 static void decommit(uint64_t a, uint64_t n, const char *what) {
-    plat_mutex_lock(&frz_lock);
+    if (thaw_hook && never_frozen(a, n)) thaw_hook(a, n);   // sealed pages become ordinary ones before they go
+    frz_lock_take();
     thaw_range_locked(a, n, 3);
     int ok = !n || plat_mem_decommit(a, n);
     plat_mutex_unlock(&frz_lock);
@@ -217,7 +309,7 @@ static void decommit(uint64_t a, uint64_t n, const char *what) {
 }
 
 static void protect(uint64_t a, uint64_t n, int prot, const char *what) {
-    plat_mutex_lock(&frz_lock);
+    frz_lock_take();
     thaw_range_locked(a, n, 3);
     int ok = !n || plat_mem_protect(a, n, prot);
     plat_mutex_unlock(&frz_lock);
@@ -342,7 +434,10 @@ void mem_commit_report(const char *when) {
 static uint64_t written_pages(uint64_t addr, uint64_t size, uint64_t *pages, uint64_t max, int reset) {
     if (!max || !size) return 0;
     if (!watched(addr, size)) return UINT64_MAX;
-    return plat_mem_written(addr, size, pages, max, reset);
+    uint64_t ph = perf_ph_begin();   // TOTK_TRACE=perf: a part of the replay (perf.c ph_frame)
+    uint64_t n = plat_mem_written(addr, size, pages, max, reset);
+    perf_ph_end(PERF_PH_WW, ph);
+    return n;
 }
 
 uint64_t mem_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, uint64_t max) {
@@ -375,17 +470,10 @@ static int heap_lazy(void) {
 #endif
 }
 
-// Commits the reserved pages of [a, a+n) that lie in the guest heap, in 64 KiB chunks, before something other than the
-// CPU (a kernel file read, a driver importing host memory) accesses them: those accesses fail on a reserved page
-// instead of faulting into fault_veh. Committed pages are left alone. No-op without TOTK_HEAP_LAZY.
-void mem_touch(uint64_t a, uint64_t n) {
-    if (!n || !heap_lazy()) return;
-    uint64_t lo = L.heap.base, hi = lo + __atomic_load_n(&heap_size, __ATOMIC_RELAXED);
-    uint64_t s = a & ~0xffffull, e = (a + n + 0xffff) & ~0xffffull;
-    if (s < lo) s = lo;
-    if (e > hi) e = hi;
-    if (s >= e) return;
-    plat_mutex_lock(&frz_lock);   // freeze_locked refuses regions with holes, so a commit here never lands in a frozen one
+// Commits the reserved pages of [s, e) (64 KiB aligned, inside the heap) after asking the system for their state.
+static void touch_query(uint64_t s, uint64_t e) {
+    int op = plat_op_begin(PLAT_OP_TOUCH, s, e - s);
+    frz_lock_take();   // freeze_locked refuses regions with holes, so a commit here never lands in a frozen one
     for (uint64_t x = s, y; x < e; x = y) {
         int st = plat_mem_state(x, e, &y);
         if (st == PLAT_MEM_RESERVED && !plat_mem_commit(x, y - x)) {
@@ -394,14 +482,101 @@ void mem_touch(uint64_t a, uint64_t n) {
         }
     }
     plat_mutex_unlock(&frz_lock);
+    plat_op_end(op, 0);
+}
+
+// TOTK_TOUCH_MAP: 1 (default) lets mem_touch skip the chunks the platform's commit map knows to be committed
+// (plat_mem_lazy_run), 0 queries every chunk as before, verify queries the known chunks as well and logs each one found
+// reserved (then commits it). Windows only, like the lazy heap.
+#ifdef _WIN32
+static int touch_map(void) {
+    static int mode = -1;
+    if (mode < 0) {
+        const char *e = cfg_get("TOTK_TOUCH_MAP");
+        int m = !e || !*e ? 1 : !strcmp(e, "verify") ? 2 : strcmp(e, "0") != 0;
+        if (m != 1 && heap_lazy())
+            rt_log("mem: mem_touch %s (TOTK_TOUCH_MAP=%s)", m ? "checks the commit map against VirtualQuery" :
+                   "queries every chunk", e);
+        mode = m;
+    }
+    return mode;
+}
+#endif
+
+// mem_touch since the start: calls, chunks the commit map answered, chunks queried, and known chunks verify found
+// reserved (mem_touch_stats).
+static volatile int64_t touch_n[4];
+
+void mem_touch_stats(uint64_t out[4]) {
+    for (int i = 0; i < 4; i++) out[i] = (uint64_t)__atomic_load_n(&touch_n[i], __ATOMIC_RELAXED);
+}
+
+// Commits the reserved pages of [a, a+n) that lie in the guest heap, in 64 KiB chunks, before something other than the
+// CPU (a kernel file read, a driver importing host memory) accesses them: those accesses fail on a reserved page
+// instead of faulting into fault_veh. Committed pages are left alone. No-op without TOTK_HEAP_LAZY.
+// Chunks the platform's commit map knows (every chunk the fault handler or an earlier mem_touch committed) are skipped
+// without a system call; only the others are queried with plat_mem_state, whose VirtualQuery reports the whole run of
+// like pages after the address and so costs more the longer the committed stretch around the pool (win32.c lazy_map).
+// On the first frame of the Hilltop Layer of Surf Hills (3.2.0, RTX 5090, one run each) the touch of its ~280 first-use
+// pool imports fell from 15.3 ms to 0.5 ms, but their vkAllocateMemory took about 9 ms longer, as if the driver's page
+// pinning waited for what the queries had waited for: the imports took 36.4 ms instead of 40.0 and 40.3.
+void mem_touch(uint64_t a, uint64_t n) {
+    if (!n || !heap_lazy()) return;
+    uint64_t lo = L.heap.base, hi = lo + __atomic_load_n(&heap_size, __ATOMIC_RELAXED);
+    uint64_t s = a & ~0xffffull, e = (a + n + 0xffff) & ~0xffffull;
+    if (s < lo) s = lo;
+    if (e > hi) e = hi;
+    if (s >= e) return;
+    plat_inc64(&touch_n[0]);
+#ifdef _WIN32
+    int map = touch_map();
+#else
+    int map = 0;
+#endif
+    for (uint64_t x = s, y; x < e; x = y) {
+        int known = 0;
+#ifdef _WIN32
+        y = map ? plat_mem_lazy_run(x, e, &known) : e;
+#else
+        y = e;
+#endif
+        int64_t chunks = (int64_t)((y - x) >> 16);
+        if (known) {
+            plat_add64(&touch_n[1], chunks);
+            if (map != 2) continue;
+            // verify: the map said committed; a reserved page here would have failed the caller's kernel or driver access
+            for (uint64_t u = x, v; u < y; u = v)
+                if (plat_mem_state(u, y, &v) == PLAT_MEM_RESERVED) {
+                    if (plat_inc64(&touch_n[3]) <= 16)
+                        rt_log("mem: mem_touch: the commit map holds %#llx+%#llx, which is reserved", (unsigned long long)u,
+                               (unsigned long long)(v - u));
+                    touch_query(u, v);
+                }
+            continue;
+        }
+        plat_add64(&touch_n[2], chunks);
+        touch_query(x, y);
+#ifdef _WIN32
+        if (map) plat_mem_lazy_mark(x, y);
+#endif
+    }
 }
 
 uint32_t mem_set_heap_size(uint64_t size, uint64_t *addr) {
+    int op = plat_op_begin(PLAT_OP_HEAP_SIZE, L.heap.base, size);
     plat_mutex_lock(&lock);
     if (size > HEAP_CAP || size % 0x200000 || size + image_bytes() > L.pool) {
         plat_mutex_unlock(&lock);
+        plat_op_end(op, 0);
         return R_INVALID_STATE;
     }
+    // TOTK_TRACE=perf: each change after the first, the first 64 (a shrink decommits, and thaws the frozen regions it
+    // covers)
+    static int changes;
+    if ((rt_trace & RT_TRACE_PERF) && heap_size && size != heap_size && ++changes <= 64)
+        rt_log("mem: SetHeapSize %#llx -> %#llx (%s %llu MiB)", (unsigned long long)heap_size, (unsigned long long)size,
+               size < heap_size ? "shrinks by" : "grows by",
+               (unsigned long long)((size < heap_size ? heap_size - size : size - heap_size) >> 20));
     // TOTK_HEAP_LAZY: growing leaves the new range reserved; platform/win32.c fault_veh commits it on first touch and
     // mem_touch before a kernel or driver access. Shrinking decommits (a no-op on pages never committed).
     if (size > heap_size && !heap_lazy()) commit(L.heap.base + heap_size, size - heap_size, "heap");
@@ -415,6 +590,7 @@ uint32_t mem_set_heap_size(uint64_t size, uint64_t *addr) {
     if (heap_lazy()) plat_mem_lazy(L.heap.base, heap_size);
 #endif
     plat_mutex_unlock(&lock);
+    plat_op_end(op, 0);
     if (addr) *addr = L.heap.base;
     return R_OK;
 }
@@ -720,6 +896,31 @@ uint32_t mem_query(uint64_t a, RtMemoryInfo *out) {
     plat_mutex_unlock_shared(&lock);
     if (out) *out = r;
     return R_OK;
+}
+
+// Whether a read anywhere in [a, a + n) is sure not to fault, from this file's own map of the guest: 1 inside the
+// heap's current size (committed, or in the lazy heap reserved until the first access commits it; frozen pages are
+// read-only, still readable) or on mapped alias pages, in both cases outside a moved stack's source; 0 inside the heap
+// block or the alias region otherwise; -1 anywhere else (modules, the stack region, the kernel region, host memory),
+// for the caller to ask the platform. No system call: on Windows plat_mem_readable's VirtualQuery reports the whole
+// run of like pages around a, so a pointer in a long read-write stretch of a committed heap (TOTK_HEAP_LAZY=0: all
+// 9.8 GiB of it) cost milliseconds, and a GetWriteWatch over the same reservation waited for it (#317).
+int mem_guest_readable(uint64_t a, uint64_t n) {
+    if (!n) n = 1;
+    if (a + n < a) return -1;
+    int r = -1;
+    plat_mutex_lock_shared(&lock);
+    if (inside(a, n, (RtRange){L.aslr.base, LOW_SIZE}) && !inside(a, n, L.stack))
+        r = inside(a, n, (RtRange){L.heap.base, heap_size});
+    else if (inside(a, n, L.alias)) {
+        uint64_t first = (a - L.alias.base) / PAGE, last = (a + n - 1 - L.alias.base) / PAGE;
+        r = 1;
+        for (uint64_t p = first; p <= last && r; p++) r = alias_pages[p] != 0;
+    }
+    for (unsigned i = 0; i < nstack_maps && r == 1; i++)
+        if (overlaps(a, n, stack_maps[i].src, stack_maps[i].size)) r = 0;
+    plat_mutex_unlock_shared(&lock);
+    return r;
 }
 
 // ---- GetInfo memory ids

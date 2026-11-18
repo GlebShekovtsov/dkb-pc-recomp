@@ -1,0 +1,7 @@
+# Bananza 1.0.0: title screen to the saved game in the first slot. Presses A five times, 300 frames apart from frame
+# 1500 (the generic load_save.txt presses too early for this game). Timings only, no game data.
+1500 A 4
+1800 A 4
+2100 A 4
+2400 A 4
+2700 A 4

@@ -54,8 +54,9 @@ bool opt_choice_list(const char *key, UiTextId label, const char *const *values,
 // shown on the right ("" none).
 bool opt_button(const char *id, UiTextId label, UiTextId desc, const char *value = "");
 // lo..hi in steps of step (left and right held for a second go ten times as fast); fmt formats the value ("%.0f %%").
+// note: a short status under the label, as opt_choice's (NULL: none).
 bool opt_slider(const char *key, UiTextId label, float lo, float hi, UiTextId desc, float step = 1,
-                const char *fmt = "%g");
+                const char *fmt = "%g", const char *note = nullptr);
 
 // Informational binding-style row: focusable for navigation/help, never rebinds or clears.
 void opt_shortcut_row(const char *id, UiTextId title, UiTextId desc, const char *key_hint,

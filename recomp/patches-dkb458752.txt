@@ -29,7 +29,7 @@ site realtime main 6b8260 1e201820 f81f0fe9 @page:x9 bd400920 f84107e9  # second
 # (any rate above 60 fps) truncates to 0, so the entry was never released and its blur stayed on screen (#158).
 # runtime/frame_rate.c blur_frames (patch page +0x250) keeps the fraction per entry and returns the whole frames in w8.
 # The function saves LR in its prologue (main+426e94), so the BL keeps its return.
-site realtime main 426f54 1e380008 948fa4bf  # fcvtzs w8, s0 in the blur entry update  [3.2.0 only]
+site realtime main 426f54 1e380008 948fa4bf  # fcvtzs w8, s0 in the blur entry update  [1.0.0 40e944]
 
 # The player's damped velocity update (main+13fad60; its eight callers are the player's movers, the wall and ceiling
 # climbs among them) steps v = r^step * v + sum of r^i * target for i = 1 .. step: it adds the target once per whole

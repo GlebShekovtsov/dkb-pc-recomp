@@ -827,7 +827,95 @@ static void dg_sample(RtThread *t) {
 
 
 // perf_present, every present: a line for a present over 25 ms, the 60-present summary.
+// Stall dump (TOTK_STALL_DUMP=<seconds>, default 5; 0 turns it off): a watchdog thread logs the scheduler state when no
+// frame has been presented for that long, then every 10 s while the stall lasts: who holds each virtual core and where
+// its host thread is, who waits for a core, and every other guest thread's wait, with priorities, core masks and
+// pending preempt requests. A hang then leaves in the log what each thread was doing, which a hung process killed from
+// outside does not. The dump only reads under the scheduler lock, and reports a lock it cannot get within 200 ms.
+static volatile uint64_t g_stall_last_ns, g_stall_last_frame;
+
+static void stall_line(const char *what, const RtThread *t) {
+    const Cpu *c = t->cur;
+    rt_log("stall: %s %#x p%d (now %d) mask %#llx core %d preempt %d host_depth %d wkind %d waddr %#llx wobj %#llx "
+           "target %#x pc %#llx lr %#llx loop %#llx",
+           what, t->handle, t->prio, prio_of(t), (unsigned long long)t->mask, t->cur_core, t->preempt, t->host_depth,
+           t->wkind, (unsigned long long)t->waddr, (unsigned long long)t->wobj, t->target ? t->target->handle : 0,
+           (unsigned long long)(c ? c->pc : 0), (unsigned long long)(c ? c->x[30] : 0), (unsigned long long)t->sp_site);
+}
+
+static void stall_dump(uint64_t idle_ns) {
+    int got = 0;
+    for (int i = 0; i < 200 && !(got = plat_mutex_trylock(&G)); i++) plat_sleep_ms(1);
+    if (!got) {
+        rt_log("stall: no frame for %.1f s; the scheduler lock stayed held for 200 ms: no dump", idle_ns / 1e9);
+        return;
+    }
+    rt_log("stall: no frame for %.1f s after frame %llu", idle_ns / 1e9, (unsigned long long)g_stall_last_frame);
+    char what[32];
+    for (int i = 0; i < NCORE; i++) {
+        RtThread *o = g_core_owner[i];
+        if (!o) {
+            rt_log("stall: core %d free", i);
+            continue;
+        }
+        snprintf(what, sizeof what, "core %d owner", i);
+        stall_line(what, o);
+        // Where its host thread is now (sampled twice, 1 ms apart), and what asynchronous preemption would see there:
+        // the preemption disable count, a redirect still pending, whether the rip is in lifted code.
+        uint64_t rip[2] = {0, 0}, rsp;
+        for (int k = 0; k < 2 && o->hthr; k++) {
+            if (k) plat_sleep_ms(1);
+            if (plat_intr_stop(o->hthr, &rip[k], &rsp)) plat_intr_resume(o->hthr, 0);
+        }
+        uintptr_t b = plat_exe_base();
+        rt_log("stall:   host rip exe+%#llx, exe+%#llx (lifted code %d, %d); disable count %u, redirect pending %d",
+               (unsigned long long)(rip[0] - b), (unsigned long long)(rip[1] - b),
+               rip[0] >= g_gen_lo && rip[0] <= g_gen_hi, rip[1] >= g_gen_lo && rip[1] <= g_gen_hi,
+               o->tlr ? ap_tlr(o)[0] : 0, o->ap_pending);
+    }
+    rt_log("stall: asynchronous preemption: %llu interrupted, %llu given up there; refused %llu in a host call, %llu "
+           "outside game code, %llu disabled, %llu failed",
+           (unsigned long long)g_ap_sent, (unsigned long long)g_ap_taken, (unsigned long long)g_ap_host,
+           (unsigned long long)g_ap_pc, (unsigned long long)g_ap_deferred, (unsigned long long)g_ap_fail);
+    int k = 0;
+    for (const RtThread *w = g_core_wait; w; w = w->cnext) {
+        snprintf(what, sizeof what, "core waiter %d", k++);
+        stall_line(what, w);
+    }
+    for (const RtThread *t = g_all; t; t = t->all) {
+        if (t->exited || !t->started || t->cur_core >= 0) continue;
+        int queued = 0;
+        for (const RtThread *w = g_core_wait; w && !queued; w = w->cnext) queued = w == t;
+        if (!queued) stall_line("blocked", t);
+    }
+    unlock();
+}
+
+static void stall_main(void *arg) {
+    uint64_t lim = (uint64_t)(uintptr_t)arg * 1000000000ull, next = 0;
+    for (;;) {
+        plat_sleep_ms(500);
+        uint64_t last = __atomic_load_n(&g_stall_last_ns, __ATOMIC_RELAXED), now = kern_now_ns();
+        if (now - last < lim) {
+            next = 0;
+            continue;
+        }
+        if (next && now < next) continue;
+        stall_dump(now - last);
+        next = now + 10000000000ull;
+    }
+}
+
 void kern_core_diag_frame(uint64_t frame, uint64_t interval_ns) {
+    __atomic_store_n(&g_stall_last_ns, kern_now_ns(), __ATOMIC_RELAXED);
+    g_stall_last_frame = frame;
+    static int stall_started;
+    if (!stall_started && frame >= 60) {   // after the first frames: the boot's long loads are not stalls
+        stall_started = 1;
+        int sec = cfg_int("TOTK_STALL_DUMP");
+        if (sec > 0 && !plat_thread_spawn(stall_main, (void *)(uintptr_t)sec, "stall watch", 0))
+            rt_log("kernel: TOTK_STALL_DUMP: the watchdog thread could not start");
+    }
     if (g_ap > 0 && frame && frame % 600 == 0) {   // TOTK_ASYNC_PREEMPT counters since the start
         lock();
         uint64_t v[8] = {g_ap_sent, g_ap_taken, g_ap_host, g_ap_pc, g_ap_deferred, g_ap_fail, g_ap_spin_ok, g_sync36};
@@ -1522,6 +1610,7 @@ static void thread_main(void *p) {
     RtThread *t = p;
     tcur = t;
     t->tid = plat_thread_id();
+    plat_op_role(PLAT_OP_GAME);   // TOTK_TRACE=perf: its host operations count as the game's (perf.c ops_frame_log)
     PlatIntr *self = ap_open_self();
     lock();
     t->hthr = self;
@@ -1571,6 +1660,7 @@ uint32_t kern_main_thread(Cpu **cpu) {
     t->cpu->sp = t->stack_top;
     t->tid = plat_thread_id();
     perf_main_thread();
+    plat_op_role(PLAT_OP_GAME);
     PlatIntr *self = ap_open_self();
     lock();
     t->hthr = self;

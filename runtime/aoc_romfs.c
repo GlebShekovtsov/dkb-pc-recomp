@@ -168,7 +168,14 @@ uint32_t aoc_mount(const char *name, uint32_t index) {
     int present = 0;
     for (int i = 0; i < aoc_n; i++)
         if (aoc_ids[i] == index) present = 1;
-    if (!present) return FS_R_PATH_NOT_FOUND;   // no such add-on content on this machine
+    if (!present) {   // no such add-on content on this machine; say so once per index
+        static uint32_t missing_seen;
+        if (index >= 32 || !(missing_seen & (1u << index))) {
+            if (index < 32) missing_seen |= 1u << index;
+            rt_log("aoc: add-on content %u requested but aoc-%u is not installed", index, index);
+        }
+        return FS_R_PATH_NOT_FOUND;
+    }
     plat_mutex_lock(&lock);
     if (*mount_name) {
         int same = mount_index == index && !strcmp(mount_name, name);

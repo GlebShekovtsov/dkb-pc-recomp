@@ -344,15 +344,22 @@ static void summary(void) {
     U.repeats = U.wr_coalesced = 0;
 }
 
-void vk_usnap_begin(const uint64_t *handles, int n, uint64_t fence) {
+static int drop_local;    // TOTK_USNAP_DROP_LOCAL, for this submission (wr_local)
+static void wr_take(void);
+
+static void usnap_begin(const uint64_t *handles, int n, uint64_t fence) {
     if (!U.mode) U.mode = rt_knob("UBO_SNAPSHOT", "1") + 1;   // stored +1: 0 is "not read yet"
     U.on = 0, U.fence = fence, U.cpu = NULL, gen_bump();
+    wr_take();   // whatever the mode: an earlier submission may have noted writes in the threads' lists
     summary();
     // USNAP_FAST is read once; with "ab" it is decided per submission, as the A/B switch is. drop() follows U.fast for
     // the writes this submission records.
     static int fast_mode;   // stored +1: 0 is "not read yet"
     if (!fast_mode) fast_mode = rt_knob("USNAP_FAST", "1") + 1;
     U.fast = RT_KNOB_ON(fast_mode - 1);
+    static int local_mode;   // the same for TOTK_USNAP_DROP_LOCAL
+    if (!local_mode) local_mode = rt_knob("USNAP_DROP_LOCAL", "1") + 1;
+    drop_local = RT_KNOB_ON(local_mode - 1);
     if (!RT_KNOB_ON(U.mode - 1)) {
         U.off_subs++;
         return;
@@ -419,6 +426,13 @@ void vk_usnap_begin(const uint64_t *handles, int n, uint64_t fence) {
     U.subs++, U.regions += (uint64_t)U.nreg, U.bytes += total, U.copy_ns += t4 - t0;
 }
 
+// TOTK_TRACE=perf: a part of the replay (perf.c ph_frame).
+void vk_usnap_begin(const uint64_t *handles, int n, uint64_t fence) {
+    uint64_t ph = perf_ph_begin();
+    usnap_begin(handles, n, fence);
+    perf_ph_end(PERF_PH_USNAP, ph);
+}
+
 void vk_usnap_end(uint64_t fence) {
     if (U.arena) vk_completion_add(fence, arena_done, U.arena), U.arena = NULL;
     U.on = 0, U.cpu = NULL, gen_bump();
@@ -480,9 +494,92 @@ int vk_usnap_covers(uint64_t addr, uint64_t n) {
     return i < U.nreg && U.reg[i].lo < addr + n;
 }
 
+// TOTK_USNAP_DROP_LOCAL (on by default; 0 as before; "ab" decides per submission, in vk_usnap_begin): a GPU write
+// goes into a list of the noting thread's own instead of U.wr, and drop_lock is taken only when the write drops a copy
+// (vk_usnap_covers). With every GPU-written binding of the slices (about 5,700 ranges a submission in the Hilltop Layer
+// of Surf Hills, 3.2.0, one per terrain record) appended to U.wr under the lock, the slice workers queued for it.
+// What each reader needs, and why the lists keep it:
+// - The copies' dropped marks (vk_usnap_find, read by the walk's later draws, by the slices of later passes through the
+//   drop count vk_usnap_view compares with, and by the draw merge and DLSS through vk_usnap_bytes) are made as before:
+//   under drop_lock, in the thread that notes the write, before drop returns. vk_usnap_covers is the condition under
+//   which the marking loop below visits a region at all, and what it reads (U.on, U.reg, U.nreg) changes only in
+//   vk_usnap_begin and vk_usnap_end, which no drop overlaps.
+// - U.wr, the writes in flight, is read by wr_prune and wr_hits in vk_usnap_begin, which wr_take precedes. Every
+//   write of a submission is noted before its recording ends: vk_exec.c record_impl waits for every slice (par_settle_all,
+//   par_flush), helper parts drop nothing (a write fails them, vk_exec_draw.c), and a slice's notes precede its
+//   par_slice_done under pw_lock, which the walk takes before the pass ends. The next submission's vk_usnap_begin comes
+//   after (one submission records at a time), so wr_take moves every write noted since the last one. The order in which
+//   the lists join U.wr does not matter: wr_prune sorts the entries added since the last prune and merges overlaps
+//   into one range with the newest fence (tests/usnap_prune_test.py, drop_local_cases).
+// - vk_usnap_gpu_writing reads U.wr in the middle of a submission too (the indirect reset's guest read, #354): it also
+//   looks through every thread's list, each under the list's own lock, which the owner takes to append (uncontended
+//   but for that look).
+typedef struct WrLocal { Wrote *a; int n, c; uint64_t added, coalesced; struct WrLocal *next; PlatMutex lock; } WrLocal;
+static WrLocal *wr_locals;   // every thread's, linked under drop_lock and kept until exit
+static _Thread_local WrLocal *wr_mine;
+
+static void wr_local(uint64_t addr, uint64_t n, uint64_t fence) {
+    WrLocal *w = wr_mine;
+    if (!w) {
+        if (!(w = calloc(1, sizeof *w))) rt_fatal("vk_usnap: out of memory");
+        plat_mutex_lock(&drop_lock);
+        w->next = wr_locals, wr_locals = w;
+        plat_mutex_unlock(&drop_lock);
+        wr_mine = w;
+    }
+    plat_mutex_lock(&w->lock);
+    w->added++;
+    Wrote *last = w->n ? &w->a[w->n - 1] : NULL;   // as drop coalesces the tail of U.wr
+    if (U.fast && last && last->lo == addr && last->hi == addr + n) {
+        if (fence > last->fence) last->fence = fence;
+        w->coalesced++;
+    } else {
+        if (w->n == w->c) w->a = grow(w->a, &w->c, sizeof *w->a);
+        w->a[w->n++] = (Wrote){addr, addr + n, fence};
+    }
+    plat_mutex_unlock(&w->lock);
+}
+
+static void wr_take(void) {   // vk_usnap_begin: no thread notes a write now
+    plat_mutex_lock(&drop_lock);
+    for (WrLocal *w = wr_locals; w; w = w->next) {
+        plat_mutex_lock(&w->lock);
+        while (U.cwr < U.nwr + w->n) U.wr = grow(U.wr, &U.cwr, sizeof *U.wr);
+        if (w->n) memcpy(U.wr + U.nwr, w->a, (size_t)w->n * sizeof *w->a);
+        U.nwr += w->n, U.wr_added += w->added, U.wr_coalesced += w->coalesced;
+        w->n = 0, w->added = w->coalesced = 0;
+        plat_mutex_unlock(&w->lock);
+    }
+    plat_mutex_unlock(&drop_lock);
+}
+
+// The copies [addr, addr+n) overlaps are dropped from here on (drop_lock held).
+static void mark(uint64_t addr, uint64_t n) {
+    if (U.on)
+        for (int i = first_above(addr); i < U.nreg && U.reg[i].lo < addr + n; i++)
+            if (!U.reg[i].dropped)
+                __atomic_store_n(&U.reg[i].dropped, __atomic_add_fetch(&U.dseq, 1, __ATOMIC_ACQ_REL), __ATOMIC_RELEASE), U.drops++,
+                    gen_bump();
+}
+
+static void drop_locked(uint64_t addr, uint64_t n, uint64_t fence);
+
 static void drop(uint64_t addr, uint64_t n, uint64_t fence) {
     if (!U.mode || !n) return;
+    if (drop_local) {
+        wr_local(addr, n, fence);
+        if (!vk_usnap_covers(addr, n)) return;   // no copy to drop
+        plat_mutex_lock(&drop_lock);
+        mark(addr, n);
+        plat_mutex_unlock(&drop_lock);
+        return;
+    }
     plat_mutex_lock(&drop_lock);
+    drop_locked(addr, n, fence);
+    plat_mutex_unlock(&drop_lock);
+}
+
+static void drop_locked(uint64_t addr, uint64_t n, uint64_t fence) {   // drop_lock held, n > 0
     U.wr_added++;
     // The same range as the newest entry of the unsorted tail (U.wr[nwr_sorted, U.nwr); the terrain rewrites one block
     // before every draw) raises that entry's fence instead of adding a second entry. The newer of the two fences is
@@ -495,15 +592,49 @@ static void drop(uint64_t addr, uint64_t n, uint64_t fence) {
         if (U.nwr == U.cwr) U.wr = grow(U.wr, &U.cwr, sizeof *U.wr);
         U.wr[U.nwr++] = (Wrote){addr, addr + n, fence};
     }
-    if (U.on)
-        for (int i = first_above(addr); i < U.nreg && U.reg[i].lo < addr + n; i++)
-            if (!U.reg[i].dropped)
-                __atomic_store_n(&U.reg[i].dropped, __atomic_add_fetch(&U.dseq, 1, __ATOMIC_ACQ_REL), __ATOMIC_RELEASE), U.drops++,
-                    gen_bump();
-    plat_mutex_unlock(&drop_lock);
+    mark(addr, n);
 }
 
 void vk_usnap_drop(uint64_t addr, uint64_t n) { drop(addr, n, U.fence); }
+
+// vk_usnap_drop of each range [r[i][0], r[i][1]) (vk_exec_draw.c reset_batch, TOTK_RESET_BATCH): one take of drop_lock
+// for them all instead of one each, while the slice threads take it for their own drops. The ranges go into U.wr and
+// mark their copies under that one hold whatever TOTK_USNAP_DROP_LOCAL says: wr_local is not called here, because a
+// thread's first wr_local takes drop_lock to link its list and would deadlock under it. U.wr and the threads' lists
+// may hold a submission's writes side by side (wr_take appends the lists in any order; wr_prune sorts what was added).
+void vk_usnap_drop_many(const uint64_t (*r)[2], uint32_t n) {
+    if (!U.mode || !n) return;
+    plat_mutex_lock(&drop_lock);
+    for (uint32_t i = 0; i < n; i++)
+        if (r[i][1] > r[i][0]) drop_locked(r[i][0], r[i][1] - r[i][0], U.fence);
+    plat_mutex_unlock(&drop_lock);
+}
+
+// Whether a GPU write noted here (vk_usnap_drop: shader stores, copies, fills, reports, uniform updates, indirect
+// resets) whose fence is not done overlaps [addr, addr+n): guest memory there may not hold the GPU's bytes yet. The
+// sorted prefix of the last prune and the unsorted tail are both looked at, under drop_lock as the slices add to them,
+// and with TOTK_USNAP_DROP_LOCAL the threads' own lists, each under its lock (wr_local).
+int vk_usnap_gpu_writing(uint64_t addr, uint64_t n) {
+    if (!n) return 0;
+    const uint64_t done = vk_sync_fence_done(), hi = addr + n;
+    int hit = 0;
+    plat_mutex_lock(&drop_lock);
+    int a = 0, b = nwr_sorted < U.nwr ? nwr_sorted : U.nwr;
+    while (a < b) {   // the first sorted entry ending above addr
+        int k = (a + b) / 2;
+        if (U.wr[k].hi <= addr) a = k + 1;
+        else b = k;
+    }
+    for (int end = nwr_sorted < U.nwr ? nwr_sorted : U.nwr; !hit && a < end && U.wr[a].lo < hi; a++) hit = U.wr[a].fence > done;
+    for (int i = nwr_sorted; !hit && i < U.nwr; i++) hit = U.wr[i].lo < hi && addr < U.wr[i].hi && U.wr[i].fence > done;
+    for (WrLocal *w = wr_locals; !hit && w; w = w->next) {   // linked under drop_lock
+        plat_mutex_lock(&w->lock);
+        for (int i = 0; !hit && i < w->n; i++) hit = w->a[i].lo < hi && addr < w->a[i].hi && w->a[i].fence > done;
+        plat_mutex_unlock(&w->lock);
+    }
+    plat_mutex_unlock(&drop_lock);
+    return hit;
+}
 
 uint64_t vk_usnap_gen(void) { return __atomic_load_n(&U.gen, __ATOMIC_ACQUIRE); }
 uint64_t vk_usnap_arena_bytes(void) { return __atomic_load_n(&arena_total, __ATOMIC_RELAXED); }

@@ -1,0 +1,20 @@
+# Vulkan validation layer settings for `tools/scenario.py --safe-gpu` (VK_LAYER_SETTINGS_PATH).
+# GPU-assisted validation in safe mode: the layer instruments every shader and skips a memory access it finds out of
+# bounds instead of letting the GPU fault, so a run that would lose the device (and make Windows reset the driver)
+# reports the access in game.log instead. Core validation is off: it is slow and is not what this mode is for.
+# The shader sanitizer reports NaN operands of min/max and similar undefined results.
+khronos_validation.validate_core = false
+khronos_validation.gpuav_enable = true
+khronos_validation.gpuav_safe_mode = true
+khronos_validation.gpuav_shader_instrumentation = true
+khronos_validation.gpuav_descriptor_checks = true
+khronos_validation.gpuav_buffer_address_oob = true
+khronos_validation.gpuav_vertex_attribute_fetch_oob = true
+khronos_validation.gpuav_shader_sanitizer = true
+khronos_validation.gpuav_buffers_validation = true
+khronos_validation.gpuav_indirect_draws_buffers = true
+khronos_validation.gpuav_indirect_dispatches_buffers = true
+khronos_validation.gpuav_index_buffers = true
+khronos_validation.report_flags = error,warn
+# Every report counts: with the default limit of 50 per message ID, one noisy NaN hides the rest.
+khronos_validation.enable_message_limit = false

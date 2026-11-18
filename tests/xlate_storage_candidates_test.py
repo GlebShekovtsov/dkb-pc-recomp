@@ -189,7 +189,7 @@ class CandidateTest(unittest.TestCase):
             'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMDATA', 'SYSTEMDRIVE'}}
         cls.env.update(DOTNET_ROOT=str(args.dotnet.parent), DOTNET_PROCESSOR_COUNT='2',
                        DOTNET_CLI_TELEMETRY_OPTOUT='1', DOTNET_GENERATE_ASPNET_CERTIFICATE='false',
-                       DOTNET_SKIP_FIRST_TIME_EXPERIENCE='1', DOTNET_NOLOGO='1',
+                       DOTNET_SKIP_FIRST_TIME_EXPERIENCE='1', DOTNET_NOLOGO='1', DOTNET_ADD_GLOBAL_TOOLS_TO_PATH='false',
                        DOTNET_CLI_HOME=str(args.out / 'dotnet-home'), MSBUILDDISABLENODEREUSE='1',
                        DOTNET_CLI_USE_MSBUILD_SERVER='0')
         cls.command = [str(args.dotnet), str(args.xlate)] if args.xlate.suffix == '.dll' else [str(args.xlate)]
@@ -319,6 +319,55 @@ class CandidateTest(unittest.TestCase):
         dis = subprocess.run([str(disasm), str(args.out / (key + '.spv'))], capture_output=True, text=True, timeout=30)
         self.assertEqual(dis.returncode, 0, dis.stderr)
         return dis.stdout.count('OpAtomicCompareExchange')
+
+    def _bounded_compare_exchange_loops(self, key):
+        """(compare-exchange sites, sites whose loop leaves on success or after 1024 attempts) in the SPIR-V of key.
+
+        A site counts as bounded when the next conditional branch after it, the loop's back edge, tests a logical and
+        of which one side is a signed compare against the constant 1024."""
+        disasm = args.spirv_val.with_name(args.spirv_val.name.replace('spirv-val', 'spirv-dis'))
+        dis = subprocess.run([str(disasm), str(args.out / (key + '.spv'))], capture_output=True, text=True, timeout=30)
+        self.assertEqual(dis.returncode, 0, dis.stderr)
+        lines = [line.split() for line in dis.stdout.splitlines()]
+        sites = bounded = 0
+        for i, words in enumerate(lines):
+            if 'OpAtomicCompareExchange' not in words:
+                continue
+            sites += 1
+            defs = {}
+            for later in lines[i + 1:]:
+                if len(later) > 2 and later[1] == '=':
+                    defs[later[0]] = later[2:]
+                if later[:1] == ['OpBranchConditional']:
+                    cond = defs.get(later[1], [])
+                    bounded += cond[:1] == ['OpLogicalAnd'] and any(
+                        defs.get(x, [])[:1] == ['OpSLessThan'] and defs[x][-1] == '%int_1024' for x in cond[2:])
+                    break
+        return sites, bounded
+
+    def test_compare_exchange_loops_end_after_1024_tries(self):
+        # Patch 0024: an emulated atomic or sub-word store loops on a compare-exchange until it succeeds. Under robust
+        # buffer access an exchange on a word out of bounds need not return the word it was given, so every such loop
+        # also leaves after 1024 attempts instead of hanging the GPU. The legacy byte and halfword stores (no
+        # storage_candidates_version) have no bounds check, so they are the loops that can meet such a word.
+        def stores(size):
+            ops = original.instructions(True)
+            for i, op in enumerate(ops):
+                if op >> 51 == 0xEED8000000000000 >> 51:
+                    ops[i] = (op & ~(7 << 48)) | (size << 48)   # size field: 0 LsSize2.U8, 2 LsSize2.U16
+            return encoded(ops)
+        red = original.instructions(True)
+        load = red.index(original.global_memory(False, 2, 0))
+        red[load:load + 1] = [original.movi(6, 0x3c00), 0xEBF8000000000000 | original.PT | 6 | (4 << 20)]
+        jobs = [packet('cas_ceiling_legacy_store8', stores(0)),
+                packet('cas_ceiling_legacy_store16', stores(2)),
+                packet('cas_ceiling_store16', stores(2), storage_candidates_version=1),
+                packet('cas_ceiling_red', encoded(red), storage_candidates_version=1)]
+        self.translate(jobs)
+        for job in jobs:
+            sites, bounded = self._bounded_compare_exchange_loops(job['key'])
+            self.assertGreaterEqual(sites, 1, job['key'])
+            self.assertEqual(bounded, sites, f"{job['key']}: a compare-exchange loop without the 1024-attempt exit")
 
     def test_packed_half_red_translates_as_a_guarded_compare_exchange(self):
         # RED.E.ADD.F16x2.FTZ.RN [R0], R6: RedSize (bits 20-22) = 4 (F16x2FtzRn), RedOp (23-25) = 0 (Add), data R6 (0-7).

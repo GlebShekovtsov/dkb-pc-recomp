@@ -27,6 +27,12 @@ site realtime main 34ec1c 1e201828 f81f0fe9 @page:x9 bd400928 f84107e9  # same c
 site realtime main 34ec68 1e201860 f81f0fe9 @page:x9 bd400920 f84107e9  # time-scale transition
 site realtime main 69fc60 1e201820 f81f0fe9 @page:x9 bd400920 f84107e9  # secondary scene clock
 
+# The radial blur entry update (main+40e874, 3.2.0 main+426e84) subtracts fcvtzs(step) from [x22-4] once per frame, so
+# above 60 fps the blur a smash starts never ended (#389, #390). runtime/frame_rate.c blur_frames (patch page +0x250)
+# stands in for the fcvtzs and returns the whole frames in w8; see patches-dkb458752.txt. The function saves LR in its
+# prologue, so the BL keeps its return. The BL assumes the patch page is at main+0x2450000 (recomp/layout.py).
+site realtime main 40e944 1e380008 94810643  # fcvtzs w8, s0 in the blur entry update
+
 # The player's damped velocity update (main+1241c50, 3.2.0 main+13fad60) adds its target once per whole 60 Hz frame, so
 # above 60 fps the climb velocity decays to 0 and DK stops on walls and ceilings (#201). runtime/frame_rate.c damped_sum
 # (patch page +0x260) stands in for the fmov s12, #1.0 that bounds the loop; the three movi that clear the sum on the

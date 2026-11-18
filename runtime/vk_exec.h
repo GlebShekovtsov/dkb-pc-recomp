@@ -164,8 +164,12 @@ int vk_exec_dispatch_barrier(VkExec *ex);
 // As vk_exec_par_hazard for a draw whose effect depends on the order of draws across slices (a storage buffer write):
 // the pass's targets are not sliced again from the next pass on.
 void vk_exec_par_order_hazard(void);
-// As vk_exec_par_order_hazard for a draw that needs the primary every time (a depth twin, vk_exec_draw.c twin_prepare).
-void vk_exec_par_ban(void);
+// A slice's draw needs the depth twin of texture id (of the pool it samples), which its pass's snapshot has none of:
+// the draw samples the colour image, and par_start copies the twin before the target set's next sliced pass.
+void vk_exec_par_twin(uint32_t id);
+// The replay thread copied the depth twin of texture id for ex's open pass, which is not sliced: the target set learns
+// it as a slice's miss would teach it, so that its first sliced pass already has the twin.
+void vk_exec_par_twin_seen(struct VkExec *ex, uint32_t id);
 // The walk (the submitting thread outside a slice) has a pass end held back whose slices are not all recorded yet
 // (vk_exec.c par_defer); vk_exec_held_wait waits for them, recording none itself. For the texture cache's barrier
 // (vk_texture.c hold_barrier), which lets every lock the slices take go first.
@@ -296,3 +300,11 @@ void vk_exec_draw_slices_begin(int threads, int snap);
 struct DrawCtx *vk_exec_draw_slice_ctx(int k);
 void vk_exec_draw_slice_view(struct DrawCtx *c, int snap);
 void vk_exec_draw_slices_end(int threads);
+// Depth twins of a sliced pass (vk_exec_draw.c twin_prepare): a slice cannot end its pass to copy one. _copy, in
+// vk_exec.c par_start before the pass begins, copies the twins of the n texture ids ids of ex's texture pool that the
+// target set's slices needed before (the attachments of ex's targets excepted) and returns how many it copied; bit i of
+// *gone is set when ids[i] no longer names a texture that needs a twin; _snap,
+// once the pass is open, stamps them with its serial and copies their views into snapshot snap, which the pass's slices
+// read (vk_exec_draw_slice_view) while the replay thread copies twins for later passes.
+int vk_exec_draw_twins_copy(struct VkExec *ex, const uint32_t *ids, int n, uint32_t *gone);
+void vk_exec_draw_twins_snap(struct VkExec *ex, int snap, int copied);

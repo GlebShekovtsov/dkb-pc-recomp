@@ -64,6 +64,10 @@ static void check_write_watch(void) {
     uint64_t m = mem_written_pages(heap, 0x200000, pages + 2, 6);
     printf("write-watch: three pages written, max 2: %llu then %llu\n", (unsigned long long)n, (unsigned long long)m);
     CHECK(n == 2 && m == 1, "max 2 reported %llu, then %llu (want 2, 1)", (unsigned long long)n, (unsigned long long)m);
+    // In address order: vk_memory.c ww_stamp starts its next query after the last page a full answer held.
+    CHECK(pages[0] == heap + 0x7000 && pages[1] == heap + 0x9000 && pages[2] == heap + 0xA000,
+          "pages not in address order: +%#llx +%#llx then +%#llx", (unsigned long long)(pages[0] - heap),
+          (unsigned long long)(pages[1] - heap), (unsigned long long)(pages[2] - heap));
 
     // Frozen region: read-only until the first write thaws it (the write lands and is reported); mem_thaw (a file
     // read) thaws it and holds it thawed; SetHeapSize below decommits it.
@@ -80,6 +84,27 @@ static void check_write_watch(void) {
     CHECK(!mem_frozen(heap) && mem_freeze(heap) == 0, "mem_thaw did not thaw and hold the region");
     p[0x6000] = 8;
     printf("write-watch: frozen region thawed by a write (reported once) and by mem_thaw (held)\n");
+
+    // Frozen regions committed throughout thaw with protection changes only, no state query (memory.c thaw_locked):
+    // on Windows a query reports the whole frozen run above the address, and a layer exit's thaw of a 450 MiB pool made
+    // 226 of them. (Other hosts count no queries: plat_vm_stats reports zeros there.)
+    CHECK(mem_set_heap_size(0x800000, &heap) == 0, "SetHeapSize 8 MiB");
+    mem_touch(heap, 0x800000);
+    for (uint64_t r = heap + 0x200000; r < heap + 0x800000; r += 0x200000)
+        CHECK(mem_freeze(r) == 1 && mem_frozen(r), "freeze of the committed region at +%#llx", (unsigned long long)(r - heap));
+    PlatVmStat vm[PLAT_VM_N];
+    plat_vm_stats(vm);   // from here on
+    mem_thaw(heap + 0x200000, 0x600000);
+    plat_vm_stats(vm);
+    CHECK(vm[PLAT_VM_STATE].calls == 0, "thawing three whole regions made %llu state queries (want 0)",
+          (unsigned long long)vm[PLAT_VM_STATE].calls);
+    for (uint64_t r = heap + 0x200000; r < heap + 0x800000; r += 0x200000) {
+        CHECK(!mem_frozen(r), "mem_thaw left the region at +%#llx frozen", (unsigned long long)(r - heap));
+        // A page left read-only crashes here: its region is no longer frozen, so the write fault is no thaw.
+        *(volatile uint8_t *)(uintptr_t)(r + 0x1fffff) = 5;
+    }
+    printf("write-watch: three frozen regions thawed by one mem_thaw: protection changes %llu, state queries 0\n",
+           (unsigned long long)vm[PLAT_VM_PROTECT].calls);
 
     uint64_t a = g->alias.base + 0x10000;
     CHECK(mem_map_physical(a, 0x4000) == 0, "MapPhysicalMemory");

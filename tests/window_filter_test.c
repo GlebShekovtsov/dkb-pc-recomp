@@ -1,5 +1,5 @@
 // The window scaling filter's rules (runtime/window_filter.h): the legacy upscaler = bilinear alias, when the filter
-// has anything to do, and which passes the present records. No Vulkan, no config.
+// has anything to do, which passes the present records and whether the slider sharpens. No Vulkan, no config.
 #include <stdio.h>
 
 #include "window_filter.h"
@@ -83,6 +83,17 @@ int main(void) {
     // SDR never reports the stand-in
     p = wf_plan(WF_FSR1, 0, 0, 1920, 1080, 2560, 1440);
     CHECK(p.fsr1);
+
+    // sharpens (the menu's Sharpness note): the three chosen filters at any size, the picture's included, SDR or HDR
+    for (int f = WF_LINEAR; f <= WF_LANCZOS; f++)
+        for (int hdr = 0; hdr < 2; hdr++)
+            CHECK(wf_sharpens(f, hdr, 1920, 1080, 1920, 1080) && wf_sharpens(f, hdr, 1920, 1080, 2560, 1440) &&
+                  wf_sharpens(f, hdr, 1920, 1080, 1280, 720));
+    // FSR 1 only where the window is larger than an SDR picture; the legacy blit never
+    CHECK(wf_sharpens(WF_FSR1, 0, 1920, 1080, 2560, 1440));
+    CHECK(!wf_sharpens(WF_FSR1, 0, 1920, 1080, 1920, 1080) && !wf_sharpens(WF_FSR1, 0, 1920, 1080, 1280, 720));
+    CHECK(!wf_sharpens(WF_FSR1, 1, 1920, 1080, 2560, 1440));
+    CHECK(!wf_sharpens(WF_BLIT, 0, 1920, 1080, 2560, 1440) && !wf_sharpens(WF_BLIT, 0, 1920, 1080, 1920, 1080));
 
     if (failures) return 1;
     printf("window_filter: ok\n");

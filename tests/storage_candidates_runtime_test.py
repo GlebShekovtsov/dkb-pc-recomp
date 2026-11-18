@@ -164,7 +164,7 @@ int main(void) {
     info=ssbo_info(&ex,NVN_STAGE_CS,&typed,1);
     CHECK(info.range==16 && wrote==1 && dropped==1 && noted==1,
           "valid guarded output keeps mirror/snapshot/write accounting");
-    CHECK(last_note_addr==a && last_note_size==16 && last_note_buf==info.buffer,
+    CHECK(last_note_addr==a && (last_note_size & ~VK_WB_LAZY)==16 && last_note_buf==info.buffer,
           "written range is the exact bound range, with the buffer the shader writes");
     wrote=dropped=noted=0;
     memcpy(&ex.push[1][0][0],&scalar,8);
