@@ -23,6 +23,7 @@ __attribute__((weak)) int prof_sampler_start(void) {
 }
 __attribute__((weak)) void prof_sampler_write(void) {}
 __attribute__((weak)) void prof_sampler_frame(uint64_t frame, uint64_t now, uint64_t d) { (void)frame, (void)now, (void)d; }
+__attribute__((weak)) void prof_mark(uint64_t t_ns, char kind) { (void)t_ns, (void)kind; }
 
 // TOTK_TRACE=perf, TOTK_FLIGHT=1 or the full performance overlay: event counts are taken. Wait times are always taken
 // (frame-time summary). perf_base: the part fixed at start.

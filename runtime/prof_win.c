@@ -246,6 +246,18 @@ static void write_modules(FILE *f) {
     }
 }
 
+// TOTK_PROFILE_SLOW: time marks from game hooks (frame_rate.c fpd_main: S the start of the frame the present-interval
+// controller measures, A the end of that measure), written as `tmark <ms into the window> <kind>` lines.
+#define MARK_RING 4096
+static struct { uint64_t t; char kind; } marks[MARK_RING];
+static volatile LONG64 mark_n;
+
+void prof_mark(uint64_t t_ns, char kind) {
+    if (!slow_ns) return;
+    uint64_t k = (uint64_t)InterlockedIncrement64(&mark_n) - 1;
+    marks[k & (MARK_RING - 1)].t = t_ns, marks[k & (MARK_RING - 1)].kind = kind;
+}
+
 // The sampler, between ticks: the samples of the window the render thread asked for.
 static void slow_dump(void) {
     uint64_t lo = (uint64_t)dump_lo, hi = (uint64_t)dump_hi, frame = (uint64_t)dump_frame;
@@ -269,6 +281,10 @@ static void slow_dump(void) {
                 for (uint32_t d = 0; d < s->depth; d++) fprintf(f, " %llx", (unsigned long long)s->rip[d]);
                 fputc('\n', f);
             }
+        uint64_t mn = (uint64_t)mark_n;
+        for (uint64_t k = mn > MARK_RING ? mn - MARK_RING : 0; k < mn; k++)
+            if (marks[k & (MARK_RING - 1)].t >= lo && marks[k & (MARK_RING - 1)].t <= hi)
+                fprintf(f, "tmark %.1f %c\n", (marks[k & (MARK_RING - 1)].t - lo) / 1e6, marks[k & (MARK_RING - 1)].kind);
         static const char *const step[] = {"stop", "copy", "unwind"};
         for (uint64_t k = gap_n > GAP_RING ? gap_n - GAP_RING : 0; k < gap_n; k++) {
             const Gap *g = &gaps[k & (GAP_RING - 1)];

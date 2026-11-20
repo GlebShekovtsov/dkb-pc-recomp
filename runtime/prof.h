@@ -10,3 +10,4 @@ extern volatile uint32_t prof_replay_tid;   // the asynchronous replay (perf_rep
 int prof_sampler_start(void);               // TOTK_PROFILE: starts sampling; 1 when it runs
 void prof_sampler_write(void);              // writes the profile once (prof_write)
 void prof_sampler_frame(uint64_t frame, uint64_t now, uint64_t d);   // every present; d: the interval, 0 on the first
+void prof_mark(uint64_t t_ns, char kind);   // TOTK_PROFILE_SLOW: a `tmark <ms> <kind>` line in the dumps (kern_now_ns time)

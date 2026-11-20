@@ -46,6 +46,7 @@
 #include "gfx.h"
 #include "host.h"
 #include "layout.h"
+#include "prof.h"
 #include "platform/platform.h"
 
 #define STEP_SAMPLES 5
@@ -214,6 +215,9 @@ static void fpd_main(Cpu *c) {
         if (parts[3] * 60 > rt_tick_hz()) fpd_over++;
         fpd_n++;
     }
+    uint64_t now = kern_now_ns(), part = rt_ticks_to_ns(c->x[8]);
+    prof_mark(now > part ? now - part : 0, 'S');   // TOTK_PROFILE_SLOW dumps: the measured window
+    prof_mark(now, 'A');
     memmove(fpd_frame + 1, fpd_frame, sizeof fpd_frame[0] * (FPD_HIST - 1));
     fpd_frame[0].main = c->x[8], fpd_frame[0].cb0 = fpd_frame[0].cb1 = 0;
     uint32_t iv = ctrl ? LD32(ctrl + 0x40) : 0;   // the interval the controller chose at this frame's start
