@@ -796,5 +796,6 @@ NVN_API(nvnQueuePresentTexture) {
     o->ticket[idx] = o->presents;
     o->avail[idx] = slot + period;
     frame_step_present(slot, o->interval);   // frame_rate.c: the real-time step follows the display times
+    nvn_ts_present();   // nvn_api_core.c: the timestamps' hidden replay time starts again
     rt_frame_presented(t, o->presents);
 }

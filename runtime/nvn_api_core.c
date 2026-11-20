@@ -590,6 +590,52 @@ NVN_API(nvnQueueFinish) {
 #define LOD_RING 64
 static uint64_t lod_entered, lod_issued, lod_fence[LOD_RING];
 
+// TOTK_TS_HIDE_REPLAY (Bananza only, 1 by default, 0 or ab): a timestamp report carries its submit's entry tick
+// (vk_exec_xfer.c counter_cb), and Bananza's present-interval controller paces on such timestamps against its CPU
+// frame start. On the console a submit returns at once; here the replay runs inside it, on the game's submitting
+// thread, so the entry tick of a frame's later submits also counts the replay of its earlier ones. When that sum
+// pushed the frame past 1/60 s (terrain destruction on the 300 layer: 7 to 8 ms of replay a frame), the controller
+// asked for 2 or 3 vsyncs (the fps line's "interval 1/2/3+", 54/66/0 in one 2 s window) although the frame's work
+// fitted. With the switch on, the entry tick is moved back by the time this frame's earlier submits spent in the back
+// end, counted from the previous present (nvn_ts_present), and never before that present's tick, so the reports keep
+// their order and stay after anything the game read before the present.
+static int ts_hide_mode = -1, ts_log;   // ts_log: Bananza, where the perf line applies
+static uint64_t ts_hidden, ts_present, ts_win_frames, ts_win_sum, ts_win_max;   // ticks; window: perf line
+
+static int ts_hide_on(void) {
+    if (ts_hide_mode < 0) {
+        ts_log = !rt_game_version;
+        ts_hide_mode = ts_log ? rt_knob("TS_HIDE_REPLAY", "1") : 0;
+        if (ts_log)
+            rt_log("nvn: timestamp reports %s (TOTK_TS_HIDE_REPLAY=%s)",
+                   ts_hide_mode ? "leave out the replay time of the frame's earlier submits" : "carry the submit's entry tick",
+                   ts_hide_mode == 2 ? "ab" : ts_hide_mode ? "1" : "0");
+    }
+    return RT_KNOB_ON(ts_hide_mode);
+}
+
+static uint64_t ts_submit_tick(uint64_t entry) {
+    if (!ts_hide_on()) return entry;
+    uint64_t hidden = __atomic_load_n(&ts_hidden, __ATOMIC_RELAXED), floor = __atomic_load_n(&ts_present, __ATOMIC_RELAXED);
+    uint64_t t = entry > hidden ? entry - hidden : 0;
+    return t > floor ? t : floor < entry ? floor : entry;
+}
+
+// nvnQueuePresentTexture: the frame's replay time starts again from 0; with TOTK_TRACE=perf the replay time each frame
+// hid is logged every 120 presents.
+void nvn_ts_present(void) {
+    uint64_t h = __atomic_exchange_n(&ts_hidden, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&ts_present, rt_ticks(), __ATOMIC_RELAXED);
+    if (!(rt_trace & RT_TRACE_PERF) || !ts_log) return;
+    ts_win_sum += h;
+    if (h > ts_win_max) ts_win_max = h;
+    if (++ts_win_frames < 120) return;
+    rt_log("nvn: time inside the frame's submits: avg %.2f ms max %.2f ms a frame, %s the timestamps of its later submits",
+           rt_ticks_to_ns(ts_win_sum) / 1e6 / (double)ts_win_frames, rt_ticks_to_ns(ts_win_max) / 1e6,
+           ts_hide_on() ? "left out of" : "kept in");
+    ts_win_frames = ts_win_sum = ts_win_max = 0;
+}
+
 // void nvnQueueSubmitCommands(NVNqueue *q, int n, const NVNcommandHandle *handles): replayed on this thread with its
 // core given up (section 2.2), or queued for the replay thread (TOTK_REPLAY_ASYNC, vk_backend.c); the newest fence
 // value is what QueueFenceSync records. With the queue the fence covers replay and GPU, so the LOD guard below waits
@@ -616,7 +662,8 @@ NVN_API(nvnQueueSubmitCommands) {
         if (hs != local) free(hs);
     } else {
         nvn_submit_prepare(h, n);
-        f = gfx_backend()->submit(h, n, submitted);
+        f = gfx_backend()->submit(h, n, ts_submit_tick(submitted));
+        __atomic_fetch_add(&ts_hidden, rt_ticks() - submitted, __ATOMIC_RELAXED);
     }
     uint64_t prev = __atomic_load_n(&last_fence, __ATOMIC_RELAXED);
     while (f > prev && !__atomic_compare_exchange_n(&last_fence, &prev, f, 1, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {}

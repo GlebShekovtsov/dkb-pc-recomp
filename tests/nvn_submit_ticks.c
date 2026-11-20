@@ -55,6 +55,11 @@ static void free_views(void *p) { (void)p;abort(); }
 uint64_t kern_now_ns(void) { return now_ns; }
 uint64_t rt_ticks(void) { return clock_tick; }
 uint64_t rt_ns_to_ticks(uint64_t ns) { return ns/32; }
+uint64_t rt_ticks_to_ns(uint64_t t) { return t*32; }
+// TOTK_TS_HIDE_REPLAY at its default: the fixture's clock does not move inside a submit, so no time is hidden and
+// each report keeps its entry tick.
+int rt_knob(const char *name,const char *def) { (void)name;return strcmp(def,"0")!=0; }
+int rt_ab(void) { return 0; }
 void rt_log(const char *fmt,...) { (void)fmt; }
 void rt_fatal(const char *fmt,...) { (void)fmt;abort(); }
 void nvn_called(uint8_t *p,const char *n) { (void)p;(void)n; }

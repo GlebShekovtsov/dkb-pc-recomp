@@ -110,6 +110,8 @@ uint32_t nvn_copy_depth(uint64_t handle);                  // tests: the longest
 uint32_t nvn_copy_zombies(void);                           // tests: released copies still named or read
 uint64_t nvn_handle_bytes(uint64_t handle);                // bytes of the copy, OP_BEGIN to OP_END; 0 if not live
 uint64_t nvn_submit_count(void);                           // QueueSubmitCommands calls so far
+void nvn_ts_present(void);                                 // QueuePresentTexture: timestamp reports' hidden replay time
+                                                           // starts again (nvn_api_core.c TOTK_TS_HIDE_REPLAY)
 const char *nvn_op_name(uint32_t op);                      // "DRAW_IDX", ...; "?" past OP_COUNT_
 // MemoryPoolInvalidateMappedRange: the CPU is about to read pool storage the GPU wrote. Weak no-op in nvn_ext.c; a back
 // end that renders into host-side copies defines it and writes them back.
