@@ -269,3 +269,12 @@ site fontk main 5818c8 b9400769 b9400769 531f7929
 set dkbnative DKB_NATIVE_AA 0
 site dkbnative main 325bb0 b94012c8 52800048  # ldr w8, [x22, #0x10] -> mov w8, #2
 site dkbnative main 325d10 b9401289 52800049  # ldr w9, [x20, #0x10] -> mov w9, #2
+
+# Diagnostic: what Bananza's present-interval controller (main+204a18) measures, logged by runtime/frame_rate.c
+# (fpd_main, fpd_cb0, fpd_cb1). Each site keeps its original instruction and then calls a patch page slot, +0x280,
+# +0x290 or +0x2a0. The three functions save LR in their prologues and set it again before their next use of it, so
+# the BL keeps their returns. 3.2.0 addresses only.
+set fpdiag TOTK_FP_DIAG 0
+site fpdiag main 20383c f9009668 f9009668 94983291  # str x8, [x19, #0x128]: the main thread's part of the frame
+site fpdiag main 204240 8b090108 8b090108 94983014  # add x8, x8, x9 after the timed callback(0)
+site fpdiag main 2042e0 8b0802a8 8b0802a8 94982ff0  # add x8, x21, x8 after the timed callback(1)

@@ -26,8 +26,9 @@ the field-of-view factor (runtime/resolution.c res_fov_live, set fov), +0x100..0
 size and aspect (runtime/dkb_wide.c), +0x114..0x117 and +0x11c..0x11f its UI projection divisors, +0x118..0x11b the Bananza 3D scene ratio (runtime/dkb_wide.c), +0x120..0x127 the Bananza 3.2.0 3D image scale
 (runtime/dkb_wide.c dkb_wide_scene), +0x200..0x24f the five Bananza mouse-camera host dispatch slots
 (runtime/dkb_camera.c), +0x250..0x25f the Bananza 3.2.0 radial blur lifetime slot (runtime/frame_rate.c
-blur_frames), +0x260..0x26f the Bananza damped velocity slot (runtime/frame_rate.c damped_sum), and +0x270..0x27f the Bananza
-Vert+ slot (runtime/dkb_wide.c vert_plus). A new set
+blur_frames), +0x260..0x26f the Bananza damped velocity slot (runtime/frame_rate.c damped_sum), +0x270..0x27f the Bananza
+Vert+ slot (runtime/dkb_wide.c vert_plus), and +0x280..0x2af the three slots of the Bananza 3.2.0 interval
+controller diagnostic (runtime/frame_rate.c fpd_main, fpd_cb0, fpd_cb1). A new set
 takes words outside these.
 
 The replacement words are lifted at the site's address in place of the original instruction, and the generated C reads

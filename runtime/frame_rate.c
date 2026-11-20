@@ -157,8 +157,91 @@ static void damped_sum(Cpu *c) {
     set_f32(c, 12, INFINITY);
 }
 
+// ---- TOTK_FP_DIAG=1 (Bananza 3.2.0, set fpdiag in recomp/patches-dkb458752.txt): what the present-interval controller
+// measures. The controller (main+0x204a18) turns the frame's +0x128 ticks into floor(seconds * 60 + bias) + 1 vsyncs
+// (bias: the controller's +8 float), clamped to its +0 and +4 and raised only after +0xc frames in a row. +0x128 is
+// the time from the frame's start (+0xf0) to the end of the main thread's three frame calls (main+0x20383c, slot
+// +0x280), plus two callback calls through the frame's +0x158 timed around them (main+0x204240 with argument 0, slot
+// +0x290; main+0x2042e0 with argument 1, slot +0x2a0), which run in the next call (vtable +0x110) before the next
+// start. Each slot runs after the original instruction, so it sees the value the game keeps. Every 120 frames a line
+// gives the three parts and their sum (avg and max ms), the frames whose sum passed 1/60 s and the controller's
+// intervals; each change of interval gets a line with the parts of the three frames before it (the first 200).
+#define FPD_HIST 4
+static struct { uint64_t main, cb0, cb1; } fpd_frame[FPD_HIST];   // [0] the frame in progress
+static uint64_t fpd_obj, fpd_n, fpd_sum[4], fpd_max[4], fpd_over, fpd_iv[4], fpd_changes;
+static uint32_t fpd_last_iv;
+
+static double fpd_ms(uint64_t ticks) { return rt_ticks_to_ns(ticks) / 1e6; }
+static double fpd_f32(uint32_t bits) {
+    float f;
+    memcpy(&f, &bits, 4);
+    return f;
+}
+
+static void fpd_window(void) {
+    if (!fpd_n) return;
+    double n = (double)fpd_n;
+    rt_log("fpdiag: %llu frames: main %.2f/%.2f ms, callback(0) %.2f/%.2f, callback(1) %.2f/%.2f, measured %.2f/%.2f "
+           "(avg/max); over 1/60 s %llu; interval 1/2/3+ %llu/%llu/%llu",
+           (unsigned long long)fpd_n, fpd_ms(fpd_sum[0]) / n, fpd_ms(fpd_max[0]), fpd_ms(fpd_sum[1]) / n,
+           fpd_ms(fpd_max[1]), fpd_ms(fpd_sum[2]) / n, fpd_ms(fpd_max[2]), fpd_ms(fpd_sum[3]) / n, fpd_ms(fpd_max[3]),
+           (unsigned long long)fpd_over, (unsigned long long)fpd_iv[1], (unsigned long long)fpd_iv[2],
+           (unsigned long long)fpd_iv[3]);
+    memset(fpd_sum, 0, sizeof fpd_sum);
+    memset(fpd_max, 0, sizeof fpd_max);
+    memset(fpd_iv, 0, sizeof fpd_iv);
+    fpd_n = fpd_over = 0;
+}
+
+// main+0x20383c: str x8, [x19, #0x128]; x8 is the main thread's part of this frame, x19 the frame object. The frame
+// before it is complete: its two callbacks ran after its own store.
+static void fpd_main(Cpu *c) {
+    uint64_t obj = c->x[19], ctrl = LD64(obj + 0x218);
+    if (fpd_obj != obj) {
+        fpd_obj = obj;
+        rt_log("fpdiag: frame object %#llx, controller %#llx: interval %u..%u, bias %.3f, %u frames to raise; "
+               "callback %#llx", (unsigned long long)obj, (unsigned long long)ctrl, ctrl ? LD32(ctrl) : 0,
+               ctrl ? LD32(ctrl + 4) : 0, fpd_f32(ctrl ? LD32(ctrl + 8) : 0), ctrl ? LD32(ctrl + 0xc) : 0,
+               (unsigned long long)LD64(obj + 0x158));
+    }
+    if (fpd_frame[0].main) {
+        uint64_t parts[4] = {fpd_frame[0].main, fpd_frame[0].cb0, fpd_frame[0].cb1, 0};
+        parts[3] = parts[0] + parts[1] + parts[2];
+        for (int k = 0; k < 4; k++) {
+            fpd_sum[k] += parts[k];
+            if (parts[k] > fpd_max[k]) fpd_max[k] = parts[k];
+        }
+        if (parts[3] * 60 > rt_tick_hz()) fpd_over++;
+        fpd_n++;
+    }
+    memmove(fpd_frame + 1, fpd_frame, sizeof fpd_frame[0] * (FPD_HIST - 1));
+    fpd_frame[0].main = c->x[8], fpd_frame[0].cb0 = fpd_frame[0].cb1 = 0;
+    uint32_t iv = ctrl ? LD32(ctrl + 0x40) : 0;   // the interval the controller chose at this frame's start
+    fpd_iv[iv < 1 ? 1 : iv > 3 ? 3 : iv]++;
+    if (fpd_last_iv && iv != fpd_last_iv && fpd_changes++ < 200)
+        rt_log("fpdiag: interval %u -> %u after frames of main/callback(0)/callback(1) ms: %.2f/%.2f/%.2f, "
+               "%.2f/%.2f/%.2f, %.2f/%.2f/%.2f (newest first)", fpd_last_iv, iv,
+               fpd_ms(fpd_frame[1].main), fpd_ms(fpd_frame[1].cb0), fpd_ms(fpd_frame[1].cb1),
+               fpd_ms(fpd_frame[2].main), fpd_ms(fpd_frame[2].cb0), fpd_ms(fpd_frame[2].cb1),
+               fpd_ms(fpd_frame[3].main), fpd_ms(fpd_frame[3].cb0), fpd_ms(fpd_frame[3].cb1));
+    fpd_last_iv = iv;
+    if (fpd_n >= 120) fpd_window();
+}
+
+// main+0x204240: add x8, x8, x9 after the timed callback(0): x0 and x21 the ticks after and before it.
+static void fpd_cb0(Cpu *c) { fpd_frame[0].cb0 += c->x[0] - c->x[21]; }
+// main+0x2042e0: add x8, x21, x8 after the timed callback(1): x21 its ticks.
+static void fpd_cb1(Cpu *c) { fpd_frame[0].cb1 += c->x[21]; }
+
 void frame_step_init(void) {
     int fps60 = rt_patch_set("fps60"), realtime = rt_patch_set("realtime"), cloth = rt_patch_set("cloth");
+    int fpdiag = rt_patch_set("fpdiag");
+    if (rt_patch_enabled(fpdiag)) {   // the main thread alone runs these sites, one frame after another
+        rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + 0x280, fpd_main);
+        rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + 0x290, fpd_cb0);
+        rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + 0x2a0, fpd_cb1);
+        rt_log("fpdiag: logging the present-interval controller's measure (TOTK_FP_DIAG=1)");
+    }
     if (realtime < 0) {
         no_table = 1;
         rt_log("frame rate: no timing patch table; using the game's original frame timing");
